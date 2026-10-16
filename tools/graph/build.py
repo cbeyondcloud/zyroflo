@@ -2629,7 +2629,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                                                                   c["name"]),
                                       "parsers": freshness.parser_stamp(
                                           c["name"], act, closure, probe, parser_of, root,
-                                          components, memo, version=versioner)}
+                                          components, memo, version=versioner),
+                                      # What it read from other components (T632).
+                                      "closure_inputs": freshness.closure_record(
+                                          c["name"], act, closure, stamp_inputs)}
                           for c in pub_components}
                 try:
                     digests = snapshot_lib.publish(root, pub_components, facts, stamps)

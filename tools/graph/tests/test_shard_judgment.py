@@ -224,7 +224,9 @@ class State:
     unparsed: dict = field(default_factory=dict)
 
 
-REFUSED_A = {"a": "refused", "b": "stale"}     # its stamps unreadable: `b` cannot compare
+#: Its stamps unreadable: `main` called `b` stale, unable to compare; `b` judges its own record of
+#: `a`'s files, which have not moved (batch 22, T632; decision 48 drops `main`'s three reasons).
+REFUSED_A = {"a": "refused", "b": "current"}
 REFUSED_A_ALONE = {"a": "refused", "b": "current"}
 STATES = [
     State("current", {"a": "current", "b": "current"}),
@@ -232,9 +234,9 @@ STATES = [
           damage=edit_file("b", "app.py", producer("OTHER"))),
     State("inputs-changed-elsewhere", {"a": "stale", "b": "stale"},
           damage=edit_file("a", "docker-compose.yml", compose(svc("b", "../b", "web-2")))),
-    State("no-shard", {"a": "missing", "b": "stale"},
+    State("no-shard", {"a": "missing", "b": "current"},
           damage=lambda where: shutil.rmtree(gdir(where))),
-    State("no-stamps", {"a": "stale", "b": "stale"}, damage=no_stamps),
+    State("no-stamps", {"a": "stale", "b": "current"}, damage=no_stamps),
     State("no-parser-stamp", {"a": "stale", "b": "current"},
           damage=lambda where: edit_manifest(where, lambda m: m.pop("parsers"))),
     State("manifest-a-directory", REFUSED_A, damage=a_directory_at(SN.MANIFEST),

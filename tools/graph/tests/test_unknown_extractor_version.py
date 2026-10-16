@@ -21,12 +21,9 @@ from __future__ import annotations
 
 import compileall
 import json
-import os
 import shutil
 import subprocess
 import sys
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -36,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.graph import snapshot as SN  # noqa: E402
 from tools.graph.tests._estate import compose, lay_down, producer, svc  # noqa: E402
+from tools.graph.tests import _unreadable as U  # noqa: E402
 from tools.graph.tests._harness_copy import copy_harness  # noqa: E402
 from tools.graph.tests.test_report_hygiene import strings  # noqa: E402
 
@@ -46,32 +44,11 @@ UNKNOWN = (f"a file of the extraction code could not be read: `{MEMBER}` (Permis
            f"make it readable)")
 REFUSAL = (f"!! a file of the extraction code could not be read: `{MEMBER}` (Permission "
            f"denied) - make it readable, then publish again")
-#: Holds an exclusive lock on every byte of the file it is handed until its stdin closes.
-LOCKER = ("import msvcrt, os, sys\n"
-          "f = open(sys.argv[1], 'r+b')\n"
-          "msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, os.path.getsize(sys.argv[1]))\n"
-          "print('locked', flush=True)\n"
-          "sys.stdin.read()\n")
-#: The unprivileged user a door runs as where the suite runs as root (`nobody`).
-NOBODY = 65534
-
-
-def as_root() -> bool:
-    return os.name != "nt" and os.geteuid() == 0
-
-
 @pytest.fixture
 def site(tmp_path):
-    """Where the copy and the fixture live: pytest's temp dir, or - where the suite runs as
-    root and the door as `nobody` - a directory outside pytest's `0o700` temp root."""
-    if not as_root():
-        yield tmp_path
-        return
-    base = Path(tempfile.mkdtemp(prefix="b22_unknown_", dir="/tmp"))
-    try:
-        yield base
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
+    """Where the copy and the fixture live (`_unreadable.site`)."""
+    with U.site(tmp_path) as where:
+        yield where
 
 
 class Doors:
@@ -87,11 +64,8 @@ class Doors:
         # door writes no bytecode where PYTHONDONTWRITEBYTECODE is set.
         compileall.compile_dir(str(self.harness / "tools"), quiet=1)
         assert list((self.harness / "tools/graph/__pycache__").glob("freshness.*.pyc"))
-        self.kwargs: dict = {}
-        if as_root():
-            for path in [site, *site.rglob("*")]:
-                os.chown(path, NOBODY, NOBODY, follow_symlinks=False)
-            self.kwargs = {"user": NOBODY, "group": NOBODY}
+        U.hand_over(site)
+        self.kwargs = U.door_kwargs()
 
     def run(self, *flags: str, out: str = "out") -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -106,35 +80,9 @@ class Doors:
                 for p in sorted((self.site / "ws").rglob("*")) if p.is_file()
                 and SN.SHARD_DIR.as_posix() in p.as_posix()}
 
-    @contextmanager
     def unreadable(self):
-        """`freshness.py` really unreadable while the block runs, the premise asserted: the
-        read fails, as the door's user."""
-        path = self.member
-        if os.name == "nt":
-            locker = subprocess.Popen([sys.executable, "-c", LOCKER, str(path)],
-                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      text=True)
-            try:
-                assert locker.stdout.readline().strip() == "locked"
-                with pytest.raises(PermissionError):
-                    path.read_bytes()
-                yield
-            finally:
-                locker.stdin.close()
-                locker.wait(timeout=60)
-            return
-        mode = path.stat().st_mode
-        os.chmod(path, 0)
-        try:
-            probe = subprocess.run(
-                [sys.executable, "-c", f"open({str(path)!r}, 'rb').read()"],
-                capture_output=True, text=True, **self.kwargs)
-            assert probe.returncode != 0 and "PermissionError" in probe.stderr, (
-                probe.returncode, probe.stderr)
-            yield
-        finally:
-            os.chmod(path, mode)
+        """`freshness.py` really unreadable while the block runs (`_unreadable.unreadable`)."""
+        return U.unreadable(self.member)
 
 
 def lines(proc: subprocess.CompletedProcess, prefix: str) -> list[str]:

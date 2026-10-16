@@ -100,6 +100,12 @@ def _stamp_block_fault(recorded: dict) -> str | None:
             isinstance(k, str) and (type(v) is bool or (isinstance(v, str) and v))
             for k, v in parsers.items()):
         return "`parsers` is not a mapping of versions"
+    record = recorded.get("closure_inputs", {})
+    if not isinstance(record, dict) or not all(
+            isinstance(comp, str) and isinstance(per, dict)
+            and all(isinstance(e, str) and isinstance(d, str) for e, d in per.items())
+            for comp, per in record.items()):
+        return "`closure_inputs` is not a mapping of components to digests"
     return None
 
 
@@ -155,7 +161,8 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     `stamps` is the item-12 freshness layer: per-extractor input digests plus the
     extractor version and config digest the shard was built under, and (batch 16) the
     `parsers` the readers of its files needed, each with its version or `false` where it
-    was missing (batch 22) - which leaves the shard's own bytes as they were. Every value is
+    was missing, and (batch 22, T632) the `closure_inputs` it read from other components -
+    which leaves the shard's own bytes as they were. Every value is
     **content-derived** — the same tree, workspace config, harness version and installed
     parser versions produce the same bytes — so item 13's no-run-metadata rule holds: a
     rebuild of an unchanged tree still diffs nothing. A commit SHA would not survive that
@@ -165,8 +172,9 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     emit.write_jsonl(dir_ / SHARD, facts, extractor="shard")
     emit.write_unresolved(dir_ / SHARD_UNRESOLVED, facts.unresolved)
     digest = _digest(dir_)
-    # 3 since batch 22 (D22-24): a parser's version is a new shape. The number gates no
-    # reading: the reader keys on the keys a manifest holds (D22-34).
+    # 3 since batch 22 (D22-24): a parser's version and the cross-component record are new
+    # shapes. The number gates no reading: the reader keys on the keys a manifest holds
+    # (D22-34).
     manifest = {"schema_version": 3, "sha256": digest, **(stamps or {})}
     # LF on every platform (batch-2 review, F3): committed beside the shards it digests.
     (dir_ / MANIFEST).write_text(
@@ -243,6 +251,10 @@ def stamps_of(recorded: dict | None) -> dict | None:
               "sha256": recorded.get("sha256", "")}
     if "parsers" in recorded:
         stamps["parsers"] = recorded["parsers"]
+    # Batch 22 (T632): the record rides along only where the manifest has it - its absence is
+    # claim 9's old-shard case, never an empty record.
+    if "closure_inputs" in recorded:
+        stamps["closure_inputs"] = recorded["closure_inputs"]
     return stamps
 
 

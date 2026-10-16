@@ -50,7 +50,7 @@ class Feed:
         self.components = [{"name": c, "path": c} for c in FEED]
         self.regs = B.discover_extractors()
         self.act = B.activate(self.regs, self.components, self.root, workspace=self.components)
-        self.closure = B.requires_closure(self.regs)
+        self.closure = B.cross_closure(self.regs)   # what the build hands the verdict
         self.parser_of = B.parser_rule(self.regs)
         self.digests = B.input_digests(self.act, self.components, self.root)
         self.version = B.extractor_version(self.regs)
@@ -77,7 +77,10 @@ class Feed:
         return SN.ShardReading(stamps={"inputs": dict(self.digests.get(name, {})),
                                        "extractor_version": self.version,
                                        "config_sha": self.config[name], "sha256": "0" * 64,
-                                       "parsers": stamp}, facts=ExtractResult())
+                                       "parsers": stamp,
+                                       "closure_inputs": F.closure_record(
+                                           name, self.act, self.closure, self.digests)},
+                                facts=ExtractResult())
 
     def judge(self, **readings: SN.ShardReading) -> dict[str, F.Verdict]:
         full = {c["name"]: readings.get(c["name"]) or self.current(c["name"])

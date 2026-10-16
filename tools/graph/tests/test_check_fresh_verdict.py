@@ -122,13 +122,13 @@ def test_a_dependent_is_listed_beside_the_component_whose_inputs_moved(tmp_path)
     assert proc.returncode == 2 and proc.stderr == "", proc.stdout + proc.stderr
     assert lines(proc, "STALE") == [
         "freshness: STALE a - files read by compose-services, openapi-specs changed",
-        "freshness: STALE b - depends on compose-services, whose inputs changed in another "
-        "component"]
+        "freshness: STALE b - depends on compose-services, whose inputs in a changed since its "
+        "shard was published"]
     assert verdict(tmp_path)["freshness"] == {
         "fresh": [], "refused": {}, "unparsed": {}, **NO_REMEDY,
         "stale": {"a": "files read by compose-services, openapi-specs changed",
-                  "b": "depends on compose-services, whose inputs changed in another "
-                       "component"}}
+                  "b": "depends on compose-services, whose inputs in a changed since its "
+                       "shard was published"}}
 
 
 def test_a_current_shard_whose_parser_is_still_missing_is_noted_at_exit_0(
