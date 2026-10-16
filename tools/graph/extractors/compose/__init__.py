@@ -207,6 +207,8 @@ class Claim(NamedTuple):
     build_from: str = ""    # `<file>:<line>` of the base whose build placed it (T620)
     unfollowed: str = ""    # why its `extends:` chain could not be followed - a row (T620)
     extends: str = ""       # the base that could not be followed, as written ("" for none)
+    image: str = ""         # the image its service runs with, as compose merges it (batch 23)
+    image_from: str = ""    # `<file>:<line>` writing that image, where its own declaration does not
 
 
 def _layout(ctx: ExtractContext) -> dict[str, str]:
@@ -534,6 +536,11 @@ class Chain(NamedTuple):
     #: places it (review B21-18). For the edge and the row only - never for T588's layering,
     #: since a context-less build leaves its base file's context standing (review B21-25).
     declared_at: str = ""
+    #: The first `image:` a base up the chain writes - its value node - and the `<file>:<line>`
+    #: writing it, the chain walked whole, past the base whose context places the build (batch
+    #: 23, D23-86): compose merges a base's `image:` into a service that writes none.
+    image: Any = None
+    image_from: str = ""
 
 
 def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
@@ -545,9 +552,15 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     compose resolves every base: one the graph cannot reach is a row, named through the bases
     it was reached by (batch 21's review). Where it breaks before any context, the service
     keeps its own reading. `index` maps a file to its services `(body, line)`;
-    `follow(file_dir, written)` is `reach` for this component."""
+    `follow(file_dir, written)` is `reach` for this component. The first `image:` a base
+    writes is read off the base's own node, which `index` keeps beside its body (D23-95)."""
     current, cur_name, cur_rel = service, name, rel
     seen = {(rel, name)}
+    img: tuple[Any, str] = (None, "")
+
+    def done(chain: Chain) -> Chain:
+        return chain._replace(image=img[0], image_from=img[1])
+
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
     # The first base declaring a `build:` with no context: with none written up the chain, its
@@ -558,6 +571,10 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     while True:
         did, explicit, context = _explicit_context(current)
         mine = (cur_rel, cur_name) == (rel, name)
+        if not mine and img[0] is None:
+            written_image = _yaml.mapping_get(index[cur_rel][cur_name][2], "image")
+            if written_image is not None:
+                img = (written_image, f"{cur_rel}:{_yaml.line_of(written_image)}")
         if found is None:
             declares = declares or did
             if did and not mine and not declared_at and not own_build:
@@ -569,9 +586,9 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
         # Present, even written as null, is an `extends:` to follow or row (review B21-19).
         if not (isinstance(current, dict) and "extends" in current):
             if found is not None:
-                return Chain(*found, "", "")
-            return Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
-                         declared_at)
+                return done(Chain(*found, "", ""))
+            return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
+                              declared_at))
         ext = current["extends"]
         base_name, base_file = ((ext, None) if isinstance(ext, str) else
                                 (ext.get("service"), ext.get("file")) if isinstance(ext, dict)
@@ -597,10 +614,10 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
                 why = f"extends `{named}`, which `{base_rel}` does not declare as a service"
         if why:
             if found is not None:
-                return Chain(*found, written, via + why)
+                return done(Chain(*found, written, via + why))
             # What the chain declared up to the break stands, as where it ends (review B21-18).
-            return Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
-                         via + why, declared_at)
+            return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
+                              via + why, declared_at))
         seen.add((base_rel, named))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
@@ -635,7 +652,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int, tuple[str, str, str, bool, bool]]] = []
+                       int, tuple[str, str, str, bool, bool], tuple[Any, str]]] = []
     building = False
 
     def dir_of(rel: str) -> str:
@@ -646,11 +663,13 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     # declaration of a name, where two keys YAML types apart spell one (B10-14).
     declared = {rel: [(k, v, _body(v)) for k, v in _yaml.mapping_pairs(services_node)]
                 for rel, services_node in parsed}
-    index: dict[str, dict[str, tuple[Any, int]]] = {}
+    # Each base's value node is kept beside its body, so a chain reads the `image:` it writes
+    # and the line writing it, which the constructed body cannot give (D23-95).
+    index: dict[str, dict[str, tuple[Any, int, Any]]] = {}
     for rel, items in declared.items():
-        for key_node, _node, body in items:
+        for key_node, value_node, body in items:
             index.setdefault(rel, {}).setdefault(str(key_node.value),
-                                                 (body, _yaml.line_of(key_node)))
+                                                 (body, _yaml.line_of(key_node), value_node))
 
     def follow(file_dir: str, written: Any) -> tuple[str, str]:
         return reach(file_dir, written, base=base, layout=layout, own=repo.alias,
@@ -664,6 +683,11 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             declares, context = _context_of(service)
             context_dir, followed = file_dir, ("", "", "", False, False)
             where, extended_from = "this file", ""
+            # The image it runs with (batch 23): an `image:` it writes decides, as compose
+            # merges a service's own key over a base's; else its chain's, below.
+            own_image = _yaml.mapping_get(node, "image")
+            imaged: tuple[Any, str] = ((own_image, f"{rel}:{_yaml.line_of(own_image)}")
+                                       if own_image is not None else (None, ""))
             if isinstance(service, dict) and "extends" in service:
                 chain = _through_extends(rel, name, service, index, dir_of, follow)
                 own = bool(_explicit_context(service)[1])
@@ -679,6 +703,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 # WROTE that build's context, which alone stops T588's layering (B21-25).
                 followed = ((chain.build_from or chain.declared_at) if not own else "",
                             chain.why, chain.extends, own, bool(chain.build_from) and not own)
+                if own_image is None:
+                    imaged = (chain.image, chain.image_from)
             comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
                                        where=where)
                               if declares else ("", "", ""))
@@ -697,7 +723,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             view = env_view(repo.path / rel, service or {}, ctx.repos, name)
             pending.append((rel, name, node, service,
                             (declares, comp, why, within, how == "within"), view,
-                            _yaml.line_of(key_node), followed))
+                            _yaml.line_of(key_node), followed, imaged))
             if comp:
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
@@ -707,7 +733,12 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: B21-33) - which no override layers over its base (T588); a base's context-less build
     #: leaves that context standing.
     brought: set[tuple[str, int]] = set()
-    for rel, name, node, service, decl, view, line, followed in pending:
+    #: Per declaration - `(file, its index in that file's declarations)` - the image it runs
+    #: with (its value node, the `<file>:<line>` writing it), and where its OWN `image:` is
+    #: written ("" where it writes none).
+    imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
+    own_place: dict[tuple[str, int], str] = {}
+    for rel, name, node, service, decl, view, line, followed, imaged in pending:
         frm, unfollowed, written, _own, context_brought = followed
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
@@ -718,6 +749,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         items = decls.setdefault(rel, [])
         if context_brought:
             brought.add((rel, len(items)))
+        imaged_of[(rel, len(items))] = imaged
+        own_written = _yaml.mapping_get(node, "image")
+        own_place[(rel, len(items))] = (f"{rel}:{_yaml.line_of(own_written)}"
+                                        if own_written is not None else "")
         items.append(Decl(name, node, service, claim, line))
     for override, base_rel in layers.items():
         if override not in decls:
@@ -732,6 +767,29 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             if decl.name in inherited and not _context_of(decl.service)[0]
             and (override, k) not in brought else decl
             for k, decl in enumerate(decls[override])]
+    # The image each claim's service runs with (batch 23), set after the layering so an
+    # override's inherited claim never carries its base's superseded image: a T588 package
+    # runs the override's image - its own `image:`, else its chain's - else its base
+    # declaration's, computed ONCE, and BOTH its claims carry it (D23-153, D23-158, D23-166);
+    # `image_from` cites where it is written wherever a claim's own declaration does not.
+    runs = dict(imaged_of)
+    for override, base_rel in layers.items():
+        first: dict[str, int] = {}
+        for kb, decl in enumerate(decls.get(base_rel, [])):
+            first.setdefault(decl.name, kb)
+        for k, decl in enumerate(decls.get(override, [])):
+            if decl.name in first:
+                o_key, b_key = (override, k), (base_rel, first[decl.name])
+                runs[o_key] = runs[b_key] = (imaged_of[o_key] if imaged_of[o_key][0] is not None
+                                             else imaged_of[b_key])
+    for rel, items in decls.items():
+        for k, decl in enumerate(items):
+            image_node, place = runs.get((rel, k), (None, ""))
+            text = (_yaml.scalar_text(image_node).strip()
+                    if isinstance(image_node, props.yaml.ScalarNode) else "")
+            if text:
+                items[k] = decl._replace(claim=decl.claim._replace(
+                    image=text, image_from="" if place == own_place[(rel, k)] else place))
     # Worded from the claim each ends with - an override's is its base's - since the claim
     # stays the component's only where no build places it (batch 21's review).
     return {rel: [decl._replace(claim=_unfollowed_worded(decl)) if decl.claim.unfollowed
@@ -817,6 +875,7 @@ UNRESOLVED_FIELDS = {
     "compose-build-ambiguous": ('service', 'components'),
     "compose-extends-unresolved": ('service', 'extends'),
     "compose-include-unresolved": ('include',),
+    "compose-image-unresolved": ('service',),
 }
 
 
@@ -1067,6 +1126,12 @@ class ComposeExtractor:
         if placed.build_from:
             # T620: placed by the build a base declares - where, so the edge cites it.
             edge_props["build_from"] = placed.build_from
+        if placed.image:
+            # Batch 23: the image it runs with, as compose merges it, and where that image is
+            # written wherever its own declaration does not write it.
+            edge_props["image"] = placed.image
+            if placed.image_from:
+                edge_props["image_from"] = placed.image_from
         res.edges.append(Edge(
             src=deploy, type="DG_DEPLOYS", dst=placed.target, source_file=rel, line=line,
             extractor=self.name, confidence=1.0, props=edge_props,
@@ -1079,6 +1144,13 @@ class ComposeExtractor:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-extends-unresolved", rel, line,
                 f"`{name}` {placed.unfollowed}", service=name, extends=placed.extends))
+        written_image = _yaml.mapping_get(node, "image")
+        if isinstance(written_image, (props.yaml.MappingNode, props.yaml.SequenceNode)):
+            shape = "a mapping" if isinstance(written_image, props.yaml.MappingNode) else "a list"
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "compose-image-unresolved", rel, line,
+                f"`{name}`'s `image:` is {shape}, not one image reference, so it takes part in "
+                f"no image proposal; write it as one string", service=name))
         if placed.ambiguous:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-build-ambiguous", rel, line,
