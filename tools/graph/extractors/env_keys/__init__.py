@@ -202,6 +202,10 @@ class EnvKeysExtractor:
     """Environment keys code reads, and the values it declares inline for them."""
 
     name = "env-keys"
+    #: Every entry it writes is keyed by the component it ran for; what it reads of other
+    #: components comes through the producer it REQUIRES (batch 22, T633).
+    CACHE_SCOPE = "component"
+    CACHE_KEYS = (CACHE_KEY,)
     INPUT_GLOBS = ("*.py",)
     REQUIRES = ("compose-services",)
 

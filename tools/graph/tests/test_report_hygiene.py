@@ -143,35 +143,49 @@ def _report_after_build(tmp_path) -> dict:
                       .read_text(encoding="utf-8"))
 
 
+def strings(node):
+    """Every string a parsed document holds, its keys aside.
+
+    The PARSED values, never `json.dumps` of them. The first cut of this sweep searched the
+    serialized blob and PASSED at the pre-item SHA against a report carrying four absolute
+    paths, because json escapes a backslash: a Windows path with single separators is never a
+    substring of a document that spells them doubled. It was vacuous on exactly the platform
+    it was written on, and the red proof is what said so."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from strings(value)
+
+
+def _carries_no_coordinate(doc, *coordinates: Path) -> None:
+    found = list(strings(doc))
+    assert found, "the sweep looked at nothing"
+    for coordinate in map(str, coordinates):
+        carried = [v for v in found if coordinate in v]
+        assert not carried, (
+            f"the committed document carries {coordinate}, which is the build "
+            f"machine's directory layout published to every adopter: "
+            f"{carried[:3]}")
+
+
 def test_the_committed_report_carries_no_absolute_path(tmp_path):
     """**The property, swept over the whole document rather than the keys I
     happened to look at.** The walk named two paths; there were FOUR."""
-    doc = _report_after_build(tmp_path)
+    _carries_no_coordinate(_report_after_build(tmp_path), tmp_path, ROOT)
 
-    # The PARSED values, never `json.dumps` of them. The first cut of this test
-    # searched the serialized blob and PASSED at the pre-item SHA against a
-    # report carrying four absolute paths, because json escapes a backslash: a
-    # Windows path with single separators is never a substring of a document
-    # that spells them doubled. It was vacuous on exactly the platform it was
-    # written on, and the red proof is what said so.
-    def strings(node):
-        if isinstance(node, str):
-            yield node
-        elif isinstance(node, dict):
-            for value in node.values():
-                yield from strings(value)
-        elif isinstance(node, list):
-            for value in node:
-                yield from strings(value)
 
-    found = list(strings(doc))
-    assert found, "the sweep looked at nothing"
-    for coordinate in (str(tmp_path), str(ROOT)):
-        carried = [v for v in found if coordinate in v]
-        assert not carried, (
-            f"the committed report carries {coordinate}, which is the build "
-            f"machine's directory layout published to every adopter: "
-            f"{carried[:3]}")
+def test_the_load_report_and_the_run_manifest_carry_no_absolute_path_either(tmp_path):
+    """The sweep at the load's report and the run's `manifest.json` too (batch 22, D22-104):
+    both are written into `--out`, which a repository commits."""
+    work = ws(tmp_path)
+    run(work, "seed", "--publish-snapshot")
+    assert run(work, "loaded", "--from-snapshot") in (0, 2)
+    for doc in (tmp_path / "loaded" / "build_report.json", tmp_path / "seed" / "manifest.json"):
+        _carries_no_coordinate(json.loads(doc.read_text(encoding="utf-8")), tmp_path, ROOT)
 
 
 def test_the_workspace_block_keeps_its_identity_and_loses_its_coordinates(tmp_path):

@@ -93,7 +93,7 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 #: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
-#: records whether each was installed when it was built.
+#: records each one's version when it was built, or that it was missing (batch 22).
 PARSERS = ("yaml",)
 
 UNRESOLVED_FIELDS = {
@@ -649,6 +649,8 @@ class ConfigMapsExtractor:
     """The host map a deployment publishes — where service names become addresses."""
 
     name = "helm-configmaps"
+    #: The namespace it writes (batch 22).
+    CACHE_KEYS = (CACHE_KEY,)
     INPUT_GLOBS = TEMPLATE_GLOBS + VALUES_GLOBS + CHART_GLOBS
     #: Batch 15b: a deployment reader - the host maps it publishes are what the accounting
     #: rows judge a chart's addresses by - reading no file for a claim. It reads the values

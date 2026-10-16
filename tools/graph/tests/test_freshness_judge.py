@@ -25,7 +25,7 @@ from tools.graph.tests._estate import compose, lay_down, producer, svc  # noqa: 
 
 #: The kept words (ruling 29), as `main` prints them.
 MISSING = "no freshness stamps — no committed shard, or one published before stamps existed"
-EXTRACTORS_CHANGED = "the extractor set changed since its shard was published"
+EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
 STALE_CONFIG = "the workspace configuration changed since its shard was published"
 NO_PARSER_STAMP = "its shard was published before parser stamps existed"
 
@@ -44,6 +44,11 @@ BOTH = {"m": {"docker-compose.yml": compose(svc("x", "../x", "web-value")),
 DROP = object()
 
 
+def v(parser: str) -> str:
+    """The version `World` reads for every installed parser now (batch 22, T631)."""
+    return f"{parser}==1"
+
+
 class World:
     """A laid-down tree, judged with the real registry; `missing` is the parsers not installed
     now, and `current(name)` is the reading a publish of this tree now would leave."""
@@ -55,7 +60,7 @@ class World:
         self.regs = B.discover_extractors()
         self.act = B.activate(self.regs, self.components, self.root,
                               workspace=self.components)
-        self.closure = B.requires_closure(self.regs)
+        self.closure = B.cross_closure(self.regs)   # what the build hands the verdict
         self.parser_of = B.parser_rule(self.regs)
         self.digests = B.input_digests(self.act, self.components, self.root)
         self.version = B.extractor_version(self.regs)
@@ -65,14 +70,19 @@ class World:
     def probe(self, parser: str) -> bool:
         return parser not in self.missing
 
-    def stamp(self, name: str) -> dict[str, bool]:
+    def parser_version(self, parser: str) -> str:
+        return v(parser)
+
+    def stamp(self, name: str) -> dict[str, str | bool]:
         return F.parser_stamp(name, self.act, self.closure, self.probe, self.parser_of,
-                              self.root, self.components)
+                              self.root, self.components, version=self.parser_version)
 
     def current(self, name: str, **stamps) -> SN.ShardReading:
         recorded = {"inputs": dict(self.digests.get(name, {})),
                     "extractor_version": self.version, "config_sha": self.config[name],
-                    "sha256": "0" * 64, "parsers": self.stamp(name), **stamps}
+                    "sha256": "0" * 64, "parsers": self.stamp(name),
+                    "closure_inputs": F.closure_record(name, self.act, self.closure,
+                                                       self.digests), **stamps}
         return SN.ShardReading(stamps={k: v for k, v in recorded.items() if v is not DROP},
                                facts=ExtractResult())
 
@@ -84,7 +94,8 @@ class World:
         full = {c["name"]: readings[c["name"]] if c["name"] in readings
                 else self.current(c["name"]) for c in self.components}
         return F.judge(full, self.components, self.act, self.closure, self.digests,
-                       self.version, self.config, self.probe, self.parser_of, self.root)
+                       self.version, self.config, self.probe, self.parser_of, self.root,
+                       parser_version=self.parser_version)
 
 
 @pytest.fixture
@@ -154,7 +165,7 @@ def test_claim_7_a_shard_published_before_parser_stamps(feed):
 @pytest.mark.parametrize("stamped, missing, words", [
     ({"yaml": False}, set(),
      "its shard was published while `compose-services` had no parser installed"),
-    ({"yaml": True}, {"yaml"},
+    ({"yaml": v("yaml")}, {"yaml"},
      "its shard was published while `compose-services` had a parser that is no longer "
      "installed"),
     ({}, set(),
@@ -168,7 +179,7 @@ def test_claim_8_the_own_half_of_the_parser_stamp(feed, stamped, missing, words)
 def test_claim_8_joins_its_clauses_and_lists_readers_in_registry_order(tmp_path):
     world = World(tmp_path, BOTH)
     world.missing = {"yaml"}
-    assert world.judge(m=world.current("m", parsers={"java": False, "yaml": True}))["m"] == (
+    assert world.judge(m=world.current("m", parsers={"java": False, "yaml": v("yaml")}))["m"] == (
         stale(f"its shard was published while {JAVA_READERS} had no parser installed; its "
               f"shard was published while `compose-services` had a parser that is no longer "
               f"installed"))
@@ -193,54 +204,43 @@ def test_reader_lists_follow_the_registry_not_the_alphabet(tmp_path):
               f"installed"))
 
 
-def test_claim_9a_a_dependency_whose_inputs_moved_in_another_component(feed):
-    assert feed.judge(a=feed.moved("a", "compose-services"))["b"] == stale(
-        "depends on compose-services, whose inputs changed in another component")
+def test_claim_9a_a_dependency_whose_inputs_moved_since_its_publish(feed):
+    """Batch 22 (T632): claim 9 judges what the dependent read - its record - against what it
+    would be now; `test_closure_record.py` holds 9a's renderings, 9b and 9c."""
+    recorded = {"a": {"compose-services": "0" * 40}}
+    assert feed.judge(b=feed.current("b", closure_inputs=recorded))["b"] == stale(
+        "depends on compose-services, whose inputs in a changed since its shard was published")
 
 
-@pytest.mark.parametrize("reading, cause", [
-    (SN.ShardReading(absent="no shard"), "that has no committed shard"),
-    (SN.ShardReading(absent="no stamps"), "whose shard was published before stamps existed"),
-    (SN.ShardReading(refused="its committed snapshot.json exists but could not be read "
-                             "(not JSON)", remedy="re-publish", refusal_kind="manifest"),
-     "whose committed snapshot.json could not be read"),
+@pytest.mark.parametrize("reading", [
+    SN.ShardReading(absent="no shard"), SN.ShardReading(absent="no stamps"),
+    SN.ShardReading(refused="its committed snapshot.json exists but could not be read (not "
+                            "JSON)", remedy="re-publish", refusal_kind="manifest"),
 ], ids=["no-shard", "no-stamps", "manifest-unreadable"])
-def test_claim_9b_a_dependency_active_where_nothing_can_be_compared(feed, reading, cause):
-    assert feed.judge(a=reading)["b"] == stale(
-        f"depends on compose-services, active in another component {cause}")
-
-
-def test_claim_9b_names_the_first_cause_in_order(tmp_path):
-    """`compose-services` is active in `a` (no shard) and `c` (no stamps): its cause is the
-    first in order, whichever component is met last. `env-keys` is active only in `d` (no
-    stamps): a later cause, so the line leaves it out."""
-    estate = {**FEED, "c": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
-              "d": {"app.py": producer("OTHER")}}
-    world = World(tmp_path, estate)
-    verdicts = world.judge(a=SN.ShardReading(absent="no shard"),
-                           c=SN.ShardReading(absent="no stamps"),
-                           d=SN.ShardReading(absent="no stamps"))
-    assert verdicts["b"] == stale(
-        "depends on compose-services, active in another component that has no committed shard")
+def test_claim_9_reads_no_siblings_shard(feed, reading):
+    """Decision 48: `main`'s three `_UNCOMPARABLE` reasons - a sibling with no shard, no stamps
+    or a manifest that could not be read - are dropped: the record compares the sibling's
+    files, which have not moved."""
+    assert feed.judge(a=reading)["b"] == F.Verdict("current")
 
 
 @pytest.mark.parametrize("stamped, missing, words", [
     ({"yaml": False}, set(),
      "depends on compose-services, which had no parser installed when its shard was "
      "published"),
-    ({"yaml": True}, {"yaml"},
+    ({"yaml": v("yaml")}, {"yaml"},
      "depends on compose-services, whose parser was installed when its shard was published "
      "and is not now"),
     ({}, set(),
      "its shard's parser stamp does not record `yaml`, which compose-services it depends on "
      "now use"),
-    ({"yaml": True, "kotlin": True}, set(),
+    ({"yaml": v("yaml"), "kotlin": v("kotlin")}, set(),
      "its shard's parser stamp records `kotlin`, which nothing it reads uses now: what it "
      "depended on changed or left the tree"),
 ], ids=["installed-since", "removed-since", "a-name-the-stamp-lacks", "a-name-nothing-reaches"])
 def test_claim_10_the_closure_half_of_the_parser_stamp(feed, stamped, missing, words):
     feed.missing = missing
-    verdicts = feed.judge(a=feed.current("a", parsers={"yaml": not missing}),
+    verdicts = feed.judge(a=feed.current("a", parsers={"yaml": False if missing else v("yaml")}),
                           b=feed.current("b", parsers=stamped))
     assert verdicts["b"] == stale(words)
 
@@ -295,19 +295,23 @@ def test_own_claims_come_before_dependents(feed):
 
 
 def test_claim_9a_comes_before_9b(tmp_path):
+    """9a in `c` (a recorded pair whose digest moved) before 9b in `a` (a recorded pair with no
+    digest now), whichever component comes first."""
     estate = {**FEED, "c": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))}}
     world = World(tmp_path, estate)
-    verdicts = world.judge(a=world.moved("a", "compose-services"),
-                           c=SN.ShardReading(absent="no shard"))
-    assert verdicts["b"].words == (
-        "depends on compose-services, whose inputs changed in another component")
+    recorded = {"a": {"compose-services": world.digests["a"]["compose-services"]},
+                "c": {"compose-services": "0" * 40}}
+    world.digests = {**world.digests, "a": {k: d for k, d in world.digests["a"].items()
+                                            if k != "compose-services"}}
+    assert world.judge(b=world.current("b", closure_inputs=recorded))["b"].words == (
+        "depends on compose-services, whose inputs in c changed since its shard was published")
 
 
 def test_claim_9_comes_before_10(feed):
-    verdicts = feed.judge(a=feed.moved("a", "compose-services"),
-                          b=feed.current("b", parsers={"yaml": False}))
+    verdicts = feed.judge(b=feed.current("b", parsers={"yaml": False},
+                                         closure_inputs={"a": {"compose-services": "0" * 40}}))
     assert verdicts["b"].words == (
-        "depends on compose-services, whose inputs changed in another component")
+        "depends on compose-services, whose inputs in a changed since its shard was published")
 
 
 # ── the review focus ───────────────────────────────────────────────────────────────────────
@@ -315,7 +319,7 @@ def test_claim_9_comes_before_10(feed):
 
 def test_a_stamped_parser_no_reader_declares_is_stale_until_republished(feed):
     """Review focus 1: a removed profile reader's `kotlin` left in a stamp."""
-    verdicts = feed.judge(a=feed.current("a", parsers={"kotlin": True, "yaml": True}))
+    verdicts = feed.judge(a=feed.current("a", parsers={"kotlin": v("kotlin"), "yaml": v("yaml")}))
     assert verdicts["a"] == stale(
         "its shard's parser stamp records `kotlin`, which nothing it reads uses now: what it "
         "depended on changed or left the tree")
@@ -328,23 +332,22 @@ def test_both_halves_differing_say_the_own_half_first(tmp_path):
     stamped = {"java": False, "yaml": False}
     assert world.judge(x=world.current("x", parsers=stamped))["x"] == stale(
         f"its shard was published while {JAVA_READERS} had no parser installed")
-    assert world.judge(x=world.current("x", parsers={**stamped, "java": True}))["x"] == stale(
+    assert world.judge(x=world.current("x", parsers={**stamped, "java": v("java")}))["x"] == stale(
         "depends on compose-services, which had no parser installed when its shard was "
         "published")
 
 
-# ── `main`'s six dependent contributors ────────────────────────────────────────────────────
+# ── `main`'s six dependent contributors, all gone (batch 22, T632) ─────────────────────────
 
 
-def test_the_three_kept_contributors_mark_a_dependent(feed):
-    """The per-extractor stamp against its digest, the shared configuration, and a sibling
-    with nothing to compare (`st is None`)."""
-    assert feed.judge(a=feed.moved("a", "compose-services"))["b"].words.startswith(
-        "depends on compose-services, whose inputs changed")
-    assert feed.judge(a=feed.current("a", config_sha="old:own"))["b"].words.startswith(
-        "depends on compose-services, whose inputs changed")
-    assert feed.judge(a=SN.ShardReading(absent="no shard"))["b"].words.startswith(
-        "depends on compose-services, active in another component")
+def test_main_s_three_kept_contributors_no_longer_mark_a_dependent(feed):
+    """`main`'s per-extractor stamp against its digest, its shared configuration half, and a
+    sibling with nothing to compare: each a statement about the SIBLING, never about what the
+    dependent read - so a sibling edited and re-published after the dependent's publish left
+    it current (T632). The record compares the files, which have not moved here."""
+    assert feed.judge(a=feed.moved("a", "compose-services"))["b"] == F.Verdict("current")
+    assert feed.judge(a=feed.current("a", config_sha="old:own"))["b"] == F.Verdict("current")
+    assert feed.judge(a=SN.ShardReading(absent="no shard"))["b"] == F.Verdict("current")
 
 
 def test_the_three_dropped_contributors_do_not(feed):
@@ -362,13 +365,12 @@ def test_the_three_dropped_contributors_do_not(feed):
     assert feed.judge(a=tampered)["b"] == F.Verdict("current")
 
 
-def test_a_sibling_whose_extractor_set_changed_still_counts_its_moved_inputs(feed):
-    """Dropping the version contributor drops only its clause: the sibling's per-extractor
-    comparisons still count, as `main` counts them after it."""
+def test_a_sibling_whose_extractor_set_changed_and_inputs_moved_is_its_own_matter(feed):
+    """The sibling stale on its own two counts leaves the dependent to its record."""
     reading = feed.current("a", extractor_version="0",
                            inputs={**feed.digests["a"], "compose-services": "0" * 40})
-    assert feed.judge(a=reading)["b"] == stale(
-        "depends on compose-services, whose inputs changed in another component")
+    verdicts = feed.judge(a=reading)
+    assert verdicts["a"].state == "stale" and verdicts["b"] == F.Verdict("current")
 
 
 # ── guard 3 ────────────────────────────────────────────────────────────────────────────────
@@ -397,6 +399,14 @@ def _strings(path: Path) -> list[tuple[int, str]]:
             and id(node) not in docs]
 
 
+#: Code constants that spell a registered reader's name for another reason, each COUNTED, so a
+#: second use fails and a removed one leaves no stale allowance (batch 22): `build.py`'s
+#: directory rule for the extractor version - a `tests/` directory inside a package is left
+#: out (design pass 22, D22-70) - which the reader named `tests` shares by name, its own
+#: package held whole by the same rule, never a rule only it obeys.
+ALLOWED = {("build.py", "tests"): 1}
+
+
 @pytest.mark.parametrize("module", ["freshness.py", "build.py"])
 def test_the_verdict_and_the_build_name_no_registered_reader(module):
     """`freshness.py` and `build.py` name no reader (the note's guard 3): parsers come from
@@ -406,7 +416,9 @@ def test_the_verdict_and_the_build_name_no_registered_reader(module):
     assert {"compose-services", "orderflow-write-mappings", "join-by-name"} <= names
     found = [(line, name) for line, text in _strings(ROOT / "tools" / "graph" / module)
              for name in names if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text)]
-    assert found == []
+    allowed = {name: count for (mod, name), count in ALLOWED.items() if mod == module}
+    assert [hit for hit in found if hit[1] not in allowed] == []
+    assert {name: sum(1 for _line, hit in found if hit == name) for name in allowed} == allowed
 
 
 def test_the_name_guard_sees_a_reader_named_in_code(tmp_path):

@@ -803,7 +803,7 @@ def _claim(name: str, declares: bool, comp: str, why: str, within: str, inferred
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 #: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
-#: records whether each was installed when it was built.
+#: records each one's version when it was built, or that it was missing (batch 22).
 PARSERS = ("yaml",)
 
 UNRESOLVED_FIELDS = {
@@ -850,6 +850,9 @@ class ComposeExtractor:
     """Services a compose file declares, and the environment it gives each one."""
 
     name = "compose-services"
+    #: The namespaces it writes (batch 22): shared - it writes views under the names of the
+    #: services and components its files declare, other components' included.
+    CACHE_KEYS = (CACHE_KEY, ORIGIN_KEY)
     #: The one spelling, which `reach` refuses a file by too (review B21-10).
     INPUT_GLOBS = COMPOSE_GLOBS
     #: Batch 15b: its facts are deployment facts the accounting rows judge, and every file

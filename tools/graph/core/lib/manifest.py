@@ -24,8 +24,10 @@ from typing import Any
 from ..model import SCHEMA_VERSION
 
 
-#: Recorded when a file cannot be read. Never a valid sha1 (wrong length, non-hex), and
-#: `changed_since` always treats it as changed.
+#: Recorded when a file cannot be read: by `file_digest`, and as a run manifest's
+#: `extractor_version` when a file of the extraction code cannot be read (batch 22). Never a
+#: valid sha1 (wrong length, non-hex), so it equals no digest, and a stamp digest built over
+#: one is poisoned (`unreadable-`), which `freshness.stamp_matches` never matches.
 UNREADABLE = "unreadable"
 
 

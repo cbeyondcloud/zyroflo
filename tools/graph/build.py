@@ -62,8 +62,11 @@ with the first profile, not before it.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
+import functools
 import importlib.machinery
+import importlib.metadata
 import importlib.util
 import inspect
 import json
@@ -123,9 +126,54 @@ LINK_ROOT = Path(__file__).resolve().parent / "links"
 #: outside this repository, which is where a real workspace's profile belongs.
 PROFILE_ROOT = Path(__file__).resolve().parent / "profiles"
 
+#: The running harness's own tree, the extractor version's anchor (batch 22, D22-11): every
+#: harness file in it is spelled relative to this root.
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+
+#: Option B's named members (batch 22, T617; the owner's item 2): the extraction path and the
+#: package `__init__.py` files importing `build.py` loads first (D22-74). Each must exist - a
+#: missing one makes the version unknown, never digested as nothing (D22-101).
+VERSION_MEMBERS = ("tools/graph/__init__.py", "tools/graph/build.py", "tools/graph/freshness.py",
+                   "tools/graph/snapshot.py", "tools/graph/outdir.py",
+                   "tools/graph/core/__init__.py", "tools/graph/core/model.py",
+                   "tools/graph/core/spi.py")
+#: Its trees: every `.py` file under each, a `tests/` directory inside one of its packages left
+#: out. Each must exist.
+VERSION_TREES = ("tools/graph/core/lib", "tools/graph/extractors")
+#: Held only where the selected profile resolves under the harness's own `profiles/`, which
+#: imports it through this package (D22-82a, D22-90).
+PROFILES_INIT = "tools/graph/profiles/__init__.py"
+
 
 class BuildError(Exception):
     """A build that cannot be trusted to be complete. Always fatal, never a warning."""
+
+
+class VersionUnknown(Exception):
+    """A file of the extraction code that cannot be read, or is missing (batch 22, T617): the
+    extractor version is then UNKNOWN - never a poisoned value, so no stamp can hold one - and
+    each door answers it as its job asks. `spelling` is the file's spelling in the version,
+    `cause` its error in the C library's words (`Permission denied`, `No such file or
+    directory`), `missing` whether nothing exists at its path, `own` whether it is the
+    harness's own file - never an out-of-tree reader's, which is the adopter's (D22-117) -
+    and `looped` whether it is a link that never ends (`_loops`), which is removed or
+    retargeted, never made readable (review round 3)."""
+
+    def __init__(self, spelling: str, cause: str, missing: bool, own: bool = True, *,
+                 looped: bool = False):
+        super().__init__(f"{spelling} ({cause})")
+        self.spelling, self.cause, self.missing, self.own = spelling, cause, missing, own
+        self.looped = looped
+
+
+@dataclass(frozen=True)
+class WalkedAs:
+    """A directory the extractor version reached under a second spelling - a second link to it,
+    or a link back up the tree - which it walked under `spelling`, the first in walk order
+    (review round 2). Digested as that pointer, so a link moved, renamed or retargeted moves
+    the version; never walked again, so a cycle ends."""
+
+    spelling: str
 
 
 # ── registration ──────────────────────────────────────────────────────────────
@@ -139,6 +187,10 @@ class Registration:
     layer: str
     globs: tuple[str, ...]
     extractor: Any
+    #: The package directory `discover_package` loaded it from (batch 22, D22-16), whose code
+    #: the extractor version digests. `module` is a display label, not a place: an out-of-tree
+    #: profile's label would resolve against the harness's own `profiles/`.
+    package: Path | None
     module: str = ""
     requires: tuple[str, ...] = ()
     unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -171,13 +223,24 @@ class Registration:
     #: named with what is missing: `host-maps`, `chart-templates` or `package-dirs`.
     glob_purposes: dict[str, str] = field(default_factory=dict)
     #: The parsers it can lack (`PARSERS`, batch 16, ruling 30), so a shard records the parser
-    #: state it was built under; `()` declares that it uses none. A reader whose gate is finer
-    #: than a file's suffix answers which parser a file needs itself (`parser_of`), and one
-    #: whose parser is neither YAML nor a `_lang` grammar says whether it is installed
-    #: (`parser_available`).
+    #: state it was built under - each parser's version, or `false` where it was missing
+    #: (batch 22, T631); `()` declares that it uses none. A reader whose gate is finer than a
+    #: file's suffix answers which parser a file needs itself (`parser_of`), and one whose
+    #: parser is neither YAML nor a `_lang` grammar says whether it is installed
+    #: (`parser_available`) and may say its version (`parser_version`; else it is stamped
+    #: `"installed"`, compared by presence alone).
     parsers: tuple[str, ...] = ()
     parser_of: Any = None
     parser_available: Any = None
+    parser_version: Any = None
+    #: `"component"` where every entry it writes in the shared cache is keyed by the component
+    #: it ran for, and its cross-component dependence is confined to the producers it
+    #: `REQUIRES` (`CACHE_SCOPE`, batch 22, T633): a reader depending on it then depends on no
+    #: other component's files through it (`cross_closure`). `""` is shared, the default.
+    cache_scope: str = ""
+    #: The top-level shared-cache namespaces it writes (`CACHE_KEYS`): every cache writer
+    #: declares them, so who owns a namespace is a declaration the guards hold it to.
+    cache_keys: tuple[str, ...] = ()
 
 
 #: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
@@ -370,16 +433,22 @@ def _deployment_roles(obj: Any, name: str, where: str, globs: tuple[str, ...]
 
 
 def _parsers(obj: Any, name: str, where: str, mod: Any,
-             unresolved_fields: dict[str, tuple[str, ...]]) -> tuple[tuple[str, ...], Any, Any]:
-    """`PARSERS`, and the reader's own `parser_of` and `parser_available` (batch 16, ruling
-    30): which parsers a shard's stamp records for this reader. Read with a SENTINEL - on the
-    reader, then its module - because absent is not `()`: `_str_tuple` and `_declared_map`
-    both fold the two, and a reader that files `grammar-unavailable` and forgot the
-    declaration would then pass as one that uses no parser, its parser state never stamped
-    (design round 3, D16-28). Every name needs a probe and a file rule: YAML and the `_lang`
-    grammars have both by default; any other parser is the reader's to answer."""
+             unresolved_fields: dict[str, tuple[str, ...]]
+             ) -> tuple[tuple[str, ...], Any, Any, Any]:
+    """`PARSERS`, and the reader's own `parser_of`, `parser_available` and `parser_version`
+    (batch 16, ruling 30; batch 22): which parsers a shard's stamp records for this reader.
+    Read with a SENTINEL - on the reader, then its module - because absent is not `()`:
+    `_str_tuple` and `_declared_map` both fold the two, and a reader that files
+    `grammar-unavailable` and forgot the declaration would then pass as one that uses no
+    parser, its parser state never stamped (design round 3, D16-28). Every name needs a probe
+    and a file rule: YAML and the `_lang` grammars have both by default; any other parser is
+    the reader's to answer, its version too where it can say one (else `"installed"`)."""
     parser_of = getattr(obj, "parser_of", None)
     available = getattr(obj, "parser_available", None)
+    version = getattr(obj, "parser_version", None)
+    if version is not None and not (callable(version) and _accepts(version, 1)):
+        raise BuildError(f"{where}: `parser_version` on {name!r} is {version!r}; it must be a "
+                         f"callable `(parser name) -> version`, or absent")
     declared = getattr(obj, "PARSERS", None)
     if declared is None and mod is not None:
         declared = getattr(mod, "PARSERS", None)
@@ -389,7 +458,7 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
                              f"declare the parsers it can lack (`PARSERS = ('yaml',)`, say), or "
                              f"`PARSERS = ()` if it uses none, so its shard records the parser "
                              f"state it was built under")
-        return (), parser_of, available
+        return (), parser_of, available, version
     if not isinstance(declared, tuple) or not all(
             isinstance(parser, str) and parser.strip() for parser in declared):
         raise BuildError(f"{where}: `PARSERS` on {name!r} must be a TUPLE of parser names, got "
@@ -406,7 +475,28 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
             raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which no file "
                              f"suffix maps to, and has no file rule: give the reader "
                              f"`parser_of(path, rel, text=None)`")
-    return declared, parser_of, available
+    return declared, parser_of, available, version
+
+
+def _cache_declarations(obj: Any, name: str, where: str) -> tuple[str, tuple[str, ...]]:
+    """`CACHE_SCOPE` and `CACHE_KEYS` (batch 22, T633), read off the reader - one module can
+    hold readers of both scopes - and refused where wrong: a scope that is not "component",
+    keys that are not a tuple of namespace names, or a component-scoped reader naming no
+    namespace, which no guard could then hold to its claim."""
+    scope = getattr(obj, "CACHE_SCOPE", "")
+    if scope not in ("", "component"):
+        raise BuildError(f"{where}: `CACHE_SCOPE` on {name!r} is {scope!r}; it must be "
+                         f"\"component\" - every entry it writes keyed by the component it ran "
+                         f"for - or absent")
+    keys = getattr(obj, "CACHE_KEYS", ())
+    if not isinstance(keys, tuple) or not all(isinstance(k, str) and k.strip() for k in keys):
+        raise BuildError(f"{where}: `CACHE_KEYS` on {name!r} must be a TUPLE of namespace "
+                         f"names, got {keys!r}")
+    if scope and not keys:
+        raise BuildError(f"{where}: {name!r} declares `CACHE_SCOPE = \"component\"` but no "
+                         f"`CACHE_KEYS`: name the shared-cache namespaces it writes, so a guard "
+                         f"can hold it to them")
+    return scope, keys
 
 
 def _validate(obj: Any, where: str
@@ -687,17 +777,22 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
         fields_declared = _unresolved_fields(obj, name, where, mod)
-        parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
+        parsers, parser_of, parser_available, parser_version = _parsers(
+            obj, name, where, mod, fields_declared)
+        cache_scope, cache_keys = _cache_declarations(obj, name, where)
         hook = getattr(obj, "claims_nothing", None)
         if hook is not None and not (callable(hook) and _accepts(hook, 3)):
             raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
                              f"callable `(component root, path, walked) -> reason`, or absent")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
-                                 extractor=obj, module=where, reads_nested=reads_nested,
+                                 extractor=obj, package=pkg, module=where,
+                                 reads_nested=reads_nested,
                                  reads_ancestors=reads_ancestors, claims_nothing=hook,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
+                                 parser_version=parser_version,
+                                 cache_scope=cache_scope, cache_keys=cache_keys,
                                  unresolved_fields=fields_declared,
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
@@ -748,15 +843,212 @@ def resolve_profile(ws: dict) -> Path | None:
     return candidate
 
 
-def extractor_version(regs: list[Registration]) -> str:
-    """A digest of the registered set — name, layer and globs.
+#: A link that never ends, worded alike on every platform (review round 4): Windows answers
+#: ERROR_CANT_RESOLVE_FILENAME, which Python reads as EINVAL - "Invalid argument", the word a
+#: denied argument prints too - and its `os.strerror(errno.ELOOP)` is "Unknown error". Chosen,
+#: never the OS's sentence, so T638's rule holds; it is the C library's own on Linux.
+LOOPED_CAUSE = "Too many levels of symbolic links"
 
-    Stamped into the manifest so an incremental rebuild re-runs when the extractor set
-    changes, not only when files do. Without it, adding an extractor would leave every
-    unchanged file untouched and its edges would never appear.
+
+def _loops(exc: OSError) -> bool:
+    """Whether `exc` says a link never ends: ELOOP on POSIX; on Windows,
+    ERROR_CANT_RESOLVE_FILENAME (1921), which Python keeps in `winerror` - a chain of junctions
+    longer than the system resolves (63 resolve, 64 do not: measured, unprivileged, each junction
+    made onto one that exists), or a symlink's loop where the privilege allows one (review
+    rounds 3 and 4)."""
+    return exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921
+
+
+def _cause(exc: OSError) -> str:
+    """Why a file of the extraction code could not be read, as the doors word it (D22-104): a
+    link that never ends, `LOOPED_CAUSE` on every platform, before any errno's message - on
+    Windows that would be "Invalid argument" (review round 4); otherwise the C library's message
+    for its errno - `Permission denied`, `No such file or directory` - which no locale changes
+    here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the OS's sentence in the OS's
+    language on Windows (T638's class), nor `str(exc)`, which carries the absolute path. Without
+    an errno, the error's class."""
+    if _loops(exc):
+        return LOOPED_CAUSE
+    if isinstance(exc.errno, int):
+        return os.strerror(exc.errno)
+    return repo_walk.os_error_word(exc)
+
+
+def _version_tree(top: Path, base: str, *, package: bool,
+                  own: bool = True) -> dict[str, Path | WalkedAs]:
+    """Every `.py` file under `top`, spelled `<base>/<path below top>`, a `tests/` directory
+    inside a package left out: for a reader's PACKAGE any `tests/` below it; for a TREE its
+    children are the packages, so a child named `tests` - a registered reader - is held
+    whole. A `top` that is missing or no directory, or a directory that cannot be listed,
+    makes the version unknown (D22-101): `os.walk` hands each to `unlisted`, top included,
+    so it is never a walk of nothing read as an empty set.
+
+    A directory link is followed, as a reader's own import follows it, and each real
+    directory is walked once, under its first spelling in walk order (names sorted by code
+    point, depth first); any other spelling of it - a second link to it, a link back up the
+    tree - is a `WalkedAs` naming the first (review round 2: keeping the first spelling alone, a module
+    moved behind a link left the version equal). An entry that cannot be followed to anything
+    - a link to nothing, a junction and a symlink alike - makes the version unknown as a
+    directory the walk cannot list does: `os.walk` read a dangling junction as a directory and
+    a dangling symlink as a file, so one tree gave two answers by platform (review round 2).
+    Where several entries of a directory cannot be followed, the first by name is named, never
+    the first the filesystem lists (review rounds 4 and 5: a filesystem lists in its own order -
+    NTFS by upper-cased name, ext4 by hash, tmpfs newest first)."""
+
+    def unlisted(exc: OSError) -> None:
+        where = Path(exc.filename) if exc.filename else top
+        below = where.relative_to(top).as_posix() if where.is_relative_to(top) else "."
+        raise VersionUnknown(base if below == "." else f"{base}/{below}", _cause(exc),
+                             isinstance(exc, FileNotFoundError), own, looped=_loops(exc))
+
+    def spelled(path: Path) -> str:
+        below = path.relative_to(top).as_posix()
+        return base if below == "." else f"{base}/{below}"
+
+    floor = 0 if package else 1
+    found: dict[str, Path | WalkedAs] = {}
+    first: dict[str, str] = {}
+    # `os.walk` entered a Windows junction but not a POSIX symlink, so one tree gave two
+    # versions: every directory link is followed (review round 1).
+    for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted, followlinks=True):
+        here = Path(dirpath)
+        real = os.path.normcase(os.path.realpath(dirpath))
+        if real in first:
+            found[spelled(here)] = WalkedAs(first[real])
+            dirnames[:] = []
+            continue
+        first[real] = spelled(here)
+        depth = len(here.relative_to(top).parts)
+        kept = [n for n in dirnames + filenames
+                if n != "__pycache__" and not (n == "tests" and depth >= floor)]
+        for name in sorted(kept):
+            try:
+                os.stat(here / name)
+            except OSError as exc:
+                raise VersionUnknown(spelled(here / name), _cause(exc),
+                                     isinstance(exc, FileNotFoundError), own,
+                                     looped=_loops(exc)) from None
+        dirnames[:] = sorted(n for n in dirnames if n in kept)
+        for name in filenames:
+            if name.endswith(".py"):
+                found[spelled(here / name)] = here / name
+    return found
+
+
+def version_files(regs: list[Registration],
+                  root: Path | None = None) -> list[tuple[str, Path | WalkedAs]]:
+    """The files the extractor version digests, `(spelling, path)` sorted by spelling (batch 22,
+    T617; option B): `VERSION_MEMBERS`, every `.py` under `VERSION_TREES`, every registered
+    reader's package - its `.py` files, its own `tests/` left out - and `PROFILES_INIT` where a
+    selected profile is imported through the harness's own `profiles/`. A directory a link
+    reaches under a second spelling is `(spelling, WalkedAs(first spelling))` (`_version_tree`).
+
+    Each harness file is spelled relative to the harness root and read under `root` (the
+    running harness, but for a test of a copy); each out-of-tree package's files relative to
+    the package, prefixed by its reader's registered name - the first in name order where
+    one package registers several (D22-11, D22-16) - and two files spelled alike (a reader
+    named `tools/graph` holding a `build.py`) are refused, never one dropped. `.py` files only
+    (D22-87): a profile's `traversal_rules.yml` weighs traversal, never a shard. A
+    registration with no package is refused, never digested as nothing (D22-38)."""
+    root = HARNESS_ROOT if root is None else root
+    found: dict[str, Path | WalkedAs] = {rel: root / rel for rel in VERSION_MEMBERS}
+    for rel in VERSION_TREES:
+        found.update(_version_tree(root / rel, rel, package=False))
+    outside: dict[Path, str] = {}
+    through_profiles = False
+    for reg in regs:
+        if reg.package is None:
+            raise BuildError(f"`{reg.name}` is registered with no package, so the extractor "
+                             f"version cannot digest its code - register it through "
+                             f"`discover_package`")
+        pkg = Path(reg.package).resolve()
+        if pkg.is_relative_to(HARNESS_ROOT):
+            rel = pkg.relative_to(HARNESS_ROOT).as_posix()
+            through_profiles |= pkg.parent == PROFILE_ROOT
+            found.update(_version_tree(root / rel, rel, package=True))
+        else:
+            outside[pkg] = min(outside.get(pkg, reg.name), reg.name)
+    if through_profiles:
+        found[PROFILES_INIT] = root / PROFILES_INIT
+    harness = set(found)
+    owners: dict[str, str] = {}
+    for pkg, name in sorted(outside.items(), key=lambda item: item[1]):
+        for spelling, path in _version_tree(pkg, name, package=True, own=False).items():
+            if spelling in found:
+                already = ("a file of the harness's extraction code is" if spelling in harness
+                           else f"`{owners[spelling]}`'s package file is")
+                raise BuildError(f"`{name}`'s package file `{spelling[len(name) + 1:]}` is "
+                                 f"spelled `{spelling}`, as {already}, so the extractor "
+                                 f"version could not tell them apart - rename the reader")
+            found[spelling] = path
+            owners[spelling] = name
+    return sorted(found.items())
+
+
+def extractor_version(regs: list[Registration], root: Path | None = None) -> str:
+    """A digest of the registered set - each reader's name, layer and globs - and of the
+    extraction code (batch 22, T617): every file `version_files` names, by its spelling, its
+    bytes with CRLF folded to LF, so a CRLF checkout reads the version an LF one does, and each
+    directory it reached under a second spelling, by the spelling it was walked under.
+
+    Stamped into every manifest, so a shard is stale once the readers or their code change
+    (claim 4), not only when its files do: adding an extractor, or changing one's code, would
+    otherwise leave every unchanged file's facts as the old code extracted them. A file that
+    cannot be read, or is missing, raises `VersionUnknown` - the version is unknown, never a
+    poisoned value - and each door answers it as its job asks. Computed once per run and
+    threaded through it, never memoised across runs: the MCP server runs many in one process.
     """
-    payload = "\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}" for r in regs))
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1("\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}"
+                                           for r in regs)).encode("utf-8"))
+    tree = HARNESS_ROOT if root is None else root
+    for spelling, path in version_files(regs, root):
+        if isinstance(path, WalkedAs):
+            digest.update(f"\0{spelling}\0->{path.spelling}\0".encode("utf-8"))
+            continue
+        try:
+            data = path.read_bytes().replace(b"\r\n", b"\n")
+        except OSError as exc:
+            raise VersionUnknown(spelling, _cause(exc), isinstance(exc, FileNotFoundError),
+                                 path.is_relative_to(tree), looped=_loops(exc)) from None
+        digest.update(f"\0{spelling}\0{len(data)}\0".encode("utf-8"))
+        digest.update(data)
+    return digest.hexdigest()[:12]
+
+
+def version_or_unknown(regs: list[Registration]) -> str | VersionUnknown:
+    """The extractor version now, or the `VersionUnknown` that says why it cannot be computed -
+    computed ONCE per run and threaded through it (batch 22, D22-98)."""
+    try:
+        return extractor_version(regs)
+    except VersionUnknown as unknown:
+        return unknown
+
+
+def _way_on(unknown: VersionUnknown) -> str:
+    """The way on by the cause (D22-111, D22-117): a file that cannot be read is made
+    readable; a missing one restored - from a fresh checkout where it is the harness's own; a
+    link that never ends removed or retargeted (review round 3: "make it readable" changed
+    nothing for it)."""
+    if unknown.looped:
+        return "remove or retarget the link"
+    if not unknown.missing:
+        return "make it readable"
+    return "restore it (check the harness out again)" if unknown.own else "restore it"
+
+
+def unknown_words(unknown: VersionUnknown) -> str:
+    """Claim 4's rendering where the version is unknown, at every judging door, and a plain
+    build's note: the file by its spelling in the version, the cause, the way on - never a
+    machine path (D22-104)."""
+    return (f"{freshness.UNKNOWN_VERSION}`{unknown.spelling}` ({unknown.cause}; "
+            f"{_way_on(unknown)})")
+
+
+def publish_refusal(unknown: VersionUnknown) -> str:
+    """The publish's refusal while the version is unknown, naming the order its way on needs:
+    the file first, then the publish (D22-103)."""
+    return (f"{freshness.UNKNOWN_VERSION}`{unknown.spelling}` ({unknown.cause}) - "
+            f"{_way_on(unknown)}, then publish again")
 
 
 def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
@@ -778,6 +1070,85 @@ def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
             return srcfacts.available(parser)
         return bool(custom[parser](parser))
     return probe
+
+
+@functools.lru_cache(maxsize=1)
+def _distributions() -> dict[str, list[str]]:
+    """Which distributions provide each top-level module - computed once per process, since
+    it walks every installed distribution (about 127 ms, measured; D22-36) - or `{}` where
+    it cannot be read, so every version reads `"installed"`."""
+    try:
+        return dict(importlib.metadata.packages_distributions())
+    except Exception:  # noqa: BLE001 - a broken environment reads as "no version known"
+        return {}
+
+
+def _module_version(module: str) -> str | None:
+    """`<distribution>==<version>` for each distribution providing `module`'s top-level
+    package, sorted and joined by `+` (batch 22, D22-6), or None where none is found or a
+    version cannot be read - never a traceback."""
+    found = sorted(set(_distributions().get(module.split(".")[0], ())))
+    out = []
+    for dist in found:
+        try:
+            number = importlib.metadata.version(dist)
+        except Exception:  # noqa: BLE001 - PackageNotFoundError, or metadata that cannot be read
+            return None
+        if not isinstance(number, str) or not number:
+            return None
+        out.append(f"{dist}=={number}")
+    return "+".join(out) or None
+
+
+def parser_versioner(regs: list[Registration]) -> Callable[[str], str]:
+    """Each installed parser's version NOW (batch 22, T631): the version of what served it,
+    asked only of a parser the probe finds installed. YAML: the distribution of the module
+    `yaml`, its version alone. A `_lang` grammar: the distributions of the route that served
+    it - the pinned per-language package or the aggregate pack, which report different
+    versions for one grammar - then the `tree-sitter` runtime's; it asks `srcfacts.available`
+    first, which establishes the route, so a door that parses nothing stamps the text a
+    publish did (D22-32). Any other parser: the first reader in registry order declaring it,
+    by its `parser_version` - an answer that raises or is not a non-empty string is refused
+    here, where it is produced (D22-22). A version that cannot be read is `"installed"`,
+    compared by presence alone. One answer per parser per run: the versioner is made per
+    run, never memoised across runs."""
+    grammars = set(_lang.GRAMMARS.values())
+    custom: dict[str, Registration] = {}
+    for reg in regs:
+        for parser in reg.parsers:
+            if parser != "yaml" and parser not in grammars and parser not in custom:
+                custom[parser] = reg
+    answers: dict[str, str] = {}
+
+    def read(parser: str) -> str:
+        if parser == "yaml":
+            return _module_version("yaml") or freshness.INSTALLED
+        if parser in grammars:
+            if not srcfacts.available(parser):
+                return freshness.INSTALLED
+            served = srcfacts.served_by(parser)
+            route = _module_version(served) if served else None
+            runtime = _module_version("tree_sitter")
+            return f"{route}+{runtime}" if route and runtime else freshness.INSTALLED
+        reg = custom.get(parser)
+        if reg is None or reg.parser_version is None:
+            return freshness.INSTALLED
+        try:
+            answer = reg.parser_version(parser)
+        except Exception as exc:  # noqa: BLE001 - refused with the reader named
+            raise BuildError(f"`{reg.name}`'s `parser_version({parser!r})` returned no version: "
+                             f"it raised {type(exc).__name__} ({exc}) - answer a non-empty "
+                             f"string") from exc
+        if not isinstance(answer, str) or not answer:
+            raise BuildError(f"`{reg.name}`'s `parser_version({parser!r})` returned "
+                             f"{answer!r}, not a non-empty string - answer one")
+        return answer
+
+    def version(parser: str) -> str:
+        if parser not in answers:
+            answers[parser] = read(parser)
+        return answers[parser]
+    return version
 
 
 def file_parser(reg: Registration, path: Path, rel: str, text: str | None = None) -> str | None:
@@ -1391,8 +1762,22 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
     return closure
 
 
+def cross_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
+    """Each extractor's CROSS-COMPONENT closure (batch 22, T633): its transitive `REQUIRES`
+    closure minus its component-scoped members (`CACHE_SCOPE = "component"`) - the closure
+    taken first, then filtered, never a walk of shared edges alone, which drops a shared
+    producer a scoped one requires (measured: `compose-services` behind `env-keys`). A scoped
+    producer's own run is in the shard's own inputs (claim 6) and parser half (claim 8); what
+    a reader can have read from ANOTHER component goes through its shared members alone, so
+    claims 9 and 10 follow this closure, while which producers re-run never narrows
+    (`plan_incremental` keeps the full `requires_closure`, D22-33)."""
+    scoped = {r.name for r in regs if r.cache_scope == "component"}
+    return {name: deps - scoped for name, deps in requires_closure(regs).items()}
+
+
 def plan_incremental(root: Path, components: list[dict], act: Activation,
-                     regs: list[Registration], config: dict
+                     regs: list[Registration], config: dict,
+                     version: str | VersionUnknown | None = None
                      ) -> tuple[list[str], dict[str, str], set[str], dict[str, ExtractResult]]:
     """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts,
     facts): `facts` is each reused shard's facts and rows, from the one reading the decision
@@ -1410,7 +1795,7 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     what a full build's would — their facts for reused components are then discarded,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
-    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    readings, verdicts = shard_verdicts(root, components, regs, act, config, version=version)
     reused = [c["name"] for c in components if verdicts[c["name"]].state == "current"]
     rebuilt = {c["name"]: verdicts[c["name"]].plan for c in components
                if verdicts[c["name"]].state != "current"}
@@ -1494,7 +1879,7 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
 
 
 def run_extractors_owned(regs: list[Registration], act: Activation, components: list[dict],
-                         root: Path, run_id: str, config: dict
+                         root: Path, run_id: str, config: dict, cache: dict | None = None
                          ) -> tuple[dict[str, dict[str, ExtractResult]], dict, list[str]]:
     """`run_extractors`, with ownership kept: one `extract()` call per (extractor, component).
 
@@ -1513,10 +1898,15 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
     component's env reads) is unchanged; and a failure still discards the WHOLE extractor —
     per-component salvage would be an improvement, but a different contract than the one
     the report and its tests pin today.
+
+    `cache` is the shared cache the run fills: a fresh dict per call where None - never a
+    shared mutable default, which would carry one build's cache into the next in a long-lived
+    process such as the MCP server - or one handed in, which the cache-scope guards record a
+    reference build into (batch 22, D22-14, D22-61).
     """
     owned: dict[str, dict[str, ExtractResult]] = {}
     violations: list[str] = []
-    cache: dict[str, Any] = {}
+    cache = {} if cache is None else cache
     failures: dict[str, str] = {}
     for reg in regs:
         claimed = act.by_extractor.get(reg.name) or []
@@ -1578,19 +1968,21 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
             violations.append(Violation(
                 f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} but declares no "
                 f"parser it can lack (`PARSERS = ()`) - declare the parser its gate needs, so "
-                f"its shard records whether it was installed", "declaration"))
+                f"its shard records the parser's version, or that it was missing",
+                "declaration"))
         for named, comps in sorted(stray.items() if reg.parsers else (),
                                    key=lambda item: item[0] or ""):
             where = ", ".join(comp for comp in per_component if comp in comps)
             violations.append(Violation(
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming no parser - name "
                 f"the one it could not use in the row's `language`, a parser it declares "
-                f"(`PARSERS = {reg.parsers!r}`), so its shard records whether it was installed"
+                f"(`PARSERS = {reg.parsers!r}`), so its shard records the parser's version, "
+                f"or that it was missing"
                 if named is None else
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming the parser "
                 f"{named!r}, which it does not declare (`PARSERS = {reg.parsers!r}`) - name a "
-                f"parser it declares, or declare the one it needs, so its shard records whether "
-                f"it was installed", "declaration"))
+                f"parser it declares, or declare the one it needs, so its shard records the "
+                f"parser's version, or that it was missing", "declaration"))
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -1849,7 +2241,12 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     components grouped by reason, each reason word for word, each group capped. A refusal's
     exact remedy is on its REFUSING line; the way on here keeps "or build the whole
     workspace", which no refusal blocks. The parser group is every deployment reader whose
-    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53)."""
+    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53).
+
+    One channel per line (batch 22, D22-79): a group whose words carry their own way on in
+    parentheses - an unknown extractor version's, claim 9a's inputs that cannot be read now
+    (`freshness.carries_way`) - is offered no other, and where only such groups narrow the
+    load, its line ends "To judge both: do what each reason says.", each way on in its reason."""
     digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
     groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
         + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
@@ -1868,12 +2265,15 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     groups += parser_group(unparsed, lacked)
     if not groups:
         return ""
+    # One channel per line (batch 22, D22-79): a group whose words carry their own way on is
+    # offered no other, and where only such groups narrow the load, each reason says it.
+    plain = [why for why in by_reason if not freshness.carries_way(why)]
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
-            if missing or refused or by_reason else []) \
+            if missing or refused or plain else []) \
         + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways)}.")
+            f"both: {'; '.join(ways) or 'do what each reason says'}.")
 
 
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
@@ -1971,7 +2371,9 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     `.sdlc/graph/` (item 13); `check_snapshot` byte-compares a fresh extraction against
     those committed shards instead. Both refuse quietly-wrong states: a build with
     failures or contract violations publishes nothing, because a shard missing an
-    extractor's facts commits an absence that reads exactly like a clean answer.
+    extractor's facts commits an absence that reads exactly like a clean answer; and a
+    publish refuses before extracting anything while a file of the extraction code cannot
+    be read (batch 22), since no stamp may hold a version nobody could compute.
     """
     # **A question writes nothing, and `out` is what it is asking about.** Under
     # `--check-snapshot` `out` is the committed `.sdlc/graph/` (item 102) whose bytes the
@@ -2052,6 +2454,17 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     f"decide{'s' if len(missing) == 1 else ''} first. Add "
                     f"{', '.join(missing)} to --only, or leave {lp.name} out")
 
+    # Batch 22 (T617): the extractor version, computed ONCE, before anything is extracted or
+    # written, and threaded through the run - `--check-snapshot` computes none (D22-98). A
+    # registry it cannot spell (two files alike) is refused here, never after a plain build
+    # wrote its graph (review round 1); the publish refuses while it is unknown, so the one
+    # value it checked is the one it stamps and `manifest.json` records (D22-86).
+    version: str | VersionUnknown | None = None
+    if not check_snapshot:
+        version = version_or_unknown(regs)
+        if publish_snapshot and isinstance(version, VersionUnknown):
+            raise BuildError(publish_refusal(version))
+
     run_id = run_id or uuid.uuid4().hex[:12]
     act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
                    all_regs=registry, workspace=workspace_components)
@@ -2068,7 +2481,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     run_act = act
     if incremental:
         reused, rebuilt, cache_exts, reused_facts = plan_incremental(
-            root, components, act, regs, config)
+            root, components, act, regs, config, version)
         rebuilt_set = set(rebuilt)
         # Cache-feeding extractors run everywhere so the shared cache holds what a full
         # build's would; only their runs in REBUILT components contribute facts. The
@@ -2179,7 +2592,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 (profile_dir / "traversal_rules.yml").read_bytes())
         emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
-        mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
+        # The version computed above; unknown, it records the module's own sentinel - never a
+        # sha1 - and says why among its notes (D22-112).
+        mf = manifest_lib.Manifest(run_id=run_id, extractor_version=(
+            manifest_lib.UNREADABLE if isinstance(version, VersionUnknown) else version))
         mf.repos.update(stamps)
         # No per-file digest map. `input_digests` above already digests the same
         # content per extractor and is what `stamp_matches` reads; a second copy,
@@ -2196,6 +2612,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                      reused=len(inc["reused"]) if inc else 0)
     if narrowing:
         report["notes"].append(narrowing)
+    if isinstance(version, VersionUnknown):
+        report["notes"].append(unknown_words(version))
     if inc is not None:
         report["incremental"] = inc
 
@@ -2297,11 +2715,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"their committed bytes")
             else:
                 stamp_inputs = input_digests(act, components, root)
-                version = extractor_version(regs)
                 # Ruling 30: the parser state each shard was built under, from the one
                 # producer the verdict compares against (D16-31).
-                closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
+                closure, probe, parser_of = (cross_closure(regs), parser_probe(regs),
                                              parser_rule(regs))
+                versioner = parser_versioner(regs)
                 memo: dict = {}
                 stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
                                       "extractor_version": version,
@@ -2309,7 +2727,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                                                                   c["name"]),
                                       "parsers": freshness.parser_stamp(
                                           c["name"], act, closure, probe, parser_of, root,
-                                          components, memo)}
+                                          components, memo, version=versioner),
+                                      # What it read from other components (T632).
+                                      "closure_inputs": freshness.closure_record(
+                                          c["name"], act, closure, stamp_inputs)}
                           for c in pub_components}
                 try:
                     digests = snapshot_lib.publish(root, pub_components, facts, stamps)
@@ -2529,19 +2950,25 @@ def _name_of(path: object) -> str:
 
 
 def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
-                   act: Activation, config: dict, *, keep_facts: bool = True
+                   act: Activation, config: dict, *, keep_facts: bool = True,
+                   version: str | VersionUnknown | None = None
                    ) -> tuple[dict[str, snapshot_lib.ShardReading],
                               dict[str, freshness.Verdict]]:
     """Every component's reading of its committed shard and its verdict: the ONE judgment of
     a shard (batch 16, ruling 29), so `--check-fresh`, a `--from-snapshot` load and
     `--incremental` never disagree about one. Each shard is read once (`read_shard`), and
-    `keep_facts=False` keeps only its rows - all a question about currency needs."""
+    `keep_facts=False` keeps only its rows - all a question about currency needs. `version`
+    is the run's extractor version where the run computed it already (batch 22), else it is
+    computed here; unknown, it fails claim 4 for every shard that reaches it."""
     readings = {c["name"]: snapshot_lib.read_shard(root, c, keep_facts=keep_facts)
                 for c in components}
+    version = version_or_unknown(regs) if version is None else version
     verdicts = freshness.judge(
-        readings, components, act, requires_closure(regs), input_digests(act, components, root),
-        extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
-        parser_probe(regs), parser_rule(regs), root)
+        readings, components, act, cross_closure(regs), input_digests(act, components, root),
+        freshness.UnknownVersion(unknown_words(version))
+        if isinstance(version, VersionUnknown) else version,
+        {c["name"]: config_digest(config, c["name"]) for c in components},
+        parser_probe(regs), parser_rule(regs), root, parser_version=parser_versioner(regs))
     return readings, verdicts
 
 
@@ -2562,7 +2989,8 @@ def check_freshness(workspace: Path | dict | None, *,
     rather than redirected — measured first: nothing anywhere read what it wrote.
 
     The input side of item 13's determinism check, and the cheap one: hash every file the
-    extractors would read (seconds) instead of re-extracting everything (minutes), and
+    extractors would read, the harness's own extraction code and the files each shard read
+    in other components (seconds) instead of re-extracting everything (minutes), and
     compare against the stamps each shard recorded at publish. A commit SHA cannot answer
     this question — HEAD moves without a component's files moving, and a dirty tree moves
     files without HEAD — so commits stay in the build report as provenance and the digest
@@ -2964,7 +3392,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="after the build, write each component's extracted FACTS into that "
                          "component's own .sdlc/graph/ (shard.jsonl + digest). Facts only: "
                          "what link passes derive is recomputed at load, never committed. "
-                         "Refused when the build had failures or contract violations")
+                         "Refused when the build had failures or contract violations, and "
+                         "before extracting anything while a file of the extraction code "
+                         "cannot be read")
     ap.add_argument("--from-snapshot", action="store_true",
                     help="build the graph from the committed shards instead of extracting: "
                          "load every component's .sdlc/graph/, verify digests, recompute "
@@ -2985,20 +3415,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--incremental", action="store_true",
                     help="reuse committed shards for components whose inputs are unchanged "
                          "and extract only the rest. Content decides: per-extractor input "
-                         "digests recorded at publish, plus the extractor set and workspace "
-                         "config. A component whose declared dependencies (REQUIRES) "
-                         "changed anywhere is rebuilt too, and the extractors those "
-                         "dependencies name re-run everywhere so the shared cache holds "
-                         "what a full build's would. The output is byte-identical to a "
-                         "full build of the same tree. With nothing to reuse it IS a full "
-                         "build, and says so")
+                         "digests recorded at publish, plus the extractors and their code, "
+                         "the workspace config, the parsers its files needed and their "
+                         "versions, and the inputs it read from other components through "
+                         "the shared cache - a component whose such inputs changed is "
+                         "rebuilt too, and the extractors its readers depend on (REQUIRES) "
+                         "re-run everywhere so the shared cache holds what a full build's "
+                         "would. The output is byte-identical to a full build of the same "
+                         "tree. With nothing to reuse it IS a full build, and says so")
     ap.add_argument("--check-fresh", action="store_true",
                     help="is the committed snapshot current with the tree? Hashes every "
-                         "file the extractors would read (seconds) and compares against "
-                         "the stamps recorded at publish - no extraction. Exit 0 means "
-                         "the committed graph IS the tree; stale components are named "
-                         "with why, exit 2. Content answers, not commits: a moved HEAD "
-                         "with unmoved files is fresh, a dirty tree is stale")
+                         "file the extractors would read, the harness's own extraction code "
+                         "and the files each shard read in other components (seconds), and "
+                         "compares against the stamps recorded at publish - no extraction. "
+                         "Exit 0 means the committed graph IS the tree; stale components "
+                         "are named with why, exit 2. Content answers, not commits: a moved "
+                         "HEAD with unmoved files is fresh, a dirty tree is stale")
     ap.add_argument("--propose-canonical", action="store_true",
                     help="after the build, draft canonical.proposed.toml in the output "
                          "directory: one [[canonical]] block per contested service, "

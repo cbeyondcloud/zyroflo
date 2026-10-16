@@ -64,6 +64,9 @@ so on a fresh install `--check-fresh` has nothing to compare against and answers
 `REFUSED`, also exit 2, for a shard it cannot trust - a damaged manifest, bytes it
 cannot read, a digest mismatch - with the remedy; and prints a `NOTE`, at exit 0 as at
 exit 2, for a deployment reader whose shard says it had no parser and that still has none.
+A shard is also `STALE` when the harness's extraction code changed since its publish -
+so every shard is stale once after the harness is upgraded: re-publish once - and when
+a file of that code cannot be read, its line naming the file and what to do.
 
 ## Doctrine (the graph's honesty rules)
 

@@ -65,7 +65,7 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 #: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
-#: records whether each was installed when it was built.
+#: records each one's version when it was built, or that it was missing (batch 22).
 PARSERS = ("yaml",)
 
 UNRESOLVED_FIELDS = {

@@ -461,9 +461,12 @@ def build_server(service: GraphService):
     @mcp.tool
     def check_fresh() -> dict:
         """Is the committed snapshot current with the source tree? Per component:
-        fresh; stale with the reason (files moved, extractors changed, no stamps,
-        a dependency or a parser that changed, a directory that could not be
-        listed); or refused - a shard it cannot
+        fresh; stale with the reason (files moved; the extractors or their
+        extraction code changed, or a file of that code unreadable; the workspace
+        config changed; no stamps; inputs it read from another component that
+        moved, or a reader no longer or newly active there; a parser or its
+        version that changed; a directory that could not be listed); or
+        refused - a shard it cannot
         trust - with the reason, and its remedy under `remedies`. A deployment
         reader still without its parser is under `unparsed`, the parsers its rows
         name under `unparsed_parsers` ("" for a row naming none its reader

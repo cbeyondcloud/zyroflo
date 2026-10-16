@@ -95,9 +95,11 @@ def test_an_all_reused_build_is_byte_identical_to_the_full_build(tmp_path):
 
 
 def test_a_one_edit_incremental_is_byte_identical_to_a_fresh_full_build(tmp_path):
-    """The edit invalidates its component AND, through declared REQUIRES, every component
-    whose extractors depend on the changed extractor's inputs — conservatively, because
-    the cache does not record who read what. What survives is genuinely independent."""
+    """The edit invalidates its component, and through declared REQUIRES every component whose
+    extractors could have read the changed inputs from another component. `properties` writes
+    each entry under the component it ran for (`CACHE_SCOPE`, batch 22, T633), so a properties
+    edit reaches no other component's facts: the three components whose readers require it
+    were rebuilt by `main` for nothing, and are reused - byte-identity proves it."""
     work = ws(tmp_path)
     run(work, "seed", "--publish-snapshot")
     edit_worker_properties(work)
@@ -105,12 +107,8 @@ def test_a_one_edit_incremental_is_byte_identical_to_a_fresh_full_build(tmp_path
     assert run(work, "full") == 0
     assert graph_bytes(tmp_path, "inc") == graph_bytes(tmp_path, "full")
     inc = report_of(tmp_path, "inc")["incremental"]
-    assert "orders-worker" in inc["rebuilt"]
-    assert inc["rebuilt"]["orders-worker"] == "its own files changed"
-    assert set(inc["reused"]) == {"web-console", "orders-notifier", "deploy-charts"}, (
-        "only components with no property-dependent extractor may survive this edit")
-    assert any("depends on" in why for why in inc["rebuilt"].values()), (
-        "the REQUIRES propagation should name itself in at least one reason")
+    assert inc["rebuilt"] == {"orders-worker": "its own files changed"}
+    assert set(inc["reused"]) == set(COMPONENTS) - {"orders-worker"}
 
 
 def test_the_cache_effect_crosses_components_in_the_second_stack(tmp_path):
@@ -176,9 +174,10 @@ def test_an_unchanged_tree_is_fresh_at_exit_0(tmp_path, capsys):
 
 
 def test_a_changed_file_makes_its_component_and_its_dependents_stale(tmp_path, capsys):
-    """Batch 16 (T630): `--check-fresh` lists the dependents `--incremental` rebuilds - here
-    the three components whose readers depend on `properties`, whose inputs moved in
-    `orders-worker` - where it listed `orders-worker` alone and called the rest current."""
+    """Batch 16 (T630): `--check-fresh` lists exactly the components `--incremental` rebuilds.
+    Batch 22 (T633): `properties` is component-scoped, so the three components whose readers
+    require it read nothing of `orders-worker`'s properties and stay current, as the
+    incremental reuses them."""
     work = ws(tmp_path)
     run(work, "seed", "--publish-snapshot")
     edit_worker_properties(work)
@@ -188,10 +187,8 @@ def test_a_changed_file_makes_its_component_and_its_dependents_stale(tmp_path, c
     assert "properties" in out, "the reading extractor is named, not just the component"
     report = freshness_of(work)
     assert report["freshness"]["stale"] == {
-        "orders-worker": "files read by properties, spring-rest-calls changed",
-        **{name: "depends on properties, whose inputs changed in another component"
-           for name in ("legacy-reports", "orders-api", "orders-shared")}}
-    assert report["freshness"]["fresh"] == ["deploy-charts", "orders-notifier", "web-console"]
+        "orders-worker": "files read by properties, spring-rest-calls changed"}
+    assert report["freshness"]["fresh"] == sorted(set(COMPONENTS) - {"orders-worker"})
 
 
 def test_no_snapshot_is_stale_not_vacuously_fresh(tmp_path, capsys):
@@ -239,7 +236,7 @@ def test_a_changed_extractor_set_makes_everything_stale(tmp_path, monkeypatch):
     assert run(work, "fresh", "--check-fresh") == 2
     stale = freshness_of(work)["freshness"]["stale"]
     assert set(stale) == set(COMPONENTS)
-    assert all("extractor set changed" in why for why in stale.values())
+    assert all("extractors or their code changed" in why for why in stale.values())
 
 
 def test_a_changed_workspace_config_makes_everything_stale(tmp_path):

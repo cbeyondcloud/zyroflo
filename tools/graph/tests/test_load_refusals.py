@@ -149,8 +149,8 @@ def test_a_stale_shard_is_loaded_and_narrows_with_its_reason(tmp_path):
     loaded = report(tmp_path)
     assert loaded["snapshot"]["loaded"] == ["a", "b"]
     (note,) = loaded["notes"]
-    assert ("stale - depends on compose-services, whose inputs changed in another component: "
-            "b") in note
+    assert ("stale - depends on compose-services, whose inputs in a changed since its shard "
+            "was published: b") in note
     assert "stale - files read by compose-services, openapi-specs changed: a" in note
 
 

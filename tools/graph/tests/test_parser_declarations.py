@@ -11,6 +11,7 @@ case-folded suffix table (D16-14, D16-26, D16-35).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -254,7 +255,7 @@ class _Stub:
     UNRESOLVED_FIELDS = {{"grammar-unavailable": ()}}
 
     def parser_of(self, path, rel, text=None):
-        return {answer!r}
+        return __import__("os").environ.get("B22_STUB_ANSWER") or {answer!r}
 
     def extract(self, ctx):
         res = ExtractResult()
@@ -291,12 +292,13 @@ def write_stub(where: Path, parsers: tuple = ("yaml",), answer: str | None = "ya
                     language=language).encode("utf-8"))
 
 
-def run(where: Path, flag: str) -> subprocess.CompletedProcess:
+def run(where: Path, flag: str, **env: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "tools.graph.build", "--workspace",
          str(where / "ws" / "workspace.toml"), "--out", str(where / "out"), "--run-id",
          "fixed", "--empty-ok", flag],
-        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**os.environ, **env})
 
 
 def test_a_reader_that_declares_no_parser_and_files_grammar_unavailable_breaks_its_contract(
@@ -310,7 +312,7 @@ def test_a_reader_that_declares_no_parser_and_files_grammar_unavailable_breaks_i
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a but declares no parser "
             "it can lack (`PARSERS = ()`) - declare the parser its gate needs, so its shard "
-            "records whether it was installed") in proc.stdout.splitlines()
+            "records the parser's version, or that it was missing") in proc.stdout.splitlines()
     assert "snapshot: refused - " in proc.stdout
     assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
     write_stub(tmp_path, parsers=("yaml",), row=True)  # followed: the parser declared
@@ -328,8 +330,8 @@ def test_a_row_naming_a_parser_its_reader_does_not_declare_breaks_its_contract(t
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming the parser "
             "'typescript', which it does not declare (`PARSERS = ('yaml',)`) - name a parser "
-            "it declares, or declare the one it needs, so its shard records whether it was "
-            "installed") in proc.stdout.splitlines()
+            "it declares, or declare the one it needs, so its shard records the parser's "
+            "version, or that it was missing") in proc.stdout.splitlines()
     assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
     write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
     assert run(tmp_path, "--publish-snapshot").returncode == 0
@@ -343,8 +345,8 @@ def test_a_row_naming_no_parser_breaks_its_contract(tmp_path):
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming no parser - name "
             "the one it could not use in the row's `language`, a parser it declares "
-            "(`PARSERS = ('yaml',)`), so its shard records whether it was installed"
-            ) in proc.stdout.splitlines()
+            "(`PARSERS = ('yaml',)`), so its shard records the parser's version, or that it "
+            "was missing") in proc.stdout.splitlines()
     write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
     assert run(tmp_path, "--publish-snapshot").returncode == 0
 
@@ -423,12 +425,21 @@ def test_every_shipped_reader_with_its_parser_denied_names_a_parser_it_declares(
 
 def test_a_rule_answering_a_parser_it_does_not_declare_is_refused_on_every_door(tmp_path):
     """Review B16-6: the refusal pinned above in-process, as a person meets it - each door
-    that asks a reader's rule exits 2 with the reader's words and an empty stderr."""
+    that asks a reader's rule exits 2 with the reader's words and an empty stderr.
+
+    Batch 22 (T617): the reader's answer moves with its environment, not its code - a change
+    to a reader's code changes the extractor version, so claim 4 calls every shard stale
+    before any door asks the rule (pinned below)."""
     stub_workspace(tmp_path)
     assert run(tmp_path, "--publish-snapshot").returncode == 0
-    write_stub(tmp_path, answer="kotlin")
     for flag in ("--check-fresh", "--from-snapshot", "--incremental", "--publish-snapshot"):
-        proc = run(tmp_path, flag)
+        proc = run(tmp_path, flag, B22_STUB_ANSWER="kotlin")
         assert (proc.returncode, proc.stderr) == (2, ""), (flag, proc.stdout + proc.stderr)
         assert ("!! stub-reader's parser_of returned 'kotlin', which its PARSERS does not "
                 "declare") in proc.stdout.splitlines(), (flag, proc.stdout)
+    write_stub(tmp_path, answer="kotlin")
+    proc = run(tmp_path, "--check-fresh")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert [line for line in proc.stdout.splitlines() if line.startswith("freshness: STALE")] == [
+        f"freshness: STALE {c} - the extractors or their code changed since its shard was "
+        f"published" for c in ("a", "b")], proc.stdout

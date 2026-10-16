@@ -8,9 +8,11 @@ each found one disagreeing with another).
 
 A shard is stamped with the parser state it was built under (ruling 30): every parser its
 component's own readers needed for the files they read, and every parser the readers they
-depend on needed for the files those read anywhere (`parser_stamp`, the one producer the
-publish and the verdict both call). It is stale whenever that stamp differs from what a
-publish would write now - in either direction, whatever the reader (rulings 27, 28).
+depend on needed for the files those read anywhere, each with its version, or `false` where
+it was missing (batch 22, T631) - `parser_stamp`, the one producer the publish and the
+verdict both call. It is stale whenever that stamp differs from what a publish would write
+now - in either direction, whatever the reader (rulings 27, 28) - a version that cannot be
+read comparing presence alone (D22-68).
 
 It names no reader and no estate: which parser a file needs comes from the readers' own
 declarations, handed in by `build.py` as `parser_of` (reader, path, rel) and `probe`.
@@ -39,12 +41,13 @@ UNLISTED_WORDS = ("a directory could not be listed, so its files cannot be calle
                   "(allow listing it, then rebuild)")
 
 ParserOf = Callable[[str, Path, str], "str | None"]
-
-
-def _shared_of(config_sha: str) -> str:
-    """The shared half of a `config_digest` stamp - a stamp from before batch 15b has no
-    halves, so it is all shared, and differs from every current one."""
-    return config_sha.split(":", 1)[0]
+#: Each parser's version now (batch 22, T631): the version of what served it, or `INSTALLED`
+#: where that cannot be read. Asked only of a parser the probe finds installed.
+Version = Callable[[str], str]
+#: A version that cannot be read: presence alone, `main`'s stamp. Where either side of a
+#: comparison reads it, claims 8 and 10 compare presence alone, so an environment that
+#: cannot read a version never stales another's shard on it (D22-68).
+INSTALLED = "installed"
 
 
 def stamp_matches(current: str, stamped: str) -> bool:
@@ -81,11 +84,12 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     """Each parser the shard's readers need, with the readers needing it, in registry order.
 
     The OWN half comes from the files this component handed its own active readers; the
-    CLOSURE half from the files every other component handed the readers in their transitive
-    `REQUIRES` closure, as claim 9 counts those readers' inputs (a closure reader's files in
-    this component are the own half: only an active reader is handed any). Exact per file,
-    since each reader answers by its own gate (`parser_of`); conservative across components
-    where a closure reader's cache is keyed per component (T633). `memo` keeps one answer per
+    CLOSURE half from the files every other component handed the readers in their
+    cross-component closure - `closure` is `build.cross_closure`: the transitive `REQUIRES`
+    closure minus its component-scoped members, whose cache entries reach only their own
+    component (batch 22, T633) - as claim 9 counts those readers' inputs (a closure reader's
+    files in this component are the own half: only an active reader is handed any). Exact per
+    file, since each reader answers by its own gate (`parser_of`). `memo` keeps one answer per
     (reader, file, path handed) across components, so a sniffing reader reads a file once
     per run, and a rule that answers by that path is asked it for each."""
     memo = {} if memo is None else memo
@@ -127,29 +131,128 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     return ordered(own), ordered(near)
 
 
+def stamp_value(parser: str, probe: Callable[[str], bool], version: Version) -> str | bool:
+    """What a stamp records for one parser now: its version where it is installed, `False`
+    where it is not - the one computation the publish writes and the verdict compares."""
+    return version(parser) if probe(parser) else False
+
+
 def parser_stamp(component: str, act: Any, closure: dict[str, frozenset[str]],
                  probe: Callable[[str], bool], parser_of: ParserOf, root: Path,
-                 components: list[dict], memo: dict | None = None) -> dict[str, bool]:
+                 components: list[dict], memo: dict | None = None, *,
+                 version: Version) -> dict[str, str | bool]:
     """The `parsers` a publish writes into this component's manifest, and what the verdict
-    compares the stamp against: every parser either half reaches, with whether it is
-    installed now. The ONE producer of a stamp (design round 3, D16-31)."""
+    compares the stamp against: every parser either half reaches, with the version it has
+    now, or `False` where it is not installed (batch 22, T631). The ONE producer of a stamp
+    (design round 3, D16-31)."""
     own, near = parser_halves(component, act, closure, parser_of, root, components, memo)
-    return {parser: bool(probe(parser)) for parser in sorted({*own, *near})}
+    return {parser: stamp_value(parser, probe, version) for parser in sorted({*own, *near})}
+
+
+def closure_record(component: str, act: Any, cross: dict[str, frozenset[str]],
+                   digests: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """What a shard records of the inputs it read from OTHER components (batch 22, T632): for
+    each extractor in its cross-component closure - its own readers' `cross` closures, unioned
+    - and each other component where that extractor is active, the digest `input_digests`
+    computes there, one per (component, extractor), never one per file. The ONE producer of
+    the record (as `parser_stamp` is of the stamp): the publish writes it, and claim 9
+    compares it against what it would be now."""
+    depended: set[str] = set()
+    for reader in act.by_component.get(component) or []:
+        depended |= cross.get(reader, frozenset())
+    return {comp: {ext: per[ext] for ext in sorted(depended) if ext in per}
+            for comp, per in digests.items()
+            if comp != component and depended & set(per)}
+
+
+def _poisoned(digest: str) -> bool:
+    return digest.startswith("unreadable-")
+
+
+def _record_words(recorded: dict[str, dict[str, str]], now: dict[str, dict[str, str]],
+                  places: dict[str, int], rank: dict[str, int]) -> str:
+    """Claim 9 from the record (batch 22, T632): the first reason in order - 9a, a recorded
+    pair with a digest now that no longer matches it; 9b, a recorded pair with no digest now;
+    9c, a pair with a digest now and no record - components and extractors in registry order.
+    9a asks only of a pair with a digest now (`stamp_matches` is False where a side is empty,
+    so unbounded it would take 9b's case, D22-31), and a poisoned digest is never a match, so
+    it words what it is: unreadable now, the way on in the words, or unreadable at the
+    publish (D22-73b, D22-91)."""
+    def ordered(record: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
+        return sorted(((comp, ext) for comp, per in record.items() for ext in per),
+                      key=lambda pair: (places.get(pair[0], len(places)), pair[0],
+                                        rank.get(pair[1], len(rank)), pair[1]))
+    for comp, ext in ordered(recorded):
+        then, digest = recorded[comp][ext], now.get(comp, {}).get(ext)
+        if digest is not None and not stamp_matches(digest, then):
+            if _poisoned(digest):
+                return f"depends on {ext}, whose inputs in {comp} {UNREADABLE_NOW}"
+            if _poisoned(then):
+                return (f"depends on {ext}, whose inputs in {comp} could not be read when its "
+                        f"shard was published")
+            return (f"depends on {ext}, whose inputs in {comp} changed since its shard was "
+                    f"published")
+    for comp, ext in ordered(recorded):
+        if ext not in now.get(comp, {}):
+            return f"depends on {ext}, which is no longer active in {comp}"
+    for comp, ext in ordered(now):
+        if ext not in recorded.get(comp, {}):
+            return f"depends on {ext}, now active in {comp}, which its shard did not read"
+    return ""
+
+
+def _compared(stamped: str | bool, now: str | bool) -> str | None:
+    """How one parser's stamp differs from now, or None where it matches (batch 22): a legacy
+    `False` compares as any `False` (ruling 28); a legacy `True` records no version; a side
+    reading `INSTALLED` compares presence alone."""
+    if now is False:
+        return None if stamped is False else "removed"
+    if stamped is False:
+        return "installed"
+    if stamped is True:
+        return "unversioned"
+    if INSTALLED in (stamped, now) or stamped == now:
+        return None
+    return "version"
 
 
 #: The kept words (ruling 29): today's reasons stay word for word where they still hold.
 MISSING = "no freshness stamps — no committed shard, or one published before stamps existed"
-EXTRACTORS_CHANGED = "the extractor set changed since its shard was published"
+#: Claim 4: the readers or their code (batch 22, T617).
+EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
+#: Claim 4 where the extractor version is UNKNOWN - a file of the extraction code could not be
+#: read, or is missing (batch 22, T617): its rendering opens with these words and carries its
+#: own way on in parentheses, "`<path>` (<cause>; <way on>)".
+UNKNOWN_VERSION = "a file of the extraction code could not be read: "
+
+
+@dataclass(frozen=True)
+class UnknownVersion:
+    """The extractor version now, where it cannot be computed: `words` is claim 4's rendering
+    for every shard that reaches claim 4 (`build.unknown_words`)."""
+
+    words: str
+
+
+def carries_way(words: str) -> bool:
+    """Whether a stale verdict's words carry their own way on, so a load offers no other for
+    its group - one channel per line (batch 22, D22-79): the unknown version's, and claim 9a's
+    where a sibling's inputs cannot be read now."""
+    return words.startswith(UNKNOWN_VERSION) or words.endswith(UNREADABLE_NOW)
+
+
 #: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96);
 #: `build.py` re-exports it for the load's group words.
 STALE_CONFIG = "the workspace configuration changed since its shard was published"
 #: Claim 6 as `--incremental` words it.
 OWN_FILES = "its own files changed"
 NO_PARSER_STAMP = "its shard was published before parser stamps existed"
-#: Claim 9b's causes, in the order the first one a dependent meets is its reason (T630).
-_UNCOMPARABLE = ("that has no committed shard",
-                 "whose shard was published before stamps existed",
-                 "whose committed snapshot.json could not be read")
+#: Claim 9 where a shard records nothing of what it read from other components but would hold
+#: a record now (batch 22, T632): published before the record existed.
+NO_RECORD = "its shard was published before it recorded the inputs it read from other components"
+#: Claim 9a where the inputs cannot be read now: its way on in its words (D22-73b), so a load
+#: offers no other for its group.
+UNREADABLE_NOW = "cannot be read now (make them readable)"
 
 
 @dataclass(frozen=True)
@@ -198,19 +301,37 @@ def _moved_words(moved: list[str], rank: dict[str, int]) -> str:
         + ([UNLISTED_WORDS] if ACTIVATION_UNLISTED in moved else []))
 
 
-def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, bool],
-               probe: Callable[[str], bool], rank: dict[str, int]) -> str:
-    """Claim 8: the own half of the stamp against now - installed since, removed since, and
-    each name the stamp lacks - or "" where it matches."""
+#: A legacy `true` stamp's words, in either claim (batch 22, D22-35).
+def _unversioned(parser: str) -> str:
+    return f"its shard's parser stamp records no version for `{parser}`"
+
+
+def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, str | bool],
+               probe: Callable[[str], bool], version: Version, rank: dict[str, int]) -> str:
+    """Claim 8: the own half of the stamp against now - installed since, removed since, read
+    with another version (batch 22, T631), stamped with no version, and each name the stamp
+    lacks - or "" where it matches."""
     installed: set[str] = set()
     removed: set[str] = set()
+    moved: list[str] = []
+    unversioned: list[str] = []
     lacked: list[str] = []
     for parser, readers in own.items():
         if parser not in stamped:
             lacked.append(f"its shard's parser stamp does not record `{parser}`, which "
                           f"{_ticked(list(readers))} now use")
-        elif stamped[parser] != bool(probe(parser)):
-            (removed if stamped[parser] else installed).update(readers)
+            continue
+        now = stamp_value(parser, probe, version)
+        kind = _compared(stamped[parser], now)
+        if kind == "installed":
+            installed.update(readers)
+        elif kind == "removed":
+            removed.update(readers)
+        elif kind == "version":
+            moved.append(f"{_ticked(list(readers))} read with `{parser}` {stamped[parser]}; "
+                         f"it is {now} now")
+        elif kind == "unversioned":
+            unversioned.append(_unversioned(parser))
     clauses = []
     if installed:
         clauses.append(f"its shard was published while {_ticked(_in_order(installed, rank))} "
@@ -218,17 +339,19 @@ def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, bool],
     if removed:
         clauses.append(f"its shard was published while {_ticked(_in_order(removed, rank))} "
                        f"had a parser that is no longer installed")
-    return "; ".join(clauses + lacked)
+    return "; ".join(clauses + moved + unversioned + lacked)
 
 
 def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, ...]],
-                   stamped: dict[str, bool], probe: Callable[[str], bool],
-                   rank: dict[str, int]) -> str:
+                   stamped: dict[str, str | bool], probe: Callable[[str], bool],
+                   version: Version, rank: dict[str, int]) -> str:
     """Claim 10: the closure half of the stamp against now, and each stamped name neither half
     reaches any more (D16-52), or "" where it matches. A parser the own half reaches is claim
     8's: the stamp holds one merged map."""
     installed: set[str] = set()
     removed: set[str] = set()
+    moved: list[str] = []
+    unversioned: list[str] = []
     lacked: list[str] = []
     for parser, readers in near.items():
         if parser in own:
@@ -236,8 +359,18 @@ def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, .
         if parser not in stamped:
             lacked.append(f"its shard's parser stamp does not record `{parser}`, which "
                           f"{', '.join(readers)} it depends on now use")
-        elif stamped[parser] != bool(probe(parser)):
-            (removed if stamped[parser] else installed).update(readers)
+            continue
+        now = stamp_value(parser, probe, version)
+        kind = _compared(stamped[parser], now)
+        if kind == "installed":
+            installed.update(readers)
+        elif kind == "removed":
+            removed.update(readers)
+        elif kind == "version":
+            moved.append(f"depends on {', '.join(readers)}, whose parser `{parser}` was "
+                         f"{stamped[parser]} and is {now} now")
+        elif kind == "unversioned":
+            unversioned.append(_unversioned(parser))
     clauses = []
     if installed:
         clauses.append(f"depends on {', '.join(_in_order(installed, rank))}, which had no "
@@ -248,41 +381,29 @@ def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, .
     gone = [f"its shard's parser stamp records `{parser}`, which nothing it reads uses now: "
             f"what it depended on changed or left the tree"
             for parser in sorted(stamped) if parser not in own and parser not in near]
-    return "; ".join(clauses + lacked + gone)
+    return "; ".join(clauses + moved + unversioned + lacked + gone)
 
 
 def judge(readings: dict[str, Any], components: list[dict], act: Any,
           closure: dict[str, frozenset[str]], digests: dict[str, dict[str, str]],
-          version: str, config_shas: dict[str, str], probe: Callable[[str], bool],
-          parser_of: ParserOf, root: Path) -> dict[str, Verdict]:
+          version: str | UnknownVersion, config_shas: dict[str, str],
+          probe: Callable[[str], bool], parser_of: ParserOf, root: Path, *,
+          parser_version: Version) -> dict[str, Verdict]:
     """Every component's verdict, by the design note's claims in order; the first that fails
     is the verdict (section 4). `readings` are `snapshot.read_shard`'s, one per component;
     `digests` the input digests now (`input_digests`), `version` and `config_shas` the
-    extractor version and each component's configuration stamp now.
+    extractor version and each component's configuration stamp now - `version` an
+    `UnknownVersion` where a file of the extraction code cannot be read, which fails claim 4
+    for every shard that reaches it (batch 22) - and `probe` and `parser_version` whether
+    each parser is installed now and its version.
 
-    What marks a dependency's inputs as changed for every dependent (claim 9) is `main`'s
-    three contributors that survive: a sibling's per-extractor stamp against its digest, its
-    shared configuration half, and a sibling with nothing to compare against (no shard, no
-    stamps, a manifest that cannot be read). Its extractor version, its rows and its bytes
-    failing their digest are not, measured or argued safe in design rounds 3-5: the parser
-    stamp, not the rows, decides currency for every reader."""
+    Claim 9 judges what the dependent itself read from other components (batch 22, T632): its
+    shard's record (`closure_record`) against what the record would be now. A sibling's own
+    state - its stamps, its shard, its configuration half - is never read: the dependent's
+    facts depend on the sibling's FILES, which the record compares directly. `closure` is the
+    cross-component closure (`build.cross_closure`, T633)."""
     rank = {name: i for i, name in enumerate(act.by_extractor)}
-    changed: set[str] = set()
-    unseen: dict[str, int] = {}
-    for comp in components:
-        name, reading = comp["name"], readings[comp["name"]]
-        current, stamps = digests.get(name, {}), reading.stamps
-        if stamps is None:
-            cause = 0 if reading.absent == "no shard" else 1 if reading.absent else 2
-            for ext in current:
-                unseen[ext] = min(cause, unseen.get(ext, cause))
-            continue
-        if _shared_of(stamps["config_sha"]) != _shared_of(config_shas[name]):
-            changed |= set(current)
-            continue
-        changed |= {ext for ext in set(current) | set(stamps["inputs"])
-                    if not stamp_matches(current.get(ext, ""), stamps["inputs"].get(ext, ""))}
-
+    places = {comp["name"]: i for i, comp in enumerate(components)}
     memo: dict = {}
     out: dict[str, Verdict] = {}
     for comp in components:
@@ -295,6 +416,8 @@ def judge(readings: dict[str, Any], components: list[dict], act: Any,
                                 remedy=reading.remedy)
         elif stamps is None:
             out[name] = Verdict("stale", MISSING)
+        elif isinstance(version, UnknownVersion):
+            out[name] = Verdict("stale", version.words)
         elif stamps["extractor_version"] != version:
             out[name] = Verdict("stale", EXTRACTORS_CHANGED)
         elif stamps["config_sha"] != config_shas[name]:
@@ -306,30 +429,29 @@ def judge(readings: dict[str, Any], components: list[dict], act: Any,
         elif "parsers" not in stamps:
             out[name] = Verdict("stale", NO_PARSER_STAMP)
         else:
-            out[name] = _parser_verdict(name, act, closure, stamps["parsers"], changed, unseen,
-                                        probe, parser_of, root, components, memo, rank)
+            out[name] = _parser_verdict(name, act, closure, stamps, digests, probe,
+                                        parser_version, parser_of, root, components, memo,
+                                        rank, places)
     return out
 
 
-def _parser_verdict(name: str, act: Any, closure: dict[str, frozenset[str]],
-                    stamped: dict[str, bool], changed: set[str], unseen: dict[str, int],
-                    probe: Callable[[str], bool], parser_of: ParserOf, root: Path,
-                    components: list[dict], memo: dict, rank: dict[str, int]) -> Verdict:
+def _parser_verdict(name: str, act: Any, closure: dict[str, frozenset[str]], stamps: dict,
+                    digests: dict[str, dict[str, str]], probe: Callable[[str], bool],
+                    version: Version, parser_of: ParserOf, root: Path,
+                    components: list[dict], memo: dict, rank: dict[str, int],
+                    places: dict[str, int]) -> Verdict:
     """Claims 8 to 11, for a shard whose own stamps all match."""
+    stamped = stamps["parsers"]
     own, near = parser_halves(name, act, closure, parser_of, root, components, memo)
-    if words := _own_words(own, stamped, probe, rank):
+    if words := _own_words(own, stamped, probe, version, rank):
         return Verdict("stale", words)
-    deps: set[str] = set()
-    for reader in act.by_component.get(name) or []:
-        deps |= closure.get(reader, frozenset())
-    if dirty := _in_order(deps & changed, rank):
-        return Verdict("stale", f"depends on {', '.join(dirty)}, whose inputs changed in "
-                                f"another component")
-    if blind := deps & set(unseen):
-        first = min(unseen[e] for e in blind)
-        exts = _in_order({e for e in blind if unseen[e] == first}, rank)
-        return Verdict("stale", f"depends on {', '.join(exts)}, active in another component "
-                                f"{_UNCOMPARABLE[first]}")
-    if words := _closure_words(own, near, stamped, probe, rank):
+    now = closure_record(name, act, closure, digests)
+    recorded = stamps.get("closure_inputs")
+    if recorded is None:
+        if now:   # belt-and-braces: claim 4 stales every shard published before it (D22-12)
+            return Verdict("stale", NO_RECORD)
+    elif words := _record_words(recorded, now, places, rank):
+        return Verdict("stale", words)
+    if words := _closure_words(own, near, stamped, probe, version, rank):
         return Verdict("stale", words)
     return Verdict("current")

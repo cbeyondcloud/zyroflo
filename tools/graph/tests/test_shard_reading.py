@@ -19,7 +19,7 @@ from tools.graph.core.model import ExtractResult, Node  # noqa: E402
 
 COMP = {"name": "a", "path": "a"}
 STAMPS = {"inputs": {"compose-services": "abc"}, "extractor_version": "v1", "config_sha": "c1",
-          "parsers": {"yaml": True}}
+          "parsers": {"yaml": "PyYAML==6.0.2"}}
 ROWS = [{"extractor": "x", "component": "a", "kind": "k", "source_file": "f", "line": 1,
          "why": "w"}]
 MANIFEST_READ = "its committed snapshot.json exists but could not be read ("
@@ -50,7 +50,7 @@ def test_a_healthy_shard_reads_whole(tmp_path):
     publish(tmp_path)
     reading = SN.read_shard(tmp_path, COMP)
     assert (reading.absent, reading.refused) == (None, None)
-    assert reading.stamps["parsers"] == {"yaml": True}
+    assert reading.stamps["parsers"] == {"yaml": "PyYAML==6.0.2"}
     assert [n.id for n in reading.facts.nodes] == ["svc:a"]
     assert reading.facts.unresolved == ROWS
 
@@ -87,14 +87,14 @@ def test_a_manifest_that_cannot_be_read_is_refused_with_its_cause(tmp_path, raw,
     (lambda m: m.pop("sha256"), "it records no digest"),
     (lambda m: m.__setitem__("inputs", "nonsense"), "`inputs` is not a mapping of strings"),
     (lambda m: m.__setitem__("inputs", {"x": 7}), "`inputs` is not a mapping of strings"),
-    (lambda m: m.__setitem__("parsers", "yes"), "`parsers` is not a mapping of booleans"),
-    (lambda m: m.__setitem__("parsers", {"yaml": "true"}),
-     "`parsers` is not a mapping of booleans"),
+    (lambda m: m.__setitem__("parsers", "yes"), "`parsers` is not a mapping of versions"),
+    (lambda m: m.__setitem__("parsers", {"yaml": ""}),
+     "`parsers` is not a mapping of versions"),
     (lambda m: m.__setitem__("extractor_version", 7), "`extractor_version` is not a string"),
     (lambda m: m.__setitem__("config_sha", None), "`config_sha` is not a string"),
     (lambda m: m.__setitem__("sha256", 1), "`sha256` is not a string"),
 ], ids=["no-sha256", "inputs-a-string", "inputs-an-int", "parsers-a-string",
-        "parsers-a-string-value", "version-an-int", "config-null", "sha256-an-int"])
+        "parsers-an-empty-version", "version-an-int", "config-null", "sha256-an-int"])
 def test_a_wrongly_typed_stamp_block_is_refused_by_name(tmp_path, edit, cause):
     """Design rounds 2 and 5 (D16-16, D16-51): these took three paths down with an
     `AttributeError`, or were told their bytes "no longer match" a digest never recorded."""
@@ -320,7 +320,7 @@ def test_a_shard_converted_to_crlf_is_refused_and_a_re_publish_restores_it(tmp_p
 def test_stamps_of_reads_the_manifest_it_is_handed():
     assert SN.stamps_of(None) is None
     assert SN.stamps_of({"sha256": "x"}) is None
-    assert SN.stamps_of({"sha256": "x", **STAMPS})["parsers"] == {"yaml": True}
+    assert SN.stamps_of({"sha256": "x", **STAMPS})["parsers"] == {"yaml": "PyYAML==6.0.2"}
     assert "parsers" not in SN.stamps_of({"sha256": "x", "inputs": {}})
 
 

@@ -11,13 +11,16 @@
 # FACTS ONLY. `--publish-snapshot` writes each component's extracted facts and
 # nothing else; what the link passes derive is recomputed at load. That is what
 # keeps the snapshot diffable in a pull request instead of churning on every build.
-# Each manifest also records the parsers the readers of its files needed and whether
-# each was installed, so a snapshot published without one is stale where it matters;
-# the shards themselves stay byte-identical.
+# Each manifest also records the parsers the readers of its files needed and each
+# one's version - or that it was missing - and the inputs it read from other
+# components, so a snapshot published without a parser, or under another parser
+# version, or before a sibling's files moved, is stale where it matters; the shards
+# themselves stay byte-identical.
 #
 # IT REFUSES A RED BUILD. A build with failures or contract violations cannot
 # become the new baseline — so a broken extractor cannot quietly overwrite the
-# facts it broke.
+# facts it broke — and nothing is published while a file of the harness's
+# extraction code cannot be read.
 #
 # THIS JOB DOES NOT CHECK FOR DRIFT, AND THAT IS DELIBERATE. `--check-snapshot`
 # answers a different question, and its answer has two opposite causes: the code
@@ -69,9 +72,16 @@ jobs:
       - name: Build and publish
         env:
           WORKSPACE: '@@WORKSPACE_REL@@'
+          # The harness is checked out beneath this repository, which holds no
+          # `tools/graph/build.py` of its own: the module form finds it on the import
+          # path (harness T660) - with this repository's root kept off it, since
+          # `python -m` puts the working directory first, and a `tools` package of this
+          # repository's own would hide the harness's (review B22-1).
+          PYTHONPATH: .sdlc-harness-ci
+          PYTHONSAFEPATH: '1'
         run: |
           uv run --project .sdlc-harness-ci \
-            python tools/graph/build.py \
+            python -m tools.graph.build \
               --workspace "$WORKSPACE" \
               --out .sdlc/graph \
               --publish-snapshot

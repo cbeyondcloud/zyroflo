@@ -52,6 +52,16 @@ _MODULES: dict[str, tuple[str, str]] = {
 }
 
 
+#: Which route served each language this process has parsed - the pinned module's name, or
+#: the aggregate pack - recorded when the parser is built (batch 22, T631): a parser's
+#: version is the version of what served it, and the two routes report different versions
+#: for one grammar (measured: `tree-sitter-java` 0.23.5, the pack 1.14.1).
+_SERVED: dict[str, str] = {}
+
+#: The route name the aggregate pack is recorded under.
+PACK = "tree_sitter_language_pack"
+
+
 class LanguageUnavailable(RuntimeError):
     """Raised when a grammar is not installed — callers degrade, they do not crash."""
 
@@ -87,6 +97,7 @@ def _parser(language: str) -> Any:
             lang = Language(getattr(grammar, factory)())
             parser = Parser(lang)
             parser.language = lang  # keep the Language reachable for query compilation
+            _SERVED[language] = module_name
             return parser
         except Exception as exc:
             # The factory is named in the error, not just the module: a module that imports
@@ -97,9 +108,12 @@ def _parser(language: str) -> Any:
 
     if _pack_parser is not None:
         try:
-            return _pack_parser(language)
+            parser = _pack_parser(language)
         except Exception as exc:
             errors.append(f"language-pack: {exc}")
+        else:
+            _SERVED[language] = PACK
+            return parser
 
     raise LanguageUnavailable(
         f"no tree-sitter grammar for {language!r}"
@@ -116,6 +130,13 @@ def available(language: str) -> bool:
         return True
     except LanguageUnavailable:
         return False
+
+
+def served_by(language: str) -> str | None:
+    """The route that served `language` in this process - the pinned module's name, or
+    `PACK` - or None where nothing has served it. It asks nothing: a caller that needs the
+    route asks `available` first, which establishes it (batch 22, T631)."""
+    return _SERVED.get(language)
 
 
 class SourceFile:

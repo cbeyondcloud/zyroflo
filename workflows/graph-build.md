@@ -46,19 +46,32 @@ for a single repository or an estate target.
    `--check-snapshot` verifies a committed snapshot reproduces the source build.
 3. **Check freshness.** MCP `check_fresh`, or CLI `build.py --target <repo>
    --check-fresh` (or `--workspace <toml>` in place of `--target <repo>`).
-   Content decides, not commits: it hashes what the extractors would read and
-   compares against the committed shards' stamps. Per component: fresh; stale
-   with the reason, a component that depends on one whose inputs moved
-   included; or REFUSED, a shard it cannot trust, with its remedy. A NOTE, at
-   exit 0 as at exit 2, names a deployment reader whose shard says it had no
-   parser and that still has none, with the parser its rows name, and ends with
-   the way on. Where every row names a parser: install the parser each
-   `grammar-unavailable` row names, then re-publish the shards it names. Where
-   a row names no parser its reader declares, there is none to install, and
-   whether one is installed cannot be asked: name, in each
-   `grammar-unavailable` row that names none, a parser its reader declares,
-   then re-publish the shards it names. A reader with rows of both kinds is
-   given both. MCP `check_fresh`'s result carries, per reader, its components
+   Content decides, not commits: it hashes what the extractors would read - the
+   harness's own extraction code and the files each shard read in other
+   components included - and compares against the committed shards' stamps.
+   Per component: fresh; stale with the reason - its own files, the extractors
+   or their code (every shard is stale once after a harness upgrade that touches
+   the extraction path: re-publish once), the workspace config, a parser or its
+   version, or what it read from another component (files there that changed
+   since its publish, a reader no longer or newly active there); or REFUSED, a
+   shard it cannot trust, with its remedy. A file of the extraction code that
+   cannot be read, or is missing, makes every shard that reaches the code's
+   check stale, its line naming the file and the way on in parentheses (make it
+   readable, restore it, or remove or retarget a link that never ends); the
+   publish refuses until it reads. `build.py` itself is the exception: run as a
+   script while it cannot be read, it answers exit 0 with nothing printed, and
+   missing, "can't open file" - run the module form,
+   `python -m tools.graph.build`, which cached bytecode serves where it exists,
+   to get the answer; on a fresh checkout, which holds none, the import ends the
+   door (T663). A NOTE, at exit 0 as at exit 2, names a deployment reader whose
+   shard says it had no parser and that still has none, with the parser its rows
+   name, and ends with the way on. Where every row names a parser: install the
+   parser each `grammar-unavailable` row names, then re-publish the shards it
+   names. Where a row names no parser its reader declares, there is none to
+   install, and whether one is installed cannot be asked: name, in each
+   `grammar-unavailable` row that names none, a parser its reader declares, then
+   re-publish the shards it names. A reader with rows of both kinds is given
+   both. MCP `check_fresh`'s result carries, per reader, its components
    (`unparsed`) and the parsers its rows name (`unparsed_parsers`, `""` for a
    row naming none it declares), but one way on for the whole set
    (`unparsed_way`), joining both ways when the set needs both.
@@ -68,12 +81,12 @@ for a single repository or an estate target.
    --incremental --publish-snapshot` (or `--workspace <toml> --out <graph-dir>`
    in place of `--target <repo>`). The publish is what moves the stamps: a
    rebuild without it refreshes the served graph and leaves `check_fresh`
-   answering stale. `--incremental` rebuilds only the components whose inputs,
-   parser state or dependencies moved — its output is byte-identical to a full
-   build, so reach for it first; a changed extractor set or workspace config
-   forces the full path on
-   its own. `--only` / `--components` narrow a deliberate build; never use them
-   to "freshen" — freshness is whole-graph.
+   answering stale. `--incremental` rebuilds only the components whose own
+   inputs, parser versions, or inputs read from another component moved — its
+   output is byte-identical to a full build, so reach for it first; a change to
+   the extractors or their code (a harness upgrade), or to the workspace config,
+   rebuilds every component on its own. `--only` / `--components` narrow a
+   deliberate build; never use them to "freshen" — freshness is whole-graph.
 5. **Validate.** MCP `validate_graph`, or CLI `graph/validate.py --graph-dir
    <graph-dir>`. Read the verdict AND the parts: every metric shows
    numerator/denominator, N/A is never graded, and `--sample N` draws a seeded
