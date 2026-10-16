@@ -1085,6 +1085,37 @@ def test_unknown_language_degrades_explicitly():
         srcfacts.parse("not-a-language", "x")
 
 
+def test_served_by_names_the_route_that_served_each_language():
+    """Batch 22 (T631): a parser's version is the version of what served it, so `srcfacts`
+    records the route - the pinned per-language module, or the aggregate pack - and
+    `served_by` reads it. Nothing asked, or nothing serving, answers None."""
+    assert srcfacts.served_by("never-asked-language") is None
+    assert srcfacts.available("not-a-language") is False
+    assert srcfacts.served_by("not-a-language") is None
+    pinned = [lang for lang, (module, _factory) in srcfacts._MODULES.items()
+              if srcfacts.available(lang)]
+    # Branch and assert, never skip: where a pinned grammar serves, its module is the route;
+    # where none can, every pinned language must be one nothing serves or the pack serves.
+    if pinned:
+        lang = pinned[0]
+        assert srcfacts.served_by(lang) == srcfacts._MODULES[lang][0]
+    else:
+        for lang in srcfacts._MODULES:
+            assert srcfacts.served_by(lang) in (None, "tree_sitter_language_pack")
+
+
+def test_served_by_names_the_pack_where_only_the_pack_serves(monkeypatch):
+    """A language with no importable pinned module, which the aggregate pack serves, is
+    recorded as the pack's - its distribution, not a guess, gives the version."""
+    marker = object()
+    monkeypatch.setitem(srcfacts._MODULES, "b22-pack-only", ("no_such_grammar_module_b22",
+                                                             "language"))
+    monkeypatch.setattr(srcfacts, "_pack_parser",
+                        lambda language: marker if language == "b22-pack-only" else None)
+    assert srcfacts.available("b22-pack-only") is True
+    assert srcfacts.served_by("b22-pack-only") == "tree_sitter_language_pack"
+
+
 @pytest.mark.skipif(not srcfacts.available("python"), reason="grammar unavailable")
 def test_query_failure_is_recorded_not_silently_dropped():
     """A broken query must record the loss so callers can surface it.
