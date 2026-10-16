@@ -2151,7 +2151,12 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     components grouped by reason, each reason word for word, each group capped. A refusal's
     exact remedy is on its REFUSING line; the way on here keeps "or build the whole
     workspace", which no refusal blocks. The parser group is every deployment reader whose
-    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53)."""
+    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53).
+
+    One channel per line (batch 22, D22-79): a group whose words carry their own way on in
+    parentheses - an unknown extractor version's, claim 9a's inputs that cannot be read now
+    (`freshness.carries_way`) - is offered no other, and where only such groups narrow the
+    load, its line ends "To judge both: do what each reason says.", each way on in its reason."""
     digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
     groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
         + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
@@ -2276,7 +2281,9 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     `.sdlc/graph/` (item 13); `check_snapshot` byte-compares a fresh extraction against
     those committed shards instead. Both refuse quietly-wrong states: a build with
     failures or contract violations publishes nothing, because a shard missing an
-    extractor's facts commits an absence that reads exactly like a clean answer.
+    extractor's facts commits an absence that reads exactly like a clean answer; and a
+    publish refuses before extracting anything while a file of the extraction code cannot
+    be read (batch 22), since no stamp may hold a version nobody could compute.
     """
     # **A question writes nothing, and `out` is what it is asking about.** Under
     # `--check-snapshot` `out` is the committed `.sdlc/graph/` (item 102) whose bytes the
@@ -3293,7 +3300,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="after the build, write each component's extracted FACTS into that "
                          "component's own .sdlc/graph/ (shard.jsonl + digest). Facts only: "
                          "what link passes derive is recomputed at load, never committed. "
-                         "Refused when the build had failures or contract violations")
+                         "Refused when the build had failures or contract violations, and "
+                         "before extracting anything while a file of the extraction code "
+                         "cannot be read")
     ap.add_argument("--from-snapshot", action="store_true",
                     help="build the graph from the committed shards instead of extracting: "
                          "load every component's .sdlc/graph/, verify digests, recompute "
@@ -3314,20 +3323,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--incremental", action="store_true",
                     help="reuse committed shards for components whose inputs are unchanged "
                          "and extract only the rest. Content decides: per-extractor input "
-                         "digests recorded at publish, plus the extractor set and workspace "
-                         "config. A component whose declared dependencies (REQUIRES) "
-                         "changed anywhere is rebuilt too, and the extractors those "
-                         "dependencies name re-run everywhere so the shared cache holds "
-                         "what a full build's would. The output is byte-identical to a "
-                         "full build of the same tree. With nothing to reuse it IS a full "
-                         "build, and says so")
+                         "digests recorded at publish, plus the extractors and their code, "
+                         "the workspace config, the parsers its files needed and their "
+                         "versions, and the inputs it read from other components through "
+                         "the shared cache - a component whose such inputs changed is "
+                         "rebuilt too, and the extractors its readers depend on (REQUIRES) "
+                         "re-run everywhere so the shared cache holds what a full build's "
+                         "would. The output is byte-identical to a full build of the same "
+                         "tree. With nothing to reuse it IS a full build, and says so")
     ap.add_argument("--check-fresh", action="store_true",
                     help="is the committed snapshot current with the tree? Hashes every "
-                         "file the extractors would read (seconds) and compares against "
-                         "the stamps recorded at publish - no extraction. Exit 0 means "
-                         "the committed graph IS the tree; stale components are named "
-                         "with why, exit 2. Content answers, not commits: a moved HEAD "
-                         "with unmoved files is fresh, a dirty tree is stale")
+                         "file the extractors would read, the harness's own extraction code "
+                         "and the files each shard read in other components (seconds), and "
+                         "compares against the stamps recorded at publish - no extraction. "
+                         "Exit 0 means the committed graph IS the tree; stale components "
+                         "are named with why, exit 2. Content answers, not commits: a moved "
+                         "HEAD with unmoved files is fresh, a dirty tree is stale")
     ap.add_argument("--propose-canonical", action="store_true",
                     help="after the build, draft canonical.proposed.toml in the output "
                          "directory: one [[canonical]] block per contested service, "

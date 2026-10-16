@@ -76,7 +76,8 @@ Writes each component's extracted **facts** into that component's own
 `.sdlc/graph/`. Facts only — what link passes derive is recomputed at load and
 never committed, which is what keeps the snapshot diffable.
 
-It refuses when the build had failures or contract violations, so a red build
+It refuses when the build had failures or contract violations, or while a file of the
+harness's extraction code cannot be read, so a red build
 cannot quietly become the new baseline.
 
 **This one is a workflow** (`sdlc_templates/snapshot-publish.yml`, written by

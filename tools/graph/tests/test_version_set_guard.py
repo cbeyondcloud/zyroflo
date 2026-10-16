@@ -288,8 +288,8 @@ def stray_imports(regs) -> dict[str, list[str]]:
 
 def test_part_3_every_import_in_the_set_names_the_set_or_an_exclusion():
     assert stray_imports(with_orderflow()) == {}
-    assert imports_in("tools/graph/build.py",
-                      (ROOT / "tools/graph/build.py").read_text(encoding="utf-8")) >= EXCEPTION[1], (
+    source = (ROOT / "tools/graph/build.py").read_text(encoding="utf-8")
+    assert imports_in("tools/graph/build.py", source) >= EXCEPTION[1], (
         "the named exception is still where it is named")
 
 
