@@ -161,6 +161,16 @@ class VersionUnknown(Exception):
         self.spelling, self.cause, self.missing, self.own = spelling, cause, missing, own
 
 
+@dataclass(frozen=True)
+class WalkedAs:
+    """A directory the extractor version reached under a second spelling - a second link to it,
+    or a link back up the tree - which it walked under `spelling`, the first in walk order
+    (review round 2). Digested as that pointer, so a link moved, renamed or retargeted moves
+    the version; never walked again, so a cycle ends."""
+
+    spelling: str
+
+
 # ── registration ──────────────────────────────────────────────────────────────
 
 
@@ -839,13 +849,23 @@ def _cause(exc: OSError) -> str:
     return repo_walk.os_error_word(exc)
 
 
-def _version_tree(top: Path, base: str, *, package: bool, own: bool = True) -> dict[str, Path]:
+def _version_tree(top: Path, base: str, *, package: bool,
+                  own: bool = True) -> dict[str, Path | WalkedAs]:
     """Every `.py` file under `top`, spelled `<base>/<path below top>`, a `tests/` directory
     inside a package left out: for a reader's PACKAGE any `tests/` below it; for a TREE its
     children are the packages, so a child named `tests` - a registered reader - is held
     whole. A `top` that is missing or no directory, or a directory that cannot be listed,
     makes the version unknown (D22-101): `os.walk` hands each to `unlisted`, top included,
-    so it is never a walk of nothing read as an empty set."""
+    so it is never a walk of nothing read as an empty set.
+
+    A directory link is followed, as a reader's own import follows it, and each real
+    directory is walked once, under its first spelling in walk order (names sorted, depth
+    first); any other spelling of it - a second link to it, a link back up the tree - is a
+    `WalkedAs` naming the first (review round 2: keeping the first spelling alone, a module
+    moved behind a link left the version equal). An entry that cannot be followed to anything
+    - a link to nothing, a junction and a symlink alike - makes the version unknown as a
+    directory the walk cannot list does: `os.walk` read a dangling junction as a directory and
+    a dangling symlink as a file, so one tree gave two answers by platform (review round 2)."""
 
     def unlisted(exc: OSError) -> None:
         where = Path(exc.filename) if exc.filename else top
@@ -853,34 +873,46 @@ def _version_tree(top: Path, base: str, *, package: bool, own: bool = True) -> d
         raise VersionUnknown(base if below == "." else f"{base}/{below}", _cause(exc),
                              isinstance(exc, FileNotFoundError), own)
 
+    def spelled(path: Path) -> str:
+        below = path.relative_to(top).as_posix()
+        return base if below == "." else f"{base}/{below}"
+
     floor = 0 if package else 1
-    found: dict[str, Path] = {}
-    walked: set[str] = set()
-    # A directory link is followed, as a reader's own import follows it - `os.walk` entered a
-    # Windows junction but not a POSIX symlink, so one tree gave two versions - and each real
-    # directory is walked once, so a link back up the tree ends rather than descending until
-    # the path breaks (review round 1).
+    found: dict[str, Path | WalkedAs] = {}
+    first: dict[str, str] = {}
+    # `os.walk` entered a Windows junction but not a POSIX symlink, so one tree gave two
+    # versions: every directory link is followed (review round 1).
     for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted, followlinks=True):
+        here = Path(dirpath)
         real = os.path.normcase(os.path.realpath(dirpath))
-        if real in walked:
+        if real in first:
+            found[spelled(here)] = WalkedAs(first[real])
             dirnames[:] = []
             continue
-        walked.add(real)
-        here = Path(dirpath)
+        first[real] = spelled(here)
         depth = len(here.relative_to(top).parts)
-        dirnames[:] = sorted(d for d in dirnames
-                             if d != "__pycache__" and not (d == "tests" and depth >= floor))
+        kept = [n for n in dirnames + filenames
+                if n != "__pycache__" and not (n == "tests" and depth >= floor)]
+        for name in kept:
+            try:
+                os.stat(here / name)
+            except OSError as exc:
+                raise VersionUnknown(spelled(here / name), _cause(exc),
+                                     isinstance(exc, FileNotFoundError), own) from None
+        dirnames[:] = sorted(n for n in dirnames if n in kept)
         for name in filenames:
             if name.endswith(".py"):
-                found[f"{base}/{(here / name).relative_to(top).as_posix()}"] = here / name
+                found[spelled(here / name)] = here / name
     return found
 
 
-def version_files(regs: list[Registration], root: Path | None = None) -> list[tuple[str, Path]]:
+def version_files(regs: list[Registration],
+                  root: Path | None = None) -> list[tuple[str, Path | WalkedAs]]:
     """The files the extractor version digests, `(spelling, path)` sorted by spelling (batch 22,
     T617; option B): `VERSION_MEMBERS`, every `.py` under `VERSION_TREES`, every registered
     reader's package - its `.py` files, its own `tests/` left out - and `PROFILES_INIT` where a
-    selected profile is imported through the harness's own `profiles/`.
+    selected profile is imported through the harness's own `profiles/`. A directory a link
+    reaches under a second spelling is `(spelling, WalkedAs(first spelling))` (`_version_tree`).
 
     Each harness file is spelled relative to the harness root and read under `root` (the
     running harness, but for a test of a copy); each out-of-tree package's files relative to
@@ -890,7 +922,7 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
     (D22-87): a profile's `traversal_rules.yml` weighs traversal, never a shard. A
     registration with no package is refused, never digested as nothing (D22-38)."""
     root = HARNESS_ROOT if root is None else root
-    found: dict[str, Path] = {rel: root / rel for rel in VERSION_MEMBERS}
+    found: dict[str, Path | WalkedAs] = {rel: root / rel for rel in VERSION_MEMBERS}
     for rel in VERSION_TREES:
         found.update(_version_tree(root / rel, rel, package=False))
     outside: dict[Path, str] = {}
@@ -916,8 +948,8 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
             if spelling in found:
                 already = ("a file of the harness's extraction code is" if spelling in harness
                            else f"`{owners[spelling]}`'s package file is")
-                raise BuildError(f"`{name}`'s package file `{path.relative_to(pkg).as_posix()}` "
-                                 f"is spelled `{spelling}`, as {already}, so the extractor "
+                raise BuildError(f"`{name}`'s package file `{spelling[len(name) + 1:]}` is "
+                                 f"spelled `{spelling}`, as {already}, so the extractor "
                                  f"version could not tell them apart - rename the reader")
             found[spelling] = path
             owners[spelling] = name
@@ -927,7 +959,8 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
 def extractor_version(regs: list[Registration], root: Path | None = None) -> str:
     """A digest of the registered set - each reader's name, layer and globs - and of the
     extraction code (batch 22, T617): every file `version_files` names, by its spelling, its
-    bytes with CRLF folded to LF, so a CRLF checkout reads the version an LF one does.
+    bytes with CRLF folded to LF, so a CRLF checkout reads the version an LF one does, and each
+    directory it reached under a second spelling, by the spelling it was walked under.
 
     Stamped into every manifest, so a shard is stale once the readers or their code change
     (claim 4), not only when its files do: adding an extractor, or changing one's code, would
@@ -940,6 +973,9 @@ def extractor_version(regs: list[Registration], root: Path | None = None) -> str
                                            for r in regs)).encode("utf-8"))
     tree = HARNESS_ROOT if root is None else root
     for spelling, path in version_files(regs, root):
+        if isinstance(path, WalkedAs):
+            digest.update(f"\0{spelling}\0->{path.spelling}\0".encode("utf-8"))
+            continue
         try:
             data = path.read_bytes().replace(b"\r\n", b"\n")
         except OSError as exc:

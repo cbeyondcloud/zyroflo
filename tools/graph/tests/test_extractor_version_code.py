@@ -333,7 +333,8 @@ def test_a_directory_link_in_a_readers_package_is_followed_once(tmp_path):
     would not follow a POSIX symlink, so one tree gave two versions by platform; and a link
     back to the package descended until the path broke, the version UNKNOWN - every door saying
     a file "could not be read". A directory link is followed, as the reader's own import
-    follows it, and each real directory is walked once."""
+    follows it, and each real directory is walked once - a second spelling of one recorded as
+    the spelling it was walked under (review round 2)."""
     pkg = package(tmp_path, "prof", "b22-linked")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -341,17 +342,147 @@ def test_a_directory_link_in_a_readers_package_is_followed_once(tmp_path):
     link(elsewhere, pkg / "linked")
     link(pkg, pkg / "loop")
     try:
-        regs = B.discover_extractors() + B.discover_package(pkg, "profile", {},
-                                                            root_label="profiles")[0]
-        found = [s for s in spellings(regs) if s.startswith("b22-linked/")]
+        regs = registered(pkg)
+        found = mine(regs, "b22-linked/")
         before = B.extractor_version(regs)
         (elsewhere / "extra.py").write_text("X = 2\n", encoding="utf-8")
         after = B.extractor_version(regs)
     finally:
         unlink(pkg / "loop")
         unlink(pkg / "linked")
-    assert found == ["b22-linked/__init__.py", "b22-linked/linked/extra.py"], found
+    assert found == {"b22-linked/__init__.py": pkg / "__init__.py",
+                     "b22-linked/linked/extra.py": pkg / "linked" / "extra.py",
+                     "b22-linked/loop": B.WalkedAs("b22-linked")}, found
     assert before != after, "a change behind the link moves the version"
+
+
+def registered(pkg: Path) -> list:
+    return B.discover_extractors() + B.discover_package(pkg, "profile", {},
+                                                        root_label="profiles")[0]
+
+
+def mine(regs, prefix: str) -> dict:
+    return {s: p for s, p in B.version_files(regs) if s.startswith(prefix)}
+
+
+def test_a_dangling_directory_link_makes_the_version_unknown_on_every_platform(tmp_path):
+    """Review round 2 (B22-8): a link whose directory is gone was a directory the walk could
+    not list on Windows (a junction) and a file not ending `.py`, dropped without a word, on
+    POSIX (a symlink). Both now make the version unknown, naming the link - D22-101's reading
+    of what the walk cannot list."""
+    pkg = package(tmp_path, "prof", "b22-dangling")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    link(gone, pkg / "linked")
+    gone.rmdir()
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B.extractor_version(registered(pkg))
+    finally:
+        unlink(pkg / "linked")
+    assert (caught.value.spelling, caught.value.cause, caught.value.missing,
+            caught.value.own) == ("b22-dangling/linked", "No such file or directory", True, False)
+
+
+def test_a_dangling_link_named_tests_in_a_package_is_left_out_as_its_directory_is(tmp_path):
+    """The exclusions come first: a package's `tests/` is never digested, so a link of that
+    name to nothing is left out too, never read as unknown."""
+    pkg = package(tmp_path, "prof", "b22-tests-link")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    link(gone, pkg / "tests")
+    gone.rmdir()
+    try:
+        found = mine(registered(pkg), "b22-tests-link/")
+    finally:
+        unlink(pkg / "tests")
+    assert found == {"b22-tests-link/__init__.py": pkg / "__init__.py"}, found
+
+
+def test_a_module_moved_behind_a_link_moves_the_version(tmp_path):
+    """Review round 2 (B22-9): `current -> v1` and `current -> v2`, the same bytes behind each -
+    the module moved, and the version kept the link's spelling and pruned the real one's, so it
+    did not move. The real directory's spelling is recorded as walked under the link's."""
+    versions, files = [], []
+    for vdir in ("v1", "v2"):
+        pkg = package(tmp_path / vdir, f"prof_{vdir}", "b22-vbump")
+        (pkg / vdir).mkdir()
+        (pkg / vdir / "mod.py").write_text("X = 1\n", encoding="utf-8")
+        link(pkg / vdir, pkg / "current")
+        try:
+            regs = registered(pkg)
+            versions.append(B.extractor_version(regs))
+            files.append({s: p for s, p in mine(regs, "b22-vbump/").items()
+                          if s != "b22-vbump/__init__.py"})
+        finally:
+            unlink(pkg / "current")
+    assert versions[0] != versions[1], "the module moved"
+    assert files == [{"b22-vbump/current/mod.py": tmp_path / "v1/prof_v1/current/mod.py",
+                      "b22-vbump/v1": B.WalkedAs("b22-vbump/current")},
+                     {"b22-vbump/current/mod.py": tmp_path / "v2/prof_v2/current/mod.py",
+                      "b22-vbump/v2": B.WalkedAs("b22-vbump/current")}], files
+
+
+def test_a_directory_and_a_link_to_it_digest_apart_from_the_directory_alone(tmp_path):
+    """Review round 2 (B22-9): a real `zdir/mod.py` with `adir -> zdir` digested as a plain
+    `adir/mod.py` - renaming the directory onto the link's name was invisible to claim 4."""
+    linked = package(tmp_path / "a", "prof_a", "b22-plain")
+    (linked / "zdir").mkdir()
+    (linked / "zdir" / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    link(linked / "zdir", linked / "adir")
+    plain = package(tmp_path / "b", "prof_b", "b22-plain")
+    (plain / "adir").mkdir()
+    (plain / "adir" / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    try:
+        with_link = B.extractor_version(registered(linked))
+    finally:
+        unlink(linked / "adir")
+    assert with_link != B.extractor_version(registered(plain))
+
+
+def test_a_link_retargeted_between_two_kept_directories_moves_the_version(tmp_path):
+    """Both directories kept, the link moved from one to the other: the code it imports changed,
+    so the version moves - skipping a link into its own package, and walking its directory under
+    the real spelling alone, would leave it equal."""
+    pkg = package(tmp_path, "prof", "b22-retarget")
+    for vdir, body in (("v1", "X = 1\n"), ("v2", "X = 2\n")):
+        (pkg / vdir).mkdir()
+        (pkg / vdir / "mod.py").write_text(body, encoding="utf-8")
+    regs = registered(pkg)
+    link(pkg / "v1", pkg / "current")
+    try:
+        on_v1 = B.extractor_version(regs)
+    finally:
+        unlink(pkg / "current")
+    link(pkg / "v2", pkg / "current")
+    try:
+        on_v2 = B.extractor_version(regs)
+    finally:
+        unlink(pkg / "current")
+    assert on_v1 != on_v2
+
+
+def test_two_links_to_one_directory_and_a_cycle_through_two_links(tmp_path):
+    """A directory outside the package reached by two links is walked once, under the first
+    spelling in walk order, the second recorded as walked there; a cycle through two links -
+    out of the package and back into it - ends, recorded the same way."""
+    pkg = package(tmp_path, "prof", "b22-two")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    link(other, pkg / "aaa")
+    link(other, pkg / "zzz")
+    link(pkg, other / "back")
+    try:
+        found = mine(registered(pkg), "b22-two/")
+    finally:
+        unlink(other / "back")
+        unlink(pkg / "zzz")
+        unlink(pkg / "aaa")
+    assert found == {"b22-two/__init__.py": pkg / "__init__.py",
+                     "b22-two/aaa/back": B.WalkedAs("b22-two"),
+                     "b22-two/aaa/mod.py": pkg / "aaa" / "mod.py",
+                     "b22-two/zzz": B.WalkedAs("b22-two/aaa")}, found
 
 
 def test_a_registration_with_no_package_is_refused():
