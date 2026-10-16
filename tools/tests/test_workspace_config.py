@@ -752,7 +752,7 @@ DEPLOYS_REFUSALS = {
     "identical-duplicate": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
                             'onto = "svc:web@orders"\n'
                             '[[deploys]]\nservice = "web"\ncomponent = "charts"\nonto = ""\n',
-                            "two \[\[deploys\]\] blocks both declare service 'web' of "
+                            r"two \[\[deploys\]\] blocks both declare service 'web' of "
                             "'charts'"),
 }
 
