@@ -68,6 +68,18 @@ def image_key(reference: str, registry: str = "") -> str:
     return f"{host}/{'/'.join(path)}"
 
 
+def as_written(reference: str, registry: str = "") -> str:
+    """The reference as a row shows it (batch 23): a helm `registry` before a reference that names
+    no host of its own - as `image_key` reads one, never over a host it names - and a template span
+    as `{{ ... }}`, where its reader published the token: the files wrote a span, never the
+    token."""
+    ref = reference.strip()
+    segments = _segments(ref)
+    if registry.strip() and not (len(segments) > 1 and _is_host(segments[0])):
+        ref = f"{registry.strip().rstrip('/')}/{ref}"
+    return ref.replace(TOKEN, "{{ ... }}")
+
+
 def literal_tail(reference: str) -> str:
     """The path after the reference's last interpolated segment, its tag dropped - `${REG}/org/web:1`
     gives `org/web`, `${IMAGE}` gives "" - so a reference with no key can still be compared with
