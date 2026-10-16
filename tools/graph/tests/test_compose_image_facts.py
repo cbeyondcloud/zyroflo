@@ -132,3 +132,100 @@ def test_an_override_with_an_unread_chain_of_its_own_keeps_its_own(tmp_path):
     assert override["extends_unread"].startswith("names `other.yml`")
     rows = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
     assert sorted(r["source_file"] for r in rows) == ["compose.override.yml", "compose.yaml"]
+
+
+# ── include: what it names that the reader does not read ─────────────────────────────────
+
+STACK = "services:\n  web:\n    build: ../orders\n"
+
+
+def node_of(built, source: str) -> dict:
+    (node,) = [n for n in built.nodes if n["id"] == "deploy:" + source]
+    return node["props"]
+
+
+def include_rows(built) -> list[str]:
+    return sorted(r["why"] for r in built.kinds("compose-include-unresolved"))
+
+
+@pytest.mark.parametrize("include", ["include: stack.yml\n", "include:\n  path: stack.yml\n",
+                                     "include:\n  - stack.yml\n"],
+                         ids=["a-scalar", "a-single-mapping", "a-list"])
+def test_an_include_naming_a_file_the_reader_does_not_read_is_unread_on_its_node(tmp_path,
+                                                                                include):
+    """D23-141, D23-161: written as a scalar or a single mapping, `include: stack.yml` left the
+    run complete over a graph missing its only build; it is read as a list of what it spells, the
+    file named on the compose node, with a row of its own beside the "is not a list" row."""
+    built = build(tmp_path, deploy(include + "services:\n  other:\n    image: org/other\n",
+                                   **{"stack.yml": STACK}))
+    (entry,) = node_of(built, "deploy/compose.yaml")["include_unread"]
+    assert entry == {"file": "stack.yml", "line": 1 if include.startswith("include: ") else 2}, \
+        entry
+    rows = include_rows(built)
+    assert any("names `stack.yml`, which is not named as a compose file" in r for r in rows)
+    assert len(rows) == (1 if include.startswith("include:\n  -") else 2), rows
+
+
+@pytest.mark.parametrize("include, row", [
+    ("include: 7\n", "`include:` is not a list of files"),
+    ("include:\n  - 7\n", "`include:` has an entry that names no file"),
+    ("include:\n  project_directory: ../x\n", "`include:` is not a list of files"),
+    ("include:\n  - \"\"\n", "`include:` names no file"),
+], ids=["a-number", "a-list-of-a-number", "a-mapping-with-no-path", "an-empty-entry"])
+def test_an_include_that_spells_no_file_hides_nothing_and_its_row_stands_alone(tmp_path,
+                                                                              include, row):
+    """D23-149, D23-160: a value that is no string names no file, in either spelling - one
+    compose refuses, which hides nothing."""
+    built = build(tmp_path, deploy(include + "services:\n  other:\n    image: org/other\n"))
+    assert "include_unread" not in node_of(built, "deploy/compose.yaml")
+    (only,) = include_rows(built)
+    assert only.startswith(row), only
+
+
+def test_a_single_mapping_listing_two_unread_files_names_both(tmp_path):
+    """D23-161: a row for each, both in `include_unread`."""
+    built = build(tmp_path, deploy("include:\n  path:\n    - stack.yml\n    - more.yml\n"
+                                   "services:\n  other:\n    image: org/other\n",
+                                   **{"stack.yml": STACK, "more.yml": STACK}))
+    assert [e["file"] for e in node_of(built, "deploy/compose.yaml")["include_unread"]] == [
+        "stack.yml", "more.yml"]
+    rows = include_rows(built)
+    assert sum("names `stack.yml`" in r or "names `more.yml`" in r for r in rows) == 2, rows
+
+
+def test_an_include_naming_a_file_the_reader_reads_withholds_nothing(tmp_path):
+    """D23-148: counted whole, a scalar naming a file the reader read withheld every judgement;
+    its row says what it is, and nothing is unread."""
+    built = build(tmp_path, deploy("include: docker-compose.stack.yml\n"
+                                   "services:\n  other:\n    image: org/other\n",
+                                   **{"docker-compose.stack.yml": STACK}))
+    assert "include_unread" not in node_of(built, "deploy/compose.yaml")
+    assert include_rows(built) == [
+        "`include:` is not a list of files. The services it declares are missing from the "
+        "graph, not absent"]
+
+
+def test_a_single_mappings_project_directory_is_checked_as_a_list_entrys_is(tmp_path):
+    """D23-162: its misplacement row with it, nothing unread."""
+    built = build(tmp_path, deploy("include:\n  path: infra/docker-compose.stack.yml\n"
+                                   "  project_directory: .\n"
+                                   "services:\n  other:\n    image: org/other\n",
+                                   **{"infra/docker-compose.stack.yml": STACK}))
+    assert "include_unread" not in node_of(built, "deploy/compose.yaml")
+    rows = include_rows(built)
+    assert any("with `project_directory: .`" in r for r in rows) and len(rows) == 2, rows
+
+
+def test_a_file_holding_only_an_include_of_an_unread_file_has_a_node_saying_so(tmp_path):
+    """A top-level compose file that declares no service of its own and includes an unread one:
+    its node, carrying no claim, names the file - else nothing in the graph would."""
+    built = build(tmp_path, deploy("include:\n  - stack.yml\n", **{"stack.yml": STACK}))
+    props = node_of(built, "deploy/compose.yaml")
+    assert props["include_unread"] == [{"file": "stack.yml", "line": 2}]
+    assert not [e for e in built.deploys if e["src"] == "deploy:deploy/compose.yaml"]
+
+
+def test_a_file_holding_only_an_include_it_reads_has_no_node(tmp_path):
+    built = build(tmp_path, deploy("include:\n  - docker-compose.stack.yml\n",
+                                   **{"docker-compose.stack.yml": STACK}))
+    assert not [n for n in built.nodes if n["id"] == "deploy:deploy/compose.yaml"]

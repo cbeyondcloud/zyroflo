@@ -973,19 +973,41 @@ class ComposeExtractor:
                 for decl in declared:
                     if decl.service is not None:
                         on_node.setdefault(decl.claim.target, []).append(rel)
+            # Batch 23: what each file's `include:` names that this reader does not read goes
+            # on the file's node (D23-131), so the include is read before the files are (the
+            # rows' order is the writer's, which sorts them).
+            include_unread = {rel: self._includes(res, ctx, repo, rel, includes[rel], inputs,
+                                                  lost)
+                              for rel in sorted(includes)}
             for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held, layers.get(rel, ""), on_node)
-            for rel in sorted(includes):
-                self._includes(res, ctx, repo, rel, includes[rel], inputs, lost)
+                           held, layers.get(rel, ""), on_node, include_unread.get(rel, []))
+            # A file declaring no service of its own whose `include:` names a file this reader
+            # does not read: its node, carrying no claim, says so - else nothing in the graph
+            # would, as an unreadable file's `unread` node says its own gap.
+            claiming = {rel for rel, _ in parsed}
+            for rel, unread in include_unread.items():
+                if unread and rel not in claiming and rel not in lost:
+                    res.nodes.append(Node(id=ids.deployment_id(repo.alias, rel), type="deploy",
+                                          props={"kind": CONFIG_KIND, "path": rel,
+                                                 "component": repo.alias,
+                                                 "include_unread": unread}))
         return res
 
     def _includes(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
-                  node: Any, inputs: set[str], lost: set[str]) -> None:
+                  node: Any, inputs: set[str], lost: set[str]) -> list[dict]:
         """T620: each `include:` entry this reader cannot follow is a row on its line - its
         services are missing from the graph, not absent. One it can follow is a compose file
         this component reads, on its own and from its own directory, so an entry moving that
-        directory (`project_directory`) is said too."""
+        directory (`project_directory`) is said too.
+
+        Batch 23: an `include:` that is no list is read as a list of what it spells - a scalar's
+        text, a single mapping's `path` or each file of its `path` list - beside its "is not a
+        list" row, and one spelling no file hides nothing, that row alone (D23-141, D23-148,
+        D23-149); a value that is not a string - a number - names no file, listed or not
+        (D23-160). Returns the files it names that this reader does not read - `reach`'s every
+        reason but "names no file", which compose refuses - each `{"file", "line"}`, for the
+        compose node's `include_unread` (D23-131, D23-161)."""
         layout = _layout(ctx)
         listed = repo.alias in layout
         if not listed:
@@ -1000,14 +1022,19 @@ class ComposeExtractor:
                 f"`include:` {why}. The services it declares are missing from the graph, not "
                 f"absent", include=written))
 
-        if not isinstance(node, y.SequenceNode):
+        unread: list[dict] = []
+        listed_entries = isinstance(node, y.SequenceNode)
+        if not listed_entries:
             row("", _yaml.line_of(node), "is not a list of files")
-            return
-        for item in node.value:
+        for item in node.value if listed_entries else [node]:
             line = _yaml.line_of(item)
             project_dir: Any = None
             if isinstance(item, y.ScalarNode):
-                paths: Any = [_yaml.scalar_text(item)]
+                # The value as YAML constructs it: a number is no file name (D23-160); one
+                # spelling nothing, written alone, hides nothing beyond its row (D23-149).
+                value = _yaml.constructed(item)
+                paths: Any = ([value] if isinstance(value, str)
+                              and (listed_entries or value.strip()) else None)
             elif isinstance(item, y.MappingNode):
                 body = _yaml.constructed(item)
                 paths = body.get("path")
@@ -1016,7 +1043,8 @@ class ComposeExtractor:
             else:
                 paths = None
             if not isinstance(paths, list) or not paths:
-                row("", line, "has an entry that names no file")
+                if listed_entries:
+                    row("", line, "has an entry that names no file")
                 continue
             for written in paths:
                 target, why = reach(file_dir, written, base=base, layout=layout,
@@ -1024,6 +1052,8 @@ class ComposeExtractor:
                 shown = written if isinstance(written, str) else ""
                 if why:
                     row(shown, line, why)
+                    if why != "names no file":
+                        unread.append({"file": shown, "line": line})
                     continue
                 if isinstance(project_dir, str) and project_dir.strip():
                     moved = posixpath.normpath(posixpath.join(file_dir, project_dir.strip()))
@@ -1036,6 +1066,7 @@ class ComposeExtractor:
                             f"that file on its own, from its own directory, so a relative "
                             f"`build:` in it is placed from there, not from the project "
                             f"directory - and what it builds may be misplaced")
+        return unread
 
     def _read(self, res: ExtractResult, repo: RepoRef, path: Path,
               includes: dict[str, Any] | None = None,
@@ -1100,14 +1131,17 @@ class ComposeExtractor:
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
               held: dict[str, dict[str, tuple[str, ...]]], package: str,
-              on_node: dict[str, list[str]] | None = None) -> None:
+              on_node: dict[str, list[str]] | None = None,
+              include_unread: list[dict] | None = None) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
         # to - and it names a file this same component reads (D15a-22).
         res.nodes.append(Node(id=deploy, type="deploy", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias,
-            **({"package": package} if package else {})}))
+            **({"package": package} if package else {}),
+            # Batch 23: the files its `include:` names that this reader does not read (D23-131).
+            **({"include_unread": include_unread} if include_unread else {})}))
         cfg = ids.config_id(repo.alias, rel)
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
