@@ -16,8 +16,9 @@ Three rules, each load-bearing:
   bytes, so a hand-edited or half-written shard is detectable without rebuilding — and a
   loader that cannot tell a stale shard from a fresh one repeats item 80's lesson at
   estate scale. It records the parser state the shard was built under too (`parsers`,
-  batch 16): each parser the readers of the component's files needed, and whether it was
-  installed. The shard bytes are byte-identical either way; only the manifest moves.
+  batch 16): each parser the readers of the component's files needed, and its version - or
+  `false` where it was missing (batch 22, T631). The shard bytes are byte-identical either
+  way; only the manifest moves.
 * **A partial set loads loudly.** A developer who cloned 3 of 26 components has 3 shards.
   The graph they get answers for what is present and SAYS what is absent; silently
   answering impact queries from an incomplete set is the "empty reads exactly like clean"
@@ -81,7 +82,9 @@ class ManifestRead:
 
 #: The stamp block's types (batch 16, design rounds 2 and 5): a key that is present must
 #: have its type; a missing key is "no stamps" or "no parser stamp", never a damage - but a
-#: manifest with no `sha256` cannot be verified at all.
+#: manifest with no `sha256` cannot be verified at all. A parser's value is its version, a
+#: non-empty string, or `false` where it was missing; a legacy `true` (batch 16's stamp)
+#: still loads, read as "no version recorded" and stale (batch 22, D22-1).
 def _stamp_block_fault(recorded: dict) -> str | None:
     if "sha256" not in recorded:
         return "it records no digest"
@@ -94,8 +97,9 @@ def _stamp_block_fault(recorded: dict) -> str | None:
         return "`inputs` is not a mapping of strings"
     parsers = recorded.get("parsers", {})
     if not isinstance(parsers, dict) or not all(
-            isinstance(k, str) and type(v) is bool for k, v in parsers.items()):
-        return "`parsers` is not a mapping of booleans"
+            isinstance(k, str) and (type(v) is bool or (isinstance(v, str) and v))
+            for k, v in parsers.items()):
+        return "`parsers` is not a mapping of versions"
     return None
 
 
@@ -150,18 +154,20 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
 
     `stamps` is the item-12 freshness layer: per-extractor input digests plus the
     extractor version and config digest the shard was built under, and (batch 16) the
-    `parsers` the readers of its files needed, each with whether it was installed - which
-    leaves the shard's own bytes as they were. Every value is
-    **content-derived** — the same tree, workspace config and harness version produce the
-    same bytes — so item 13's no-run-metadata rule holds: a rebuild of an unchanged tree
-    still diffs nothing. A commit SHA would not survive that test (HEAD moves without the
-    component's files moving), which is why currency is answered by content and the commit
-    stays in the build report as provenance for humans.
+    `parsers` the readers of its files needed, each with its version or `false` where it
+    was missing (batch 22) - which leaves the shard's own bytes as they were. Every value is
+    **content-derived** — the same tree, workspace config, harness version and installed
+    parser versions produce the same bytes — so item 13's no-run-metadata rule holds: a
+    rebuild of an unchanged tree still diffs nothing. A commit SHA would not survive that
+    test (HEAD moves without the component's files moving), which is why currency is
+    answered by content and the commit stays in the build report as provenance for humans.
     """
     emit.write_jsonl(dir_ / SHARD, facts, extractor="shard")
     emit.write_unresolved(dir_ / SHARD_UNRESOLVED, facts.unresolved)
     digest = _digest(dir_)
-    manifest = {"schema_version": 2, "sha256": digest, **(stamps or {})}
+    # 3 since batch 22 (D22-24): a parser's version is a new shape. The number gates no
+    # reading: the reader keys on the keys a manifest holds (D22-34).
+    manifest = {"schema_version": 3, "sha256": digest, **(stamps or {})}
     # LF on every platform (batch-2 review, F3): committed beside the shards it digests.
     (dir_ / MANIFEST).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8",

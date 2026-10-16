@@ -310,7 +310,7 @@ def test_a_reader_that_declares_no_parser_and_files_grammar_unavailable_breaks_i
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a but declares no parser "
             "it can lack (`PARSERS = ()`) - declare the parser its gate needs, so its shard "
-            "records whether it was installed") in proc.stdout.splitlines()
+            "records the parser's version, or that it was missing") in proc.stdout.splitlines()
     assert "snapshot: refused - " in proc.stdout
     assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
     write_stub(tmp_path, parsers=("yaml",), row=True)  # followed: the parser declared
@@ -328,8 +328,8 @@ def test_a_row_naming_a_parser_its_reader_does_not_declare_breaks_its_contract(t
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming the parser "
             "'typescript', which it does not declare (`PARSERS = ('yaml',)`) - name a parser "
-            "it declares, or declare the one it needs, so its shard records whether it was "
-            "installed") in proc.stdout.splitlines()
+            "it declares, or declare the one it needs, so its shard records the parser's "
+            "version, or that it was missing") in proc.stdout.splitlines()
     assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
     write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
     assert run(tmp_path, "--publish-snapshot").returncode == 0
@@ -343,8 +343,8 @@ def test_a_row_naming_no_parser_breaks_its_contract(tmp_path):
     assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
     assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming no parser - name "
             "the one it could not use in the row's `language`, a parser it declares "
-            "(`PARSERS = ('yaml',)`), so its shard records whether it was installed"
-            ) in proc.stdout.splitlines()
+            "(`PARSERS = ('yaml',)`), so its shard records the parser's version, or that it "
+            "was missing") in proc.stdout.splitlines()
     write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
     assert run(tmp_path, "--publish-snapshot").returncode == 0
 

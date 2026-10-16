@@ -8,9 +8,11 @@ each found one disagreeing with another).
 
 A shard is stamped with the parser state it was built under (ruling 30): every parser its
 component's own readers needed for the files they read, and every parser the readers they
-depend on needed for the files those read anywhere (`parser_stamp`, the one producer the
-publish and the verdict both call). It is stale whenever that stamp differs from what a
-publish would write now - in either direction, whatever the reader (rulings 27, 28).
+depend on needed for the files those read anywhere, each with its version, or `false` where
+it was missing (batch 22, T631) - `parser_stamp`, the one producer the publish and the
+verdict both call. It is stale whenever that stamp differs from what a publish would write
+now - in either direction, whatever the reader (rulings 27, 28) - a version that cannot be
+read comparing presence alone (D22-68).
 
 It names no reader and no estate: which parser a file needs comes from the readers' own
 declarations, handed in by `build.py` as `parser_of` (reader, path, rel) and `probe`.
@@ -39,6 +41,13 @@ UNLISTED_WORDS = ("a directory could not be listed, so its files cannot be calle
                   "(allow listing it, then rebuild)")
 
 ParserOf = Callable[[str, Path, str], "str | None"]
+#: Each parser's version now (batch 22, T631): the version of what served it, or `INSTALLED`
+#: where that cannot be read. Asked only of a parser the probe finds installed.
+Version = Callable[[str], str]
+#: A version that cannot be read: presence alone, `main`'s stamp. Where either side of a
+#: comparison reads it, claims 8 and 10 compare presence alone, so an environment that
+#: cannot read a version never stales another's shard on it (D22-68).
+INSTALLED = "installed"
 
 
 def _shared_of(config_sha: str) -> str:
@@ -127,14 +136,37 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     return ordered(own), ordered(near)
 
 
+def stamp_value(parser: str, probe: Callable[[str], bool], version: Version) -> str | bool:
+    """What a stamp records for one parser now: its version where it is installed, `False`
+    where it is not - the one computation the publish writes and the verdict compares."""
+    return version(parser) if probe(parser) else False
+
+
 def parser_stamp(component: str, act: Any, closure: dict[str, frozenset[str]],
                  probe: Callable[[str], bool], parser_of: ParserOf, root: Path,
-                 components: list[dict], memo: dict | None = None) -> dict[str, bool]:
+                 components: list[dict], memo: dict | None = None, *,
+                 version: Version) -> dict[str, str | bool]:
     """The `parsers` a publish writes into this component's manifest, and what the verdict
-    compares the stamp against: every parser either half reaches, with whether it is
-    installed now. The ONE producer of a stamp (design round 3, D16-31)."""
+    compares the stamp against: every parser either half reaches, with the version it has
+    now, or `False` where it is not installed (batch 22, T631). The ONE producer of a stamp
+    (design round 3, D16-31)."""
     own, near = parser_halves(component, act, closure, parser_of, root, components, memo)
-    return {parser: bool(probe(parser)) for parser in sorted({*own, *near})}
+    return {parser: stamp_value(parser, probe, version) for parser in sorted({*own, *near})}
+
+
+def _compared(stamped: str | bool, now: str | bool) -> str | None:
+    """How one parser's stamp differs from now, or None where it matches (batch 22): a legacy
+    `False` compares as any `False` (ruling 28); a legacy `True` records no version; a side
+    reading `INSTALLED` compares presence alone."""
+    if now is False:
+        return None if stamped is False else "removed"
+    if stamped is False:
+        return "installed"
+    if stamped is True:
+        return "unversioned"
+    if INSTALLED in (stamped, now) or stamped == now:
+        return None
+    return "version"
 
 
 #: The kept words (ruling 29): today's reasons stay word for word where they still hold.
@@ -198,19 +230,37 @@ def _moved_words(moved: list[str], rank: dict[str, int]) -> str:
         + ([UNLISTED_WORDS] if ACTIVATION_UNLISTED in moved else []))
 
 
-def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, bool],
-               probe: Callable[[str], bool], rank: dict[str, int]) -> str:
-    """Claim 8: the own half of the stamp against now - installed since, removed since, and
-    each name the stamp lacks - or "" where it matches."""
+#: A legacy `true` stamp's words, in either claim (batch 22, D22-35).
+def _unversioned(parser: str) -> str:
+    return f"its shard's parser stamp records no version for `{parser}`"
+
+
+def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, str | bool],
+               probe: Callable[[str], bool], version: Version, rank: dict[str, int]) -> str:
+    """Claim 8: the own half of the stamp against now - installed since, removed since, read
+    with another version (batch 22, T631), stamped with no version, and each name the stamp
+    lacks - or "" where it matches."""
     installed: set[str] = set()
     removed: set[str] = set()
+    moved: list[str] = []
+    unversioned: list[str] = []
     lacked: list[str] = []
     for parser, readers in own.items():
         if parser not in stamped:
             lacked.append(f"its shard's parser stamp does not record `{parser}`, which "
                           f"{_ticked(list(readers))} now use")
-        elif stamped[parser] != bool(probe(parser)):
-            (removed if stamped[parser] else installed).update(readers)
+            continue
+        now = stamp_value(parser, probe, version)
+        kind = _compared(stamped[parser], now)
+        if kind == "installed":
+            installed.update(readers)
+        elif kind == "removed":
+            removed.update(readers)
+        elif kind == "version":
+            moved.append(f"{_ticked(list(readers))} read with `{parser}` {stamped[parser]}; "
+                         f"it is {now} now")
+        elif kind == "unversioned":
+            unversioned.append(_unversioned(parser))
     clauses = []
     if installed:
         clauses.append(f"its shard was published while {_ticked(_in_order(installed, rank))} "
@@ -218,17 +268,19 @@ def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, bool],
     if removed:
         clauses.append(f"its shard was published while {_ticked(_in_order(removed, rank))} "
                        f"had a parser that is no longer installed")
-    return "; ".join(clauses + lacked)
+    return "; ".join(clauses + moved + unversioned + lacked)
 
 
 def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, ...]],
-                   stamped: dict[str, bool], probe: Callable[[str], bool],
-                   rank: dict[str, int]) -> str:
+                   stamped: dict[str, str | bool], probe: Callable[[str], bool],
+                   version: Version, rank: dict[str, int]) -> str:
     """Claim 10: the closure half of the stamp against now, and each stamped name neither half
     reaches any more (D16-52), or "" where it matches. A parser the own half reaches is claim
     8's: the stamp holds one merged map."""
     installed: set[str] = set()
     removed: set[str] = set()
+    moved: list[str] = []
+    unversioned: list[str] = []
     lacked: list[str] = []
     for parser, readers in near.items():
         if parser in own:
@@ -236,8 +288,18 @@ def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, .
         if parser not in stamped:
             lacked.append(f"its shard's parser stamp does not record `{parser}`, which "
                           f"{', '.join(readers)} it depends on now use")
-        elif stamped[parser] != bool(probe(parser)):
-            (removed if stamped[parser] else installed).update(readers)
+            continue
+        now = stamp_value(parser, probe, version)
+        kind = _compared(stamped[parser], now)
+        if kind == "installed":
+            installed.update(readers)
+        elif kind == "removed":
+            removed.update(readers)
+        elif kind == "version":
+            moved.append(f"depends on {', '.join(readers)}, whose parser `{parser}` was "
+                         f"{stamped[parser]} and is {now} now")
+        elif kind == "unversioned":
+            unversioned.append(_unversioned(parser))
     clauses = []
     if installed:
         clauses.append(f"depends on {', '.join(_in_order(installed, rank))}, which had no "
@@ -248,17 +310,18 @@ def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, .
     gone = [f"its shard's parser stamp records `{parser}`, which nothing it reads uses now: "
             f"what it depended on changed or left the tree"
             for parser in sorted(stamped) if parser not in own and parser not in near]
-    return "; ".join(clauses + lacked + gone)
+    return "; ".join(clauses + moved + unversioned + lacked + gone)
 
 
 def judge(readings: dict[str, Any], components: list[dict], act: Any,
           closure: dict[str, frozenset[str]], digests: dict[str, dict[str, str]],
           version: str, config_shas: dict[str, str], probe: Callable[[str], bool],
-          parser_of: ParserOf, root: Path) -> dict[str, Verdict]:
+          parser_of: ParserOf, root: Path, *, parser_version: Version) -> dict[str, Verdict]:
     """Every component's verdict, by the design note's claims in order; the first that fails
     is the verdict (section 4). `readings` are `snapshot.read_shard`'s, one per component;
     `digests` the input digests now (`input_digests`), `version` and `config_shas` the
-    extractor version and each component's configuration stamp now.
+    extractor version and each component's configuration stamp now, and `probe` and
+    `parser_version` whether each parser is installed now and its version (batch 22).
 
     What marks a dependency's inputs as changed for every dependent (claim 9) is `main`'s
     three contributors that survive: a sibling's per-extractor stamp against its digest, its
@@ -307,17 +370,19 @@ def judge(readings: dict[str, Any], components: list[dict], act: Any,
             out[name] = Verdict("stale", NO_PARSER_STAMP)
         else:
             out[name] = _parser_verdict(name, act, closure, stamps["parsers"], changed, unseen,
-                                        probe, parser_of, root, components, memo, rank)
+                                        probe, parser_version, parser_of, root, components,
+                                        memo, rank)
     return out
 
 
 def _parser_verdict(name: str, act: Any, closure: dict[str, frozenset[str]],
-                    stamped: dict[str, bool], changed: set[str], unseen: dict[str, int],
-                    probe: Callable[[str], bool], parser_of: ParserOf, root: Path,
-                    components: list[dict], memo: dict, rank: dict[str, int]) -> Verdict:
+                    stamped: dict[str, str | bool], changed: set[str], unseen: dict[str, int],
+                    probe: Callable[[str], bool], version: Version, parser_of: ParserOf,
+                    root: Path, components: list[dict], memo: dict,
+                    rank: dict[str, int]) -> Verdict:
     """Claims 8 to 11, for a shard whose own stamps all match."""
     own, near = parser_halves(name, act, closure, parser_of, root, components, memo)
-    if words := _own_words(own, stamped, probe, rank):
+    if words := _own_words(own, stamped, probe, version, rank):
         return Verdict("stale", words)
     deps: set[str] = set()
     for reader in act.by_component.get(name) or []:
@@ -330,6 +395,6 @@ def _parser_verdict(name: str, act: Any, closure: dict[str, frozenset[str]],
         exts = _in_order({e for e in blind if unseen[e] == first}, rank)
         return Verdict("stale", f"depends on {', '.join(exts)}, active in another component "
                                 f"{_UNCOMPARABLE[first]}")
-    if words := _closure_words(own, near, stamped, probe, rank):
+    if words := _closure_words(own, near, stamped, probe, version, rank):
         return Verdict("stale", words)
     return Verdict("current")

@@ -63,7 +63,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import functools
 import importlib.machinery
+import importlib.metadata
 import importlib.util
 import inspect
 import json
@@ -171,13 +173,16 @@ class Registration:
     #: named with what is missing: `host-maps`, `chart-templates` or `package-dirs`.
     glob_purposes: dict[str, str] = field(default_factory=dict)
     #: The parsers it can lack (`PARSERS`, batch 16, ruling 30), so a shard records the parser
-    #: state it was built under; `()` declares that it uses none. A reader whose gate is finer
-    #: than a file's suffix answers which parser a file needs itself (`parser_of`), and one
-    #: whose parser is neither YAML nor a `_lang` grammar says whether it is installed
-    #: (`parser_available`).
+    #: state it was built under - each parser's version, or `false` where it was missing
+    #: (batch 22, T631); `()` declares that it uses none. A reader whose gate is finer than a
+    #: file's suffix answers which parser a file needs itself (`parser_of`), and one whose
+    #: parser is neither YAML nor a `_lang` grammar says whether it is installed
+    #: (`parser_available`) and may say its version (`parser_version`; else it is stamped
+    #: `"installed"`, compared by presence alone).
     parsers: tuple[str, ...] = ()
     parser_of: Any = None
     parser_available: Any = None
+    parser_version: Any = None
 
 
 #: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
@@ -370,16 +375,22 @@ def _deployment_roles(obj: Any, name: str, where: str, globs: tuple[str, ...]
 
 
 def _parsers(obj: Any, name: str, where: str, mod: Any,
-             unresolved_fields: dict[str, tuple[str, ...]]) -> tuple[tuple[str, ...], Any, Any]:
-    """`PARSERS`, and the reader's own `parser_of` and `parser_available` (batch 16, ruling
-    30): which parsers a shard's stamp records for this reader. Read with a SENTINEL - on the
-    reader, then its module - because absent is not `()`: `_str_tuple` and `_declared_map`
-    both fold the two, and a reader that files `grammar-unavailable` and forgot the
-    declaration would then pass as one that uses no parser, its parser state never stamped
-    (design round 3, D16-28). Every name needs a probe and a file rule: YAML and the `_lang`
-    grammars have both by default; any other parser is the reader's to answer."""
+             unresolved_fields: dict[str, tuple[str, ...]]
+             ) -> tuple[tuple[str, ...], Any, Any, Any]:
+    """`PARSERS`, and the reader's own `parser_of`, `parser_available` and `parser_version`
+    (batch 16, ruling 30; batch 22): which parsers a shard's stamp records for this reader.
+    Read with a SENTINEL - on the reader, then its module - because absent is not `()`:
+    `_str_tuple` and `_declared_map` both fold the two, and a reader that files
+    `grammar-unavailable` and forgot the declaration would then pass as one that uses no
+    parser, its parser state never stamped (design round 3, D16-28). Every name needs a probe
+    and a file rule: YAML and the `_lang` grammars have both by default; any other parser is
+    the reader's to answer, its version too where it can say one (else `"installed"`)."""
     parser_of = getattr(obj, "parser_of", None)
     available = getattr(obj, "parser_available", None)
+    version = getattr(obj, "parser_version", None)
+    if version is not None and not (callable(version) and _accepts(version, 1)):
+        raise BuildError(f"{where}: `parser_version` on {name!r} is {version!r}; it must be a "
+                         f"callable `(parser name) -> version`, or absent")
     declared = getattr(obj, "PARSERS", None)
     if declared is None and mod is not None:
         declared = getattr(mod, "PARSERS", None)
@@ -389,7 +400,7 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
                              f"declare the parsers it can lack (`PARSERS = ('yaml',)`, say), or "
                              f"`PARSERS = ()` if it uses none, so its shard records the parser "
                              f"state it was built under")
-        return (), parser_of, available
+        return (), parser_of, available, version
     if not isinstance(declared, tuple) or not all(
             isinstance(parser, str) and parser.strip() for parser in declared):
         raise BuildError(f"{where}: `PARSERS` on {name!r} must be a TUPLE of parser names, got "
@@ -406,7 +417,7 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
             raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which no file "
                              f"suffix maps to, and has no file rule: give the reader "
                              f"`parser_of(path, rel, text=None)`")
-    return declared, parser_of, available
+    return declared, parser_of, available, version
 
 
 def _validate(obj: Any, where: str
@@ -687,7 +698,8 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
         fields_declared = _unresolved_fields(obj, name, where, mod)
-        parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
+        parsers, parser_of, parser_available, parser_version = _parsers(
+            obj, name, where, mod, fields_declared)
         hook = getattr(obj, "claims_nothing", None)
         if hook is not None and not (callable(hook) and _accepts(hook, 3)):
             raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
@@ -698,6 +710,7 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
+                                 parser_version=parser_version,
                                  unresolved_fields=fields_declared,
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
@@ -778,6 +791,85 @@ def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
             return srcfacts.available(parser)
         return bool(custom[parser](parser))
     return probe
+
+
+@functools.lru_cache(maxsize=1)
+def _distributions() -> dict[str, list[str]]:
+    """Which distributions provide each top-level module - computed once per process, since
+    it walks every installed distribution (about 127 ms, measured; D22-36) - or `{}` where
+    it cannot be read, so every version reads `"installed"`."""
+    try:
+        return dict(importlib.metadata.packages_distributions())
+    except Exception:  # noqa: BLE001 - a broken environment reads as "no version known"
+        return {}
+
+
+def _module_version(module: str) -> str | None:
+    """`<distribution>==<version>` for each distribution providing `module`'s top-level
+    package, sorted and joined by `+` (batch 22, D22-6), or None where none is found or a
+    version cannot be read - never a traceback."""
+    found = sorted(set(_distributions().get(module.split(".")[0], ())))
+    out = []
+    for dist in found:
+        try:
+            number = importlib.metadata.version(dist)
+        except Exception:  # noqa: BLE001 - PackageNotFoundError, or metadata that cannot be read
+            return None
+        if not isinstance(number, str) or not number:
+            return None
+        out.append(f"{dist}=={number}")
+    return "+".join(out) or None
+
+
+def parser_versioner(regs: list[Registration]) -> Callable[[str], str]:
+    """Each installed parser's version NOW (batch 22, T631): the version of what served it,
+    asked only of a parser the probe finds installed. YAML: the distribution of the module
+    `yaml`, its version alone. A `_lang` grammar: the distributions of the route that served
+    it - the pinned per-language package or the aggregate pack, which report different
+    versions for one grammar - then the `tree-sitter` runtime's; it asks `srcfacts.available`
+    first, which establishes the route, so a door that parses nothing stamps the text a
+    publish did (D22-32). Any other parser: the first reader in registry order declaring it,
+    by its `parser_version` - an answer that raises or is not a non-empty string is refused
+    here, where it is produced (D22-22). A version that cannot be read is `"installed"`,
+    compared by presence alone. One answer per parser per run: the versioner is made per
+    run, never memoised across runs."""
+    grammars = set(_lang.GRAMMARS.values())
+    custom: dict[str, Registration] = {}
+    for reg in regs:
+        for parser in reg.parsers:
+            if parser != "yaml" and parser not in grammars and parser not in custom:
+                custom[parser] = reg
+    answers: dict[str, str] = {}
+
+    def read(parser: str) -> str:
+        if parser == "yaml":
+            return _module_version("yaml") or freshness.INSTALLED
+        if parser in grammars:
+            if not srcfacts.available(parser):
+                return freshness.INSTALLED
+            served = srcfacts.served_by(parser)
+            route = _module_version(served) if served else None
+            runtime = _module_version("tree_sitter")
+            return f"{route}+{runtime}" if route and runtime else freshness.INSTALLED
+        reg = custom.get(parser)
+        if reg is None or reg.parser_version is None:
+            return freshness.INSTALLED
+        try:
+            answer = reg.parser_version(parser)
+        except Exception as exc:  # noqa: BLE001 - refused with the reader named
+            raise BuildError(f"`{reg.name}`'s `parser_version({parser!r})` returned no version: "
+                             f"it raised {type(exc).__name__} ({exc}) - answer a non-empty "
+                             f"string") from exc
+        if not isinstance(answer, str) or not answer:
+            raise BuildError(f"`{reg.name}`'s `parser_version({parser!r})` returned "
+                             f"{answer!r}, not a non-empty string - answer one")
+        return answer
+
+    def version(parser: str) -> str:
+        if parser not in answers:
+            answers[parser] = read(parser)
+        return answers[parser]
+    return version
 
 
 def file_parser(reg: Registration, path: Path, rel: str, text: str | None = None) -> str | None:
@@ -1578,19 +1670,21 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
             violations.append(Violation(
                 f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} but declares no "
                 f"parser it can lack (`PARSERS = ()`) - declare the parser its gate needs, so "
-                f"its shard records whether it was installed", "declaration"))
+                f"its shard records the parser's version, or that it was missing",
+                "declaration"))
         for named, comps in sorted(stray.items() if reg.parsers else (),
                                    key=lambda item: item[0] or ""):
             where = ", ".join(comp for comp in per_component if comp in comps)
             violations.append(Violation(
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming no parser - name "
                 f"the one it could not use in the row's `language`, a parser it declares "
-                f"(`PARSERS = {reg.parsers!r}`), so its shard records whether it was installed"
+                f"(`PARSERS = {reg.parsers!r}`), so its shard records the parser's version, "
+                f"or that it was missing"
                 if named is None else
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming the parser "
                 f"{named!r}, which it does not declare (`PARSERS = {reg.parsers!r}`) - name a "
-                f"parser it declares, or declare the one it needs, so its shard records whether "
-                f"it was installed", "declaration"))
+                f"parser it declares, or declare the one it needs, so its shard records the "
+                f"parser's version, or that it was missing", "declaration"))
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -2302,6 +2396,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 # producer the verdict compares against (D16-31).
                 closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
                                              parser_rule(regs))
+                versioner = parser_versioner(regs)
                 memo: dict = {}
                 stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
                                       "extractor_version": version,
@@ -2309,7 +2404,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                                                                   c["name"]),
                                       "parsers": freshness.parser_stamp(
                                           c["name"], act, closure, probe, parser_of, root,
-                                          components, memo)}
+                                          components, memo, version=versioner)}
                           for c in pub_components}
                 try:
                     digests = snapshot_lib.publish(root, pub_components, facts, stamps)
@@ -2541,7 +2636,7 @@ def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
     verdicts = freshness.judge(
         readings, components, act, requires_closure(regs), input_digests(act, components, root),
         extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
-        parser_probe(regs), parser_rule(regs), root)
+        parser_probe(regs), parser_rule(regs), root, parser_version=parser_versioner(regs))
     return readings, verdicts
 
 

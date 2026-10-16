@@ -35,10 +35,13 @@ def report(tmp_path: Path) -> dict:
 
 def test_a_manifest_records_the_parsers_its_files_and_its_dependencies_reach(tmp_path):
     """`a` reads its compose file with PyYAML; `b`'s producer reads `a`'s compose file through
-    the shared cache (`env-keys` requires `compose-services`), so its stamp records YAML too."""
+    the shared cache (`env-keys` requires `compose-services`), so its stamp records YAML too -
+    by its version (batch 22, T631)."""
+    yaml = B.parser_versioner(B.discover_extractors())("yaml")
+    assert yaml.startswith("PyYAML=="), yaml
     assert build(tmp_path, FEED, "--publish-snapshot").code == 0
-    assert manifest(tmp_path, "a").get("parsers") == {"yaml": True}
-    assert manifest(tmp_path, "b").get("parsers") == {"yaml": True}
+    assert manifest(tmp_path, "a").get("parsers") == {"yaml": yaml}
+    assert manifest(tmp_path, "b").get("parsers") == {"yaml": yaml}
 
 
 def test_a_parser_missing_at_publish_is_stamped_false(tmp_path, monkeypatch):

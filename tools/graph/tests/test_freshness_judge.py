@@ -44,6 +44,11 @@ BOTH = {"m": {"docker-compose.yml": compose(svc("x", "../x", "web-value")),
 DROP = object()
 
 
+def v(parser: str) -> str:
+    """The version `World` reads for every installed parser now (batch 22, T631)."""
+    return f"{parser}==1"
+
+
 class World:
     """A laid-down tree, judged with the real registry; `missing` is the parsers not installed
     now, and `current(name)` is the reading a publish of this tree now would leave."""
@@ -65,9 +70,12 @@ class World:
     def probe(self, parser: str) -> bool:
         return parser not in self.missing
 
-    def stamp(self, name: str) -> dict[str, bool]:
+    def parser_version(self, parser: str) -> str:
+        return v(parser)
+
+    def stamp(self, name: str) -> dict[str, str | bool]:
         return F.parser_stamp(name, self.act, self.closure, self.probe, self.parser_of,
-                              self.root, self.components)
+                              self.root, self.components, version=self.parser_version)
 
     def current(self, name: str, **stamps) -> SN.ShardReading:
         recorded = {"inputs": dict(self.digests.get(name, {})),
@@ -84,7 +92,8 @@ class World:
         full = {c["name"]: readings[c["name"]] if c["name"] in readings
                 else self.current(c["name"]) for c in self.components}
         return F.judge(full, self.components, self.act, self.closure, self.digests,
-                       self.version, self.config, self.probe, self.parser_of, self.root)
+                       self.version, self.config, self.probe, self.parser_of, self.root,
+                       parser_version=self.parser_version)
 
 
 @pytest.fixture
@@ -154,7 +163,7 @@ def test_claim_7_a_shard_published_before_parser_stamps(feed):
 @pytest.mark.parametrize("stamped, missing, words", [
     ({"yaml": False}, set(),
      "its shard was published while `compose-services` had no parser installed"),
-    ({"yaml": True}, {"yaml"},
+    ({"yaml": v("yaml")}, {"yaml"},
      "its shard was published while `compose-services` had a parser that is no longer "
      "installed"),
     ({}, set(),
@@ -168,7 +177,7 @@ def test_claim_8_the_own_half_of_the_parser_stamp(feed, stamped, missing, words)
 def test_claim_8_joins_its_clauses_and_lists_readers_in_registry_order(tmp_path):
     world = World(tmp_path, BOTH)
     world.missing = {"yaml"}
-    assert world.judge(m=world.current("m", parsers={"java": False, "yaml": True}))["m"] == (
+    assert world.judge(m=world.current("m", parsers={"java": False, "yaml": v("yaml")}))["m"] == (
         stale(f"its shard was published while {JAVA_READERS} had no parser installed; its "
               f"shard was published while `compose-services` had a parser that is no longer "
               f"installed"))
@@ -228,19 +237,19 @@ def test_claim_9b_names_the_first_cause_in_order(tmp_path):
     ({"yaml": False}, set(),
      "depends on compose-services, which had no parser installed when its shard was "
      "published"),
-    ({"yaml": True}, {"yaml"},
+    ({"yaml": v("yaml")}, {"yaml"},
      "depends on compose-services, whose parser was installed when its shard was published "
      "and is not now"),
     ({}, set(),
      "its shard's parser stamp does not record `yaml`, which compose-services it depends on "
      "now use"),
-    ({"yaml": True, "kotlin": True}, set(),
+    ({"yaml": v("yaml"), "kotlin": v("kotlin")}, set(),
      "its shard's parser stamp records `kotlin`, which nothing it reads uses now: what it "
      "depended on changed or left the tree"),
 ], ids=["installed-since", "removed-since", "a-name-the-stamp-lacks", "a-name-nothing-reaches"])
 def test_claim_10_the_closure_half_of_the_parser_stamp(feed, stamped, missing, words):
     feed.missing = missing
-    verdicts = feed.judge(a=feed.current("a", parsers={"yaml": not missing}),
+    verdicts = feed.judge(a=feed.current("a", parsers={"yaml": False if missing else v("yaml")}),
                           b=feed.current("b", parsers=stamped))
     assert verdicts["b"] == stale(words)
 
@@ -315,7 +324,7 @@ def test_claim_9_comes_before_10(feed):
 
 def test_a_stamped_parser_no_reader_declares_is_stale_until_republished(feed):
     """Review focus 1: a removed profile reader's `kotlin` left in a stamp."""
-    verdicts = feed.judge(a=feed.current("a", parsers={"kotlin": True, "yaml": True}))
+    verdicts = feed.judge(a=feed.current("a", parsers={"kotlin": v("kotlin"), "yaml": v("yaml")}))
     assert verdicts["a"] == stale(
         "its shard's parser stamp records `kotlin`, which nothing it reads uses now: what it "
         "depended on changed or left the tree")
@@ -328,7 +337,7 @@ def test_both_halves_differing_say_the_own_half_first(tmp_path):
     stamped = {"java": False, "yaml": False}
     assert world.judge(x=world.current("x", parsers=stamped))["x"] == stale(
         f"its shard was published while {JAVA_READERS} had no parser installed")
-    assert world.judge(x=world.current("x", parsers={**stamped, "java": True}))["x"] == stale(
+    assert world.judge(x=world.current("x", parsers={**stamped, "java": v("java")}))["x"] == stale(
         "depends on compose-services, which had no parser installed when its shard was "
         "published")
 
