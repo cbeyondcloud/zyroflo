@@ -910,6 +910,37 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
                 f"record of that"),
     }
 
+def _compose_named(rel: str) -> bool:
+    """Whether a file another reader recorded as lost to its case is one compose would read
+    were its case right - compose's own globs over the case record, which holds every
+    deployment reader's losses, as helm applies its own (D23-31)."""
+    folded = rel.casefold()
+    return any(repo_walk.glob_match(folded, posixpath.basename(folded), glob)
+               for glob in COMPOSE_GLOBS)
+
+
+def _deployment_only(ctx: ExtractContext, repo: RepoRef, decls: dict[str, list["Decl"]],
+                     lost: set[str], include_unread: dict[str, list[dict]]) -> bool | None:
+    """Whether the component deploys only images it does not build, as far as compose can say
+    (batch 23, D23-6, D23-61, D23-101, D23-116): False wherever a compose file it read declares
+    `build:` - a file it did not read cannot make a building component deployment-only; True
+    only where it read every compose file of the component - none unread, none whose
+    `include:` names a file it does not read, none lost to its case, no directory of the
+    component unlisted, and no claim of the component, in any file, whose chain names a base
+    it does not read, which may declare a build - and none declares `build:`; else None, not
+    known, so not published. Per component, so a sibling file's gap reaches every node."""
+    items = [decl for file_decls in decls.values() for decl in file_decls]
+    if any(_context_of(decl.service)[0] for decl in items):
+        return False
+    config = ctx.config or {}
+    case_lost = [rel for rel in (config.get("deployment_off_case") or {}).get(repo.alias, [])
+                 if _compose_named(rel)]
+    unknown = (lost or any(include_unread.values()) or case_lost
+               or (config.get("unlisted") or {}).get(repo.alias)
+               or any(decl.claim.extends_unread for decl in items))
+    return None if unknown else True
+
+
 def _unread(repo: RepoRef, rel: str, kind: str) -> Node:
     """A deployment file this reader was handed and could not read or parse (batch 15b,
     T573 decision 6): its node, carrying no claim, marked `unread` with the kind of the row
@@ -956,6 +987,7 @@ class ComposeExtractor:
         #: (review B10-4). Local for the same reason as `owned`.
         held: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
+            first_node = len(res.nodes)
             # In main's order. Nothing placed depends on it, since each file places its own
             # `build:` (D534-7), but which env value is read last does, so it stays main's
             # (ruling 10). Each file is read and parsed once (remainder E).
@@ -992,6 +1024,11 @@ class ComposeExtractor:
                                           props={"kind": CONFIG_KIND, "path": rel,
                                                  "component": repo.alias,
                                                  "include_unread": unread}))
+            only = _deployment_only(ctx, repo, decls, lost, include_unread)
+            if only is not None:
+                for node in res.nodes[first_node:]:
+                    if node.type == "deploy" and node.props.get("kind") == CONFIG_KIND:
+                        node.props["deployment_only"] = only
         return res
 
     def _includes(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,

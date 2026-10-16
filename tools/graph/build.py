@@ -2497,8 +2497,12 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     # Batch 15b: the deployment readers' case record reaches the extractors in their own
     # copy of the config, run-scoped - `helm-deployments` counts a template lost to its case
     # as one of its chart's own (ruling 20, D15b-139) - never in the dict the stamps digest.
+    # Batch 23: so do the directories the walk could not list, per component, which compose
+    # reads for `deployment_only` - a build in one may be what it could not see (D23-68).
     extract_config = {**config, "deployment_off_case":
-                      deployment_scope(act, components, root, registry)["deployment_off_case"]}
+                      deployment_scope(act, components, root, registry)["deployment_off_case"],
+                      "unlisted": {comp: sorted(directory for directory, _ in gaps)
+                                   for comp, gaps in sorted(act.unlisted.items())}}
     owned, failures, violations = run_extractors_owned(
         regs, run_act, components, root, run_id, extract_config)
     results = {}

@@ -229,3 +229,87 @@ def test_a_file_holding_only_an_include_it_reads_has_no_node(tmp_path):
     built = build(tmp_path, deploy("include:\n  - docker-compose.stack.yml\n",
                                    **{"docker-compose.stack.yml": STACK}))
     assert not [n for n in built.nodes if n["id"] == "deploy:deploy/compose.yaml"]
+
+
+# ── deployment_only: what compose read of a component, per component ────────────────────
+
+IMAGE_ONLY = "services:\n  web:\n    image: org/web:2\n"
+
+
+def only_of(built, component: str = "deploy") -> dict[str, object]:
+    """Each compose node of `component`: its `deployment_only`, or "unpublished"."""
+    return {n["id"]: n["props"].get("deployment_only", "unpublished") for n in built.nodes
+            if n["type"] == "deploy" and n["props"].get("kind") == "compose"
+            and n["props"].get("component") == component}
+
+
+def test_a_component_compose_read_whole_with_no_build_is_deployment_only(tmp_path):
+    """D23-6: a fact compose publishes, never a mark read as one."""
+    built = build(tmp_path, deploy(IMAGE_ONLY, **{"compose.prod.yml": IMAGE_ONLY}))
+    assert only_of(built) == {"deploy:deploy/compose.yaml": True,
+                              "deploy:deploy/compose.prod.yml": True}
+
+
+def test_a_component_one_of_whose_read_files_builds_is_not_deployment_only_on_any_node(
+        tmp_path):
+    built = build(tmp_path, deploy("services:\n  web:\n    build: ../orders\n",
+                                   **{"compose.prod.yml": IMAGE_ONLY}))
+    assert set(only_of(built).values()) == {False}
+
+
+@pytest.mark.parametrize("files", [
+    {"compose.prod.yml": "services: [\n"},
+    {"compose.prod.yml": "include:\n  - stack.yml\n", "stack.yml": STACK},
+    {"compose.prod.yml": extending("common.yml"), "common.yml": BASE},
+], ids=["a-sibling-that-does-not-parse", "an-unread-include", "a-chain-to-a-base-unread"])
+def test_a_component_compose_did_not_read_whole_publishes_none(tmp_path, files):
+    """D23-61, D23-101, D23-116, D23-131: what compose did not read may declare a build - read
+    per component, so a sibling file's gap leaves every node unpublished."""
+    built = build(tmp_path, deploy(IMAGE_ONLY, **files))
+    assert set(only_of(built).values()) == {"unpublished"}, only_of(built)
+
+
+def test_a_chain_compose_refuses_withholds_nothing(tmp_path):
+    """D23-119: a typo'd base hides no build - the component is still deployment-only."""
+    built = build(tmp_path, deploy("services:\n  web:\n    image: org/web\n    extends: bsae\n"))
+    assert set(only_of(built).values()) == {True}
+
+
+@pytest.mark.parametrize("lost_name", ["Docker-Compose.yml", "docker-compose.YML"])
+def test_a_compose_file_lost_to_its_case_withholds_it(tmp_path, lost_name):
+    """D23-2, D23-31: in both spellings of a case loss."""
+    built = build(tmp_path, deploy(IMAGE_ONLY, **{lost_name: IMAGE_ONLY}))
+    assert set(only_of(built).values()) == {"unpublished"}, only_of(built)
+
+
+def test_a_building_components_only_build_lost_to_its_case_publishes_none(tmp_path):
+    """D23-17: its only build sat in a case-lost file, so it read as deployment-only."""
+    built = build(tmp_path, deploy(IMAGE_ONLY, **{"Docker-Compose.yml": STACK}))
+    assert set(only_of(built).values()) == {"unpublished"}, only_of(built)
+
+
+def test_a_charts_case_loss_never_withholds_composes(tmp_path):
+    """D23-31: compose applies its own globs to the component's case record."""
+    built = build(tmp_path, deploy(IMAGE_ONLY, **{
+        "charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n",
+        "charts/web/Templates/deployment.yaml": "kind: Deployment\n"}))
+    assert set(only_of(built).values()) == {True}, only_of(built)
+
+
+def test_a_component_with_a_directory_the_walk_cannot_list_publishes_none(tmp_path):
+    """D23-68: compose could not see one, so a component whose only build sat in an unlistable
+    directory read as deployment-only. Whether the refusal binds is measured (`_listing`)."""
+    from tools.graph.tests._estate import lay_down, read, spawn
+    from tools.graph.tests._listing import allow_listing, deny_listing, lists
+    lay_down(tmp_path, deploy(IMAGE_ONLY, **{"infra/docker-compose.yml": STACK}))
+    guarded = tmp_path / "ws" / "deploy" / "infra"
+    deny_listing(guarded)
+    try:
+        binds = not lists(guarded)
+        proc = spawn(tmp_path)
+    finally:
+        allow_listing(guarded)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    built = read(proc.returncode, tmp_path / "out")
+    assert set(only_of(built).values()) == ({"unpublished"} if binds else {False}), (
+        binds, only_of(built))
