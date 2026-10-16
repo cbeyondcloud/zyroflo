@@ -637,12 +637,18 @@ class DeploymentsExtractor:
         # Recorded as a claim, not as a decision. Two packages naming one service produce two
         # identical-shaped edges, and which is canonical is resolved later from the
         # workspace's own declaration.
+        # Batch 23: the registry the values set, as published - a template span is the token
+        # `_yaml`'s de-templating writes - for the image key, which prefixes it where the
+        # repository names no registry of its own (design pass 23, section 1).
+        registry = flat.get("image.registry")
         res.edges.append(Edge(src=node_id, type="DG_DEPLOYS", dst=target, source_file=rel,
                               line=line, extractor=self.name, confidence=1.0,
                               provenance=Provenance.EXTRACTED,
                               props={"service": name, "declared_by": source_field,
                                      "image": str(flat.get("image.repository", "")),
-                                     "tag": str(flat.get("image.tag", ""))}))
+                                     "tag": str(flat.get("image.tag", "")),
+                                     **({"registry": registry} if isinstance(registry, str)
+                                        and registry.strip() else {})}))
 
 
 class ConfigMapsExtractor:
