@@ -2141,11 +2141,18 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
 
 
 #: What a narrowed run does not judge, and the one exception it makes, said in every
-#: narrowed line (batch 15b; T573 decision 3, D15b-72).
-NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatched`, which "
-                 "what it could not see could change; and an `[[apart]]` refusal, judged over "
-                 "fewer claims, may move a chart onto its component's own node where a whole "
-                 "build holds it back, because the package that claims that node was not read")
+#: narrowed line (batch 15b; T573 decision 3, D15b-72): since batch 23 a counted list - the
+#: rows an absence or a contradiction judges, the image judgements, the declarations it does not
+#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140).
+NARROWED_TAIL = ("so it judged none of the five rows what it could not see could change: "
+                 "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
+                 "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
+                 "named no image unreadable and compared no held chart's image, since a build it "
+                 "did not read may produce the image; it followed no `[[deploys]]` block whose "
+                 "`onto` it does not hold, or whose images it could not judge; and an `[[apart]]` "
+                 "refusal, judged over fewer claims, may move a chart onto its component's own "
+                 "node where a whole build holds it back, because the package that claims that "
+                 "node was not read")
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
@@ -2236,7 +2243,7 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
         + [f"fix what `{n}`'s warning names" for n in failed] \
         + [_lacked_way(n, lacking[n][1]) for n in unparsed]
     return (f"this run was narrowed ({'; '.join(reasons)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways)}"
+            f"them: {'; '.join(ways)}"
             + (" - a whole-workspace build is narrowed too while a deployment reader fails "
                "or has no parser" if failed or unparsed else "") + ".")
 
@@ -2254,7 +2261,7 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     One channel per line (batch 22, D22-79): a group whose words carry their own way on in
     parentheses - an unknown extractor version's, claim 9a's inputs that cannot be read now
     (`freshness.carries_way`) - is offered no other, and where only such groups narrow the
-    load, its line ends "To judge both: do what each reason says.", each way on in its reason."""
+    load, its line ends "To judge them: do what each reason says.", each way on in its reason."""
     digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
     groups = ([f"no shard: {capped(sorted(missing))}"] if missing else []) \
         + ([f"refused for a digest mismatch: {capped(digest)}"] if digest else [])
@@ -2281,7 +2288,7 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
             if missing or refused or plain else []) \
         + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways) or 'do what each reason says'}.")
+            f"them: {'; '.join(ways) or 'do what each reason says'}.")
 
 
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
