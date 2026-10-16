@@ -114,6 +114,18 @@ def test_load_narrowings_docstring_states_the_one_channel_rule():
     assert "own way on" in doc and "do what each reason says" in doc, doc
 
 
+def test_the_graph_build_sop_says_what_freshness_compares_now():
+    """Decision 47: steps 3 and 4 of `workflows/graph-build.md` - the code and the other
+    components' files among what `--check-fresh` compares, re-publish once after a harness
+    upgrade, the module form where `build.py` itself cannot be read, and no "changed extractor
+    set" forcing the full path."""
+    text = flowing((ROOT / "workflows" / "graph-build.md").read_text(encoding="utf-8"))
+    for words in ("extraction code", "other components", "re-publish once",
+                  "python -m tools.graph.build", "parser versions"):
+        assert words in text, words
+    assert "a changed extractor set or workspace config forces the full path" not in text
+
+
 def test_graph_skill_says_a_harness_upgrade_stales_every_shard_once():
     text = " ".join((ROOT / "sdlc_templates" / "GRAPH-SKILL.md").read_text(
         encoding="utf-8").split())
