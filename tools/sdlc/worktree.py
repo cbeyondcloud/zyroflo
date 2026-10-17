@@ -500,8 +500,8 @@ def _join_problem(run_id: str, name: str, place: str, tree: Path, head: str, bas
     held = git(tree, "log", "-1", "--format=%H", base, "--", place, check=False) if base else ""
     if in_base in ("none", "file", "symlink") and not held:
         said += (f"; the tree's base lacks it, so rebase the tree onto a later commit that holds "
-                 f"it, if one does (`worktree.py --run {run_id} --component {mate} --rebase "
-                 f"<ref>`), then add `{name}`")
+                 f"it, if one does (`tools/sdlc/worktree.py --run {run_id} --component {mate} "
+                 f"--rebase <ref>`), then add `{name}`")
     return said + f"; or run `{name}` as a run of its own"
 
 
