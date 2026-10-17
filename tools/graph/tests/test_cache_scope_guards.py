@@ -291,7 +291,10 @@ def test_the_declared_scopes_and_keys():
         "properties", "spring-call-concats", "env-keys"}
     assert {n: r.cache_keys for n, r in regs.items() if r.cache_keys} == {
         "properties": ("properties",), "spring-call-concats": ("spring-call-concats.paired",),
-        "env-keys": ("envkeys",), "compose-services": ("composeenv", "composeenv.origin"),
+        "env-keys": ("envkeys",),
+        # Batch 24: each component's candidates and the claiming packages (design pass 24).
+        "compose-services": ("composeenv", "composeenv.origin", "composeenv.candidates",
+                             "composeenv.claims"),
         "helm-configmaps": ("hostmap",)}
 
 

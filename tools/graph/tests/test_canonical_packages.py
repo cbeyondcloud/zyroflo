@@ -345,8 +345,10 @@ def test_two_blocks_naming_one_service_the_first_decides_and_the_other_is_report
     assert overlap["why"].endswith("remove this block, or remove block #1 if this is the one")
     lost, = [e for e in built.deploys if e.get("canonical") is False]
     assert lost["props"]["superseded_by"] == "orders/docker-compose.prod.yml"
-    # Review B21-29: bounded to the node - compose ranks one component's values at a time, so
-    # the row never claims every reader of the blocks takes the first.
+    # Review B21-29: bounded to the node - compose still ranks by a later block the values of
+    # the files it designates wherever the earlier designates none of what a decision of
+    # compose's ranks (batch 24), so the row never claims every reader of the blocks takes the
+    # first.
     assert "block #2 decides nothing about this node - though compose" in overlap["why"]
     assert "every reader" not in overlap["why"]
 

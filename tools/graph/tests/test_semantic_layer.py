@@ -302,10 +302,11 @@ def test_the_declared_join_is_attributable_over_the_serving_layer(built):
 
 def test_a_declaration_change_invalidates_the_config_digest(si):
     """Reversed on purpose by batch 15b (ruling 17): the stamp digests only what a
-    READER reads. `[[alias]]` (like `[[entrypoint]]`, `[[apart]]` and `[[generated]]`)
-    is read by link passes alone, which run on every build and every load, so an edit
-    to one marks no shard stale; a `[[canonical]]` edit still does, because compose's
-    env ranking and helm's host-map ranking read those blocks while extracting."""
+    READER reads. `[[alias]]` (like `[[entrypoint]]` and `[[generated]]`) is read by link
+    passes alone, which run on every build and every load, so an edit to one marks no shard
+    stale; a `[[canonical]]` edit still does, because compose's env ranking and helm's
+    host-map ranking read those blocks while extracting - and since batch 24 (T621, A') an
+    `[[apart]]` edit does too, compose and helm reading it for keying and the host map."""
     ws = si.read_workspace(FIXTURE / "workspace.toml")
     base = {"workspace_name": "", "canonical": [], "generated": [],
             "entrypoint": [], "alias": [], "apart": [],
@@ -313,6 +314,10 @@ def test_a_declaration_change_invalidates_the_config_digest(si):
     with_alias = {**base, "alias": ws["alias"]}
     assert B.config_digest(base, "orders-api") == B.config_digest(with_alias, "orders-api"), \
         "an [[alias]] edit must leave every stamp current - no reader reads it"
+    # Batch 24 (T621, A'): an `[[apart]]` edit moves the digest, as a `[[canonical]]` one does.
+    with_apart = {**base, "apart": [{"service": "x", "component": "orders-api"}]}
+    assert B.config_digest(base, "orders-api") != B.config_digest(with_apart, "orders-api"), \
+        "an [[apart]] edit must stale every stamp - compose and helm read it while extracting"
     with_canonical = {**base, "canonical": ws["canonical"]}
     assert B.config_digest(base, "orders-api") != B.config_digest(with_canonical,
                                                                  "orders-api"), \

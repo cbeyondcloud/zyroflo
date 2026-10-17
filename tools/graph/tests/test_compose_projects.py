@@ -5,8 +5,8 @@ pair - the base `docker compose up` reads and the override it merges over it wit
 (compose-go `cli/options.go`, `DefaultFileNames` and `DefaultOverrideFileNames`) - is one
 package, named by its base. Every other compose file stays its own package. The compose
 extractor declares the pairing on the override's deployment node as `package`, and an
-override service with no `build:` of its own takes its base's claim for the same name: eight
-of `Claim`'s eleven fields, never `view` (ruling 10 keeps env main's) nor the reasons behind
+override service with no `build:` of its own takes its base's claim for the same name - its
+`view` too since batch 24 (decision 55: compose merges the pair itself), never the reasons behind
 the base's own rows (`unplaced`, `ambiguous`). Design: plans/batch-15a-design-note.md.
 
 Everything here is synthetic and none of it names a real workspace.
@@ -123,18 +123,17 @@ def test_an_override_with_no_build_takes_its_bases_placement(tmp_path):
     assert not built.kinds("compose-build-ambiguous")
 
 
-def test_an_overrides_environment_keeps_mains_view(tmp_path):
-    """Ruling 10: `view` is not taken. The base builds `deploy` itself, so its values are
-    `deploy`'s; the override's stay filed under the service's name, main's view, so
-    `deploy`'s code reads the base's value although the override is read after it - the
-    first of the three consequences the design leaves for T590, pinned so that taking the
-    base's view cannot happen silently."""
+def test_an_overrides_environment_takes_its_bases_view(tmp_path):
+    """Decision 55 (batch 24): `view` is taken with the base's claim. The base builds `deploy`
+    itself, so both files' values are `deploy`'s, and the override, read after its base, wins -
+    as compose merges the pair (D534-62's layer shape; `main` filed the override's under the
+    service's name, the first of the consequences T534 left for T590)."""
     built = build(tmp_path, {"deploy": {
         "app.py": producer("TOPIC"),
         "compose.yml": compose(svc("web", ".", "base-value")),
         "docker-compose.override.yml": compose(svc("web", None, "over-value"))}})
-    assert "topic:base-value" in built.topics
-    assert "topic:over-value" not in built.topics
+    assert "topic:over-value" in built.topics
+    assert "topic:base-value" not in built.topics
 
 
 def test_an_override_with_its_own_build_keeps_its_own_placement(tmp_path):

@@ -11,7 +11,6 @@ Everything here is synthetic and none of it names a real workspace.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -22,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools.graph.tests._estate import (  # noqa: E402
     build, compose, lay_down, producer, read, spawn, svc)
 
-WINDOWS = os.name == "nt"
 READER = 'import os\nQ = os.environ["QUEUE"]\n'
 
 
@@ -62,28 +60,31 @@ def test_a_dev_file_running_a_stock_container_gets_the_row(tmp_path):
     assert (row["key"], row["origin"]) == ("maxmemory", "orders/docker-compose.yml")
 
 
-@pytest.mark.parametrize("build_yaml", [
-    "    build: ./redis-custom\n",                       # D534-73: from a subdirectory
-    "    build:\n      dockerfile: Dockerfile\n",        # D534-80: with no context
+@pytest.mark.parametrize("build_yaml, leaks", [
+    ("    build: ./redis-custom\n", True),                   # D534-73: from a subdirectory
+    ("    build:\n      dockerfile: Dockerfile\n", False),   # D534-80: with no context
 ])
-def test_a_stock_container_the_repo_builds_leaks_as_on_main_with_no_row(tmp_path, build_yaml):
-    """Pinned as main's: a placed build is not "a container it does not build", so the
-    value reaches the same-named component as on main and nothing says so. Named in V3
-    rather than widened: the row already fires on correct orchestration repos."""
+def test_a_stock_container_the_repo_builds_leaks_from_a_subdirectory_alone(tmp_path, build_yaml,
+                                                                            leaks):
+    """A subdirectory's build (`own`) keys by the name rule, as on `main`, so its value reaches the
+    same-named component and nothing says so - the dev leak, a remainder (D24-137, D24-140). A
+    mapping with no context, in a file at the component's root, builds the root itself (`exact`),
+    so its settings now reach the declaring component's code - the one leak the keying closes
+    (D24-140, D24-155)."""
     built = build(tmp_path, {
         "platform": {"docker-compose.yml": (
             "services:\n  web:\n    build: .\n  redis:\n" + build_yaml
             + "    environment:\n      MAXMEMORY: 1gb\n")},
         "redis": {"app/cache.py": producer("MAXMEMORY")}})
-    assert built.topics == ["topic:1gb"]
+    assert built.topics == (["topic:1gb"] if leaks else [])
     assert not from_building_repo(built)
 
 
 @pytest.mark.parametrize("cell", ["absolute", "letter case"])
 def test_a_components_own_unplaceable_build_of_its_own_root_gets_no_row(tmp_path, cell):
-    """Pinned as main's (D534-81): the setting and the reading component are one, so the
-    row is not for it. Where main's filesystem rule reaches the root, the value resolves:
-    an absolute path everywhere, a letter-case twin on Windows only."""
+    """D534-81: the setting and the reading component are one, so the row is not for it. Placed
+    nowhere, the build keys by the name rule (decision 55): neither an absolute path nor a
+    letter-case twin reaches the root's code, on any platform (D24-155)."""
     context = str(tmp_path / "ws" / "orders") if cell == "absolute" else "../ORDERS"
     built = build(tmp_path, {
         "orders": {"docker-compose.yml": compose(svc("web", context)),
@@ -91,7 +92,7 @@ def test_a_components_own_unplaceable_build_of_its_own_root_gets_no_row(tmp_path
         "other": {"README.md": "x\n"}})
     assert built.kinds("compose-build-unresolved")
     assert not from_building_repo(built)
-    assert built.topics == (["topic:web-value"] if cell == "absolute" or WINDOWS else [])
+    assert built.topics == []
 
 
 def test_an_unplaced_build_is_worded_as_one(tmp_path):

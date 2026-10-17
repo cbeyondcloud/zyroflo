@@ -1438,16 +1438,22 @@ def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str],
     """An `unread` deployment node for each case-lost file a deployment reader reads for a
     CLAIM (batch 15b, T573 decision 6): a fact about the component's file names, published
     as `repo:` nodes are, marked with the kind of the row that explains it. A case-lost
-    template loses addresses, not a deployment, and gets its row alone (D15b-103)."""
+    template loses addresses, not a deployment, and gets its row alone (D15b-103). Batch 24:
+    it names the readers whose claim globs the file misses only by case (`readers`, from its
+    `pairs`), since it carries no reader's `kind` - so `env-ranking` knows a compose file
+    it could not read from a chart's (D24-36)."""
     regs = {r.name: r for r in registry}
     nothing = nothing or {}
-    return [Node(id=ids.deployment_id(component, rel), type="deploy",
-                 props={"path": rel, "component": component,
-                        "unread": "off-case-input" if rel in named else "deployment-off-case",
-                        # T625: renamed, it would still claim nothing - its reader said why.
-                        **({"claims_nothing": nothing[rel]} if rel in nothing else {})})
-            for rel, pairs in lost
-            if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
+    out: list[Node] = []
+    for rel, pairs in lost:
+        readers = sorted({reader for reader, glob in pairs if glob in regs[reader].claim_globs})
+        if readers:
+            out.append(Node(id=ids.deployment_id(component, rel), type="deploy", props={
+                "path": rel, "component": component, "readers": readers,
+                "unread": "off-case-input" if rel in named else "deployment-off-case",
+                # T625: renamed, it would still claim nothing - its reader said why.
+                **({"claims_nothing": nothing[rel]} if rel in nothing else {})}))
+    return out
 
 
 def _dirs_above(name: str, layout: dict[str, str]) -> list[str]:
@@ -1651,11 +1657,13 @@ def config_digest(config: dict, component: str) -> str:
     records it (the location, normalised by the installer since T615),
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
-    refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
-    `[[entrypoint]]`, `[[apart]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
-    component fields, the
-    workspace's name and every run-scoped key leave it: link passes run on every build and
-    every load, so nothing they read needs a shard to go stale.
+    refinement, 2026-10-07). Since batch 24 (T621, A') the shared part holds the `[[apart]]`
+    blocks too, without their citations and their `note`: compose and helm read them while
+    extracting, for keying and the host map, so an edit stales every shard, as a
+    `[[canonical]]` edit does (D24-12, D24-25, D24-42). Declarations only link passes read
+    (`[[alias]]`, `[[entrypoint]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
+    component fields, the workspace's name and every run-scoped key leave it: link passes run
+    on every build and every load, so nothing they read needs a shard to go stale.
 
     `<shared>:<own>`, in the one `config_sha` a shard records: a change to the shared part
     may change what ANY component's extractors leave in the shared cache, while an own field
@@ -1664,8 +1672,12 @@ def config_digest(config: dict, component: str) -> str:
     """
     canonical = [{k: v for k, v in block.items() if k not in ("file", "line")}
                  for block in config.get("canonical") or []]
+    apart = [{k: v for k, v in block.items() if k not in ("file", "line", "note")}
+             for block in config.get("apart") or [] if isinstance(block, dict)]
     shared = {"canonical": canonical, "layout": workspace_layout(config),
-              "profile": _name_of(config.get("profile"))}
+              "profile": _name_of(config.get("profile")),
+              # Only where a block exists, so a workspace with none keeps its stamps (D24-12).
+              **({"apart": apart} if apart else {})}
     mine = next((c for c in config.get("components") or [] if c.get("name") == component),
                 {})
     own = {"path": mine.get("path", ""), "role": mine.get("role", ""),
@@ -2143,11 +2155,16 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
 #: What a narrowed run does not judge, and the one exception it makes, said in every
 #: narrowed line (batch 15b; T573 decision 3, D15b-72): since batch 23 a counted list - the
 #: rows an absence or a contradiction judges, the image judgements, the declarations it does not
-#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140).
+#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140) - and since batch 24 the env
+#: ranking's cross-component rows, in a clause of their own after the counted list, as rows and
+#: not as a kind: compose's within-component `superseded-declaration` is served in the same run
+#: (design pass 24, section 3; D24-82, D24-125).
 NARROWED_TAIL = ("so it judged none of the five rows what it could not see could change: "
                  "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
-                 "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
-                 "named no image unreadable and compared no held chart's image, since a build it "
+                 "`deploys-not-a-consumer` and `deploys-contradicted`, and none of the env "
+                 "ranking's cross-component `superseded-declaration` rows, judged in a whole run "
+                 "alone; it proposed no image join, named no image unreadable and compared no "
+                 "held chart's image, since a build it "
                  "did not read may produce the image; it followed no `[[deploys]]` block whose "
                  "`onto` it does not hold, or whose images it could not judge; and an `[[apart]]` "
                  "refusal, judged over fewer claims, may move a chart onto its component's own "
@@ -2155,9 +2172,9 @@ NARROWED_TAIL = ("so it judged none of the five rows what it could not see could
                  "node was not read")
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
-CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
-                 "layout, the profile's name, and each component's own path as recorded, "
-                 "role, stack and shallow flag)")
+CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` and `[[apart]]` "
+                 "blocks, the layout, the profile's name, and each component's own path as "
+                 "recorded, role, stack and shallow flag)")
 
 
 def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
