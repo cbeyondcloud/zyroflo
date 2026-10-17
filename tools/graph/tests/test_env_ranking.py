@@ -574,3 +574,21 @@ def test_a_load_over_shards_a_block_edit_staled_judges_no_cross_component_row(tm
     notes = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
     assert any("none of the env ranking's cross-component `superseded-declaration` rows" in n
                for n in notes["notes"]), notes["notes"]
+
+
+def test_an_incremental_build_decides_over_every_components_candidate(tmp_path):
+    """D24-15: editing one setter rebuilds it and its readers, and the shared cache's candidates
+    fill as in a full build (`cache_exts` runs compose everywhere for a rebuilt reader) - the owner
+    read first keeps its new value, and the loser's row carries its new one."""
+    estate = s1("deploy-a")
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    ws = tmp_path / "ws"
+    for component, old, new, loser in (("deploy-a", b"a-value", b"a2-value", "b-value"),
+                                       ("deploy-b", b"b-value", b"b2-value", "b2-value")):
+        f = ws / component / "docker-compose.yml"
+        f.write_bytes(f.read_bytes().replace(old, new))
+        again = build(tmp_path, None, "--incremental", "--publish-snapshot")
+        assert again.code == 0
+        assert again.topics == ["topic:a2-value"], component
+        assert [(r["component"], r["value"]) for r in ranking_rows(again)] == [
+            ("deploy-b", loser)], component
