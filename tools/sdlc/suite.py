@@ -922,9 +922,11 @@ def _inside_a_run_tree(target: Path, top: str, run_trees, notes: list[str] | Non
     mine, why = trees.repo_key(root)
     if not mine:
         # Said, as for the tree's side - a git failure is never the bound's own rule (B25-2).
-        if notes is not None:
-            notes.append(f"git could not say which repository the workspace root is in ({why}), "
-                         f"so the bound was taken as `main` takes it")
+        said = (f"git could not say which repository the workspace root is in ({why}), so the "
+                f"bound was taken as `main` takes it")
+        # One cause, said once however many checkouts ask (B25-6).
+        if notes is not None and said not in notes:
+            notes.append(said)
         return None
     theirs, why = trees.repo_key(Path(top))
     if not theirs:

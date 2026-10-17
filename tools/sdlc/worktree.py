@@ -1062,10 +1062,12 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
         raise WorktreeError("; ".join(holding))
     for name, rows, spot in removable:
         args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
-        # From the first of the tree's components' checkouts that exists: a tree-mate's checkout
-        # gone from the developer's tree must not block the removal of the tree (B25-3).
-        homes = [guardrails.component_dir(target, entry["path"]) for entry in rows]
-        here = next((Path(h) for h in homes if Path(h).is_dir()), Path(homes[0]))
+        # From the first of the tree's components' checkouts that git can run in: a tree-mate's
+        # checkout gone, or no longer a checkout, must not block the removal of the tree (B25-3,
+        # B25-7). Chosen before the act and the act run once - a removal git started and failed
+        # is never retried elsewhere, so its own refusal is the one reported.
+        homes = [Path(guardrails.component_dir(target, entry["path"])) for entry in rows]
+        here = next((h for h in homes if is_repo(h)), homes[0])
         try:
             git(here, *args)
         except WorktreeError as exc:

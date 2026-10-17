@@ -1087,3 +1087,39 @@ def test_a_shared_tree_is_removed_through_any_of_its_components_checkouts(tmp_pa
     assert W.remove(root, rid) == [f"a, b: removed {tree}"]
     rows = W.load_record(root, rid)["components"]
     assert not tree.exists() and rows["a"]["removed_at"] and rows["b"]["removed_at"]
+
+
+# ── review round 2 (B25-6, B25-7) ───────────────────────────────────────────────────────
+
+
+def test_the_workspace_roots_git_failure_is_said_once_however_many_trees(tmp_path, monkeypatch):
+    """B25-6: the bound is asked once per checkout, and the workspace root's could-not-look is
+    one cause - said once in the committed notes, never once per tree."""
+    root = mono(tmp_path / "ws", comp("a", "services/a"),
+                comp("b", "services/b", pattern="sdlc/b-<run-id>"),
+                paths=("services/a/app.py", "services/b/app.py", "gradle/libs.versions.toml"))
+    rid = run_in(root)
+    W.create(root, rid)
+    for name in ("a", "b"):
+        commit_in(entry(root, rid, name)[0], "gradle/libs.versions.toml", f"v = {name}\n")
+    real = W.repo_key
+    monkeypatch.setattr(W, "repo_key",
+                        lambda where: ("", "boom") if same(where, root) else real(where))
+    notes = S.changed_files(root, rid)[1]
+    said = [n for n in notes if "which repository the workspace root is in" in n]
+    assert len(said) == 1, notes
+
+
+def test_a_shared_tree_is_removed_through_a_tree_mates_checkout_git_can_run_in(tmp_path):
+    """B25-7: the removal tries each of the tree's components' checkouts in turn - `a`'s directory
+    still exists but is no longer in a git checkout, and `b`'s checkout removes the tree."""
+    root = mono(tmp_path / "ws", comp("a", "../other/services/a"), comp("b", "services/b"))
+    other = tmp_path / "other"
+    git(root, "worktree", "add", "-q", "-b", "other", str(other))
+    rid = run_in(root)
+    W.create(root, rid)
+    tree, _home = entry(root, rid, "a")
+    (other / ".git").unlink()
+    assert (other / "services" / "a").is_dir()
+    assert W.remove(root, rid) == [f"a, b: removed {tree}"]
+    assert not tree.exists()
