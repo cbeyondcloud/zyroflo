@@ -213,19 +213,37 @@ def test_files_are_read_in_mains_order_so_the_same_value_is_read_last(tmp_path, 
     assert built.topics == ["topic:root-value"]
 
 
-@pytest.mark.parametrize("names, windows, posix", [
-    (("docker-compose.a.yml", "docker-compose.B.yml"), "B-value", "a-value"),
-    (("docker-compose.PROD.yml", "docker-compose.dev.yml"), "PROD-value", "dev-value"),
+@pytest.mark.parametrize("names, value", [
+    (("docker-compose.a.yml", "docker-compose.B.yml"), "a-value"),       # S4
+    (("docker-compose.PROD.yml", "docker-compose.dev.yml"), "dev-value"),
 ])
-def test_mains_read_order_folds_case_on_windows_only(tmp_path, names, windows, posix):
-    """Pinned as main's, and platform-dependent (D534-74, T590): Windows compares paths
-    case-folded, POSIX raw, so the file read last differs wherever folding reorders two."""
+def test_files_are_read_in_segment_order_on_every_platform(tmp_path, names, value):
+    """D534-74, D24-14, D24-143: a component's files are read in their POSIX paths' segment order,
+    case-sensitively, on every platform - `main` compared the platform's `Path`, which folds case
+    on Windows, so the file read last, and the value kept, differed by machine."""
     first, second = names
     built = build(tmp_path, {
         "deploy": {first: compose(image("payments", first.split(".")[1] + "-value")),
                    second: compose(image("payments", second.split(".")[1] + "-value"))},
         "payments": {"app/pub.py": producer("TOPIC")}})
-    assert built.topics == [f"topic:{windows if WINDOWS else posix}"]
+    assert built.topics == [f"topic:{value}"]
+
+
+@pytest.mark.parametrize("third, value", [
+    (None, "override-value"),                        # S9
+    ("docker-compose.a.yml", "override-value"),      # the pair after the file sorting first
+    ("docker-compose.zz.yml", "zz-value"),           # the pair before the file sorting last
+])
+def test_an_override_is_read_right_after_its_base(tmp_path, third, value):
+    """D24-11, D24-27, D24-29: segment order alone puts `docker-compose.override.yml` before
+    `docker-compose.yml`; compose merges the override over its base, so it is read right after
+    it - its value kept, with no row - and the pair keeps its place among the other files."""
+    files = {"docker-compose.yml": compose(image("payments", "base-value")),
+             "docker-compose.override.yml": compose(image("payments", "override-value"))}
+    if third:
+        files[third] = compose(image("payments", third.split(".")[1] + "-value"))
+    built = build(tmp_path, {"deploy": files, "payments": {"app/pub.py": producer("TOPIC")}})
+    assert env(built) == ([f"topic:{value}"], [])
 
 
 # ── two services building one root share its view, as on main (D534-54, D534-64) ─────────
@@ -261,6 +279,12 @@ def test_two_services_building_one_root_share_its_view(tmp_path):
                             ["superseded-declaration:orders/docker-compose.yml"])
     row, = blocked.kinds("superseded-declaration")
     assert (row["line"], row["value"]) == (5, "web-value")
+    # D534-54, D24-128: facts only - never `web`'s value called a declaration of `worker`.
+    assert row["why"] == (
+        "`topic` is filed under `orders` as `web-value` here for `web` and as `worker-value` at "
+        "`docker-compose.yml:9` for `worker`; one declaration of `topic` per view reaches the "
+        "code, and this one is not it. Both containers still run with their own value; to keep "
+        "this one in the graph, make it the only declaration of `topic` filed under `orders`")
 
 
 # ── main's own rule for the env view, across every build: spelling (D534-71, D534-72) ────
@@ -334,19 +358,92 @@ def test_a_block_in_the_ids_spelling_ranks_env_values_within_the_component(tmp_p
     assert not built.kinds("contested-service"), "the block decides the contest too"
 
 
+def test_the_one_service_row_claims_no_value_kept_where_another_service_sets_it(tmp_path):
+    """D24-123: a third file's `cron`, filed under the same view, sets the key after the owner's -
+    so the row for the superseded declaration says it is not kept, never that the owner's value
+    is what the graph uses (here it is `cron`'s)."""
+    built = build(tmp_path, {
+        "orders": {"docker-compose.yml": compose(svc("web", ".", "owner-value")),
+                   "docker-compose.prod.yml": compose(svc("web", ".", "stale-value")),
+                   "docker-compose.zz.yml": compose(svc("cron", ".", "cron-value")),
+                   "app/pub.py": producer("TOPIC")},
+        "__canonical__": [{"service": "web", "owner": "orders", "path": "docker-compose.yml"}]})
+    assert built.topics == ["topic:cron-value"]
+    (row,) = built.kinds("superseded-declaration")
+    assert row["source_file"] == "docker-compose.prod.yml"
+    assert row["why"] == (
+        "`topic` is declared as 'stale-value' here and as 'owner-value' in docker-compose.yml, "
+        "which the workspace names as the owner of service `web`, so this declaration is not "
+        "kept; it is reported because a stale deployment nobody has noticed is a finding, not "
+        "noise")
+
+
+#: Round 8's block shapes: two services of one component filed under one view, each block shape
+#: in both declaration orders (D24-80, D24-87, D24-93, D24-94, D24-97).
+TWO_SERVICES_BLOCKS = {"none": [], "web": ["web"], "worker": ["worker"],
+                       "both": ["web", "worker"]}
+
+
+@pytest.mark.parametrize("order", ["web-first", "worker-first"])
+@pytest.mark.parametrize("blocks", sorted(TWO_SERVICES_BLOCKS))
+def test_the_two_services_row_states_facts_in_every_block_shape(tmp_path, blocks, order):
+    """Where the row is emitted its words are factual - both values, where the other is, no block
+    and no `main` in them - and its way on, followed, leaves no contest: one service's declaration
+    of the key, the only one filed under the view, its value kept."""
+    services = [svc("web", ".", "web-value"), svc("worker", ".", "worker-value")]
+    if order == "worker-first":
+        services.reverse()
+    estate = {"orders": {"docker-compose.yml": compose(*services),
+                         "app/pub.py": producer("TOPIC")},
+              "__canonical__": [{"service": name, "owner": "orders"}
+                                for name in TWO_SERVICES_BLOCKS[blocks]]}
+    rows = build(tmp_path / "a", estate).kinds("superseded-declaration")
+    for row in rows:
+        assert "is filed under `orders` as" in row["why"], row["why"]
+        assert "web-value" in row["why"] and "worker-value" in row["why"]
+        assert "block" not in row["why"] and "main" not in row["why"]
+        assert "make it the only declaration of `topic` filed under `orders`" in row["why"]
+    for row in rows:
+        # Followed: the other service's declaration of the key removed - this one the only one.
+        kept = "web" if row["value"] == "web-value" else "worker"
+        other = "worker" if kept == "web" else "web"
+        followed = {**estate, "orders": {**estate["orders"], "docker-compose.yml": compose(
+            svc(kept, ".", f"{kept}-value"), svc(other, ".", None))}}
+        after = build(tmp_path / f"followed-{kept}", followed)
+        assert after.topics == [f"topic:{kept}-value"]
+        assert not after.kinds("superseded-declaration")
+
+
+def test_the_two_services_row_cites_a_kept_declaration_above_it(tmp_path):
+    """D24-114: the other declaration named by file and line, whichever way it lies - here above
+    the row in the same file: `worker`'s block owns the view's key first, and `web`, whose block
+    designates another file, is contested and not the owner, so its value is the row."""
+    built = build(tmp_path, {
+        "orders": {"docker-compose.yml": compose(svc("worker", ".", "worker-value"),
+                                                 svc("web", ".", "web-value")),
+                   "docker-compose.prod.yml": compose(svc("web", ".", None)),
+                   "app/pub.py": producer("TOPIC")},
+        "__canonical__": [{"service": "worker", "owner": "orders"},
+                          {"service": "web", "owner": "orders",
+                           "path": "docker-compose.prod.yml"}]})
+    (row,) = built.kinds("superseded-declaration")
+    assert row["line"] == 9 and "at `docker-compose.yml:5` for `worker`" in row["why"], row["why"]
+
+
 # ── ruling 9: ranking within one component; across components the last read wins ────────
 
 PANTRY = Path(__file__).resolve().parent / "fixtures" / "pantry"
 MAINS_PANTRY_WHY = (
     "`restock.queue` is declared as 'restock-events-v1' here and as 'restock-events-v2' in "
-    "docker-compose.yml, which the workspace names as the owner of service `pantry-api`. The "
-    "owner's value is what the graph uses; this one is reported because a stale deployment "
-    "nobody has noticed is a finding, not noise")
+    "docker-compose.yml, which the workspace names as the owner of service `pantry-api`, so "
+    "this declaration is not kept; it is reported because a stale deployment nobody has "
+    "noticed is a finding, not noise")
 
 
-def test_within_one_component_the_superseded_row_reads_exactly_as_on_main(tmp_path):
-    """Pantry's row is within one component, where ranking works, so it keeps main's text
-    byte for byte (ruling 9). Only its kind, file and line were pinned before (D534-68)."""
+def test_within_one_component_the_superseded_row_states_facts_only(tmp_path):
+    """Pantry's row is within one component and keeps `main`'s text but for its one clause the
+    design makes false - "The owner's value is what the graph uses", which another service of
+    the view or another component can contradict (D24-56, D24-123, D24-130)."""
     code = B.main(["--workspace", str(PANTRY / "workspace.toml"), "--out", str(tmp_path),
                    "--run-id", "fixed"])
     row, = read(code, tmp_path).kinds("superseded-declaration")
@@ -411,4 +508,5 @@ def test_within_one_component_a_later_components_value_still_replaces_the_owners
     row, = built.kinds("superseded-declaration")
     assert (row["component"], row["source_file"], row["value"]) == (
         "aa", "docker-compose.zz.yml", "a2")
-    assert "The owner's value is what the graph uses" in row["why"]
+    assert "so this declaration is not kept" in row["why"]
+    assert "The owner's value is what the graph uses" not in row["why"]

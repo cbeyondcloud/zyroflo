@@ -83,7 +83,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 from tools.graph.core.lib import ids, props, repo_walk
@@ -499,6 +499,24 @@ def env_view(name: str, rel: str, declares: bool, comp: str, how: str,
 DEFAULT_BASES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 DEFAULT_OVERRIDES = ("compose.override.yml", "compose.override.yaml",
                      "docker-compose.override.yml", "docker-compose.override.yaml")
+
+
+def read_order(rels: list[str], layers: dict[str, str]) -> list[str]:
+    """A component's compose files in the order their values are read (design pass 24, section
+    2): their component-relative POSIX paths' SEGMENT order - compared segment by segment,
+    case-sensitively, so `docker/compose.yml` comes before `docker-compose.yml` as on `main`, and
+    a case-distinct pair reads alike on every platform, where the platform's `Path` folded case
+    on Windows (D534-74, D24-14, D24-136) - with each T588 override right after its base, since
+    compose merges the override over it and segment order alone would read it first (D24-11).
+    `layers` maps each override to its base (`projects`)."""
+    order = sorted(rels, key=lambda rel: PurePosixPath(rel).parts)
+    out: list[str] = []
+    for rel in order:
+        if rel in layers:
+            continue
+        out.append(rel)
+        out.extend(other for other in order if layers.get(other) == rel)
+    return out
 
 
 def projects(rels: list[str]) -> dict[str, str]:
@@ -990,15 +1008,16 @@ class ComposeExtractor:
         held: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
             first_node = len(res.nodes)
-            # In main's order. Nothing placed depends on it, since each file places its own
-            # `build:` (D534-7), but which env value is read last does, so it stays main's
-            # (ruling 10). Each file is read and parsed once (remainder E).
+            # In segment order, each override right after its base (`read_order`). Nothing
+            # placed depends on it, since each file places its own `build:` (D534-7), but which
+            # env value is read last does. Each file is read and parsed once (remainder E).
             includes: dict[str, Any] = {}
             lost: set[str] = set()
-            parsed = [item for path in sorted(ctx.inputs(repo))
-                      if (item := self._read(res, repo, path, includes, lost)) is not None]
-            inputs = {_rel(repo, path) for path in ctx.inputs(repo)}
-            layers = projects([_rel(repo, path) for path in ctx.inputs(repo)])
+            by_rel = {_rel(repo, path): path for path in ctx.inputs(repo)}
+            layers = projects(list(by_rel))
+            parsed = [item for rel in read_order(list(by_rel), layers)
+                      if (item := self._read(res, repo, by_rel[rel], includes, lost)) is not None]
+            inputs = set(by_rel)
             decls = _claims(ctx, repo, parsed, layers, inputs, lost)
             # T623: per node, this component's files declaring a service on it - the files
             # a block must designate to rank their values.
@@ -1300,13 +1319,39 @@ class ComposeExtractor:
             # wording rather than a half-qualified citation. The branches of `_merge` never
             # reach it - every write records an origin - so it is a guard, not a shape
             # (D534-69).
+            # Whose each declaration is: this file's service, or the earlier one's, recorded
+            # in the origin table before this file's values landed.
+            kept_service = str(earlier.get("service", "")) if here_dropped else name
+            dropped_service = name if here_dropped else str(earlier.get("service", ""))
+            if (dropped_in == kept_in and kept_service and dropped_service
+                    and kept_service != dropped_service):
+                # Two services filed under one view (D534-54): facts only - where the other
+                # declaration is, by file and line, whichever way it lies; never which value
+                # the component keeps, which a later file may decide, nor a block, which ranks
+                # one service's declarations (D24-80, D24-93, D24-114 to D24-116, D24-128).
+                res.unresolved.append({
+                    "extractor": self.name, "kind": "superseded-declaration",
+                    "component": repo.alias, "key": row["key"],
+                    "source_file": row["dropped"]["file"], "line": row["dropped"]["line"],
+                    "value": row["dropped"]["value"],
+                    "why": (f"`{row['key']}` is filed under `{view_key}` as "
+                            f"`{row['dropped']['value']}` here for `{dropped_service}` and as "
+                            f"`{row['kept']['value']}` at `{row['kept']['file']}:"
+                            f"{row['kept']['line']}` for `{kept_service}`; one declaration of "
+                            f"`{row['key']}` per view reaches the code, and this one is not it. "
+                            f"Both containers still run with their own value; to keep this one "
+                            f"in the graph, make it the only declaration of `{row['key']}` "
+                            f"filed under `{view_key}`")})
+                continue
             if not dropped_in or not kept_in or dropped_in == kept_in:
-                # One component: ranked within it, so the claim below holds unless another
-                # component sets the key later (remainder V-e) - worded exactly as on main.
+                # One component, one service in two files: facts only - which declaration is
+                # not kept, and the owner as why; never the value the graph keeps, which
+                # another service of the view or another component can decide (D24-56,
+                # D24-123).
                 said = (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
                         f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
-                        f"workspace names as the owner of service `{name}`. The owner's value "
-                        f"is what the graph uses; this one is reported because ")
+                        f"workspace names as the owner of service `{name}`, so this "
+                        f"declaration is not kept; it is reported because ")
             else:
                 # Two components: the kept file qualified (D9-4), and no claim the graph
                 # cannot keep - a component read later can still replace the owner's
