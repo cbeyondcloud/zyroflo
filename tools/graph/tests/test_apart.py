@@ -418,6 +418,20 @@ HELD_IMAGED = {"a": {"charts/web/values.yaml": "fullnameOverride: web\nimage:\n"
                                                             image="org/other"))}}
 
 
+def test_a_held_charts_offer_reads_a_registry_as_docker_does(tmp_path):
+    """Review B23-1's reach: a chart's registry naming no host (`myreg`) is a Docker Hub path, so
+    the chart runs what the holder's `myreg/org/web` builds - offered, never told the images
+    differ."""
+    hub = {"a": {**HELD_IMAGED["a"], "charts/web/values.yaml": "fullnameOverride: web\nimage:\n"
+                                                                "  registry: myreg\n"
+                                                                "  repository: org/web\n"},
+           "deploy": {"docker-compose.yml": compose(svc("web", "../a", None,
+                                                        image="myreg/org/web"))}}
+    (row,) = build(tmp_path, {**hub, "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert "declare it - `[[deploys]] service = \"web\" component = \"a\"" in row["why"]
+    assert "is not the image" not in row["why"]
+
+
 def test_a_held_charts_holders_are_read_as_the_image_link_reads_a_build(tmp_path):
     """D23-60, D23-135: a build that could not be placed is still a build - its node is offered,
     as a `[[deploys]]` onto it is followed; and a holder that builds nothing gates no offer,

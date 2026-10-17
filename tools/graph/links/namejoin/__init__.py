@@ -879,7 +879,12 @@ class NameJoinPass:
     def _onto_unmatched(onto: str, unread: list, unreached: list) -> str:
         """`deploys-unmatched`'s `onto` side, naming what compose did not read, which may hold
         the build (D23-115, D23-121, D23-124) - compared as an id, never parsed (D23-59)."""
-        paths = sorted({f"{u.component}/{u.path}" for u in unread})
+        paths = sorted({f"{u.component}/{u.path}" for u in unread
+                        if u.why != accounting.NOT_LISTED})
+        # A directory the walk could not list is no file an `include:` names: it is listed, then
+        # rebuilt (review B23-11), as the node case's own way on says.
+        dirs = sorted({f"{u.component}/{u.path}" for u in unread
+                       if u.why == accounting.NOT_LISTED})
         # Each chain by its service and file, as `image-proposals-withheld` names one - a bare
         # service name may be several components' (review B23-6).
         services = sorted({f"`{u.service}` of `{u.component}/{u.file}`" for u in unreached})
@@ -890,6 +895,9 @@ class NameJoinPass:
             said += (f" - {accounting.capped_ticked(paths)} {'was' if one else 'were'} not read "
                      f"and may hold it: fix {fix} - an `include:`'s by naming a compose file the "
                      f"reader reads - and rebuild")
+        if dirs:
+            said += (f" - {accounting.capped_ticked(dirs)} could not be listed and may hold it: "
+                     f"allow listing {'it' if len(dirs) == 1 else 'them'}, then rebuild")
         if services:
             one = len(services) == 1
             said += (f" - {capped(services)} extend{'s' if one else ''} a base the graph cannot "

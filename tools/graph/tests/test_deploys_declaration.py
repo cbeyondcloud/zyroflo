@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.graph.links.canonical.accounting import NOT_READ  # noqa: E402
 from tools.graph.tests._estate import build  # noqa: E402
 
 CODE = {"main.py": "print(1)\n"}
@@ -100,7 +101,8 @@ def test_a_block_whose_pair_the_run_holds_no_claim_of_is_unmatched_on_its_claim_
                                     "onto": "svc:web@orders"}))
     (row,) = deploys_rows(built)
     assert (row["kind"], row["side"], row["service"]) == ("deploys-unmatched", "claim", "nope")
-    assert "It read: `web`. Correct the block's `service` or `component`, or remove it" in row["why"]
+    assert ("It read: `web`. Correct the block's `service` or `component`, or remove it"
+            in row["why"])
     corrected = build(tmp_path / "corrected", estate(join()))
     assert chart_claim(corrected)["dst"] == "svc:web@orders", "D23-79: its way on followed"
     assert deploys_rows(corrected) == []
@@ -138,16 +140,16 @@ JOINING = {
 
 @pytest.mark.parametrize("branch", sorted(JOINING))
 def test_each_branch_of_the_joining_framing_says_what_the_graph_read(tmp_path, branch):
-    """D23-89, D23-97, D23-98, D23-107, D23-108, reviews B23-2 and B23-3: a file read whole that
-    claims nothing is
-    never 'could not be read' (T624, T625), and no branch says the head's clause twice. Followed -
+    """D23-89, D23-97, D23-98, D23-107, D23-108, reviews B23-2, B23-3 and B23-10: a file read
+    whole that claims nothing is never 'could not be read' (T624, T625), no branch says the head's
+    clause twice, and each ends with its one way on and what the graph does not read. Followed -
     the block's `component` corrected to the one that deploys it - the claim joins."""
     files, words = JOINING[branch]
     built = build(tmp_path, estate({"service": "web", "component": "a",
                                     "onto": "svc:web@orders"}, a=files))
     (row,) = deploys_rows(built)
     assert (row["kind"], row["side"]) == ("deploys-unmatched", "claim")
-    assert row["why"].startswith(words), row["why"]
+    assert row["why"] == f"{words}. {NOT_READ}", row["why"]
     corrected = build(tmp_path / "corrected", estate(join(), a=files))
     assert chart_claim(corrected)["dst"] == "svc:web@orders"
     assert deploys_rows(corrected) == []
@@ -453,7 +455,8 @@ def test_a_siblings_unreachable_chain_leaves_a_block_unconfirmed(tmp_path, where
     files = (runner_compose("  web:\n    image: org/web\n", job) if where == "one-file" else
              {**runner_compose("  web:\n    image: org/web\n"),
               "compose.prod.yml": "services:\n" + job})
-    built = build(tmp_path, {**estate(), "runner": {**files, "base.yml": BASE.format(service="job")},
+    built = build(tmp_path, {**estate(),
+                             "runner": {**files, "base.yml": BASE.format(service="job")},
                              "__deploys__": [{"service": "web", "component": "runner",
                                               "onto": "svc:web@orders"}]})
     (row,) = deploys_rows(built)
@@ -554,3 +557,27 @@ def test_a_component_with_a_directory_the_walk_cannot_list_is_unconfirmed(tmp_pa
                 "listing it, then rebuild") in row["why"], row["why"]
     else:
         assert deploys_rows(built) == []
+
+
+def test_the_onto_side_names_a_directory_the_walk_could_not_list_with_its_own_way_on(tmp_path):
+    """Review B23-11: a directory is not a file an `include:` names - it is listed, then rebuilt.
+    Whether the refusal binds is measured."""
+    from tools.graph.tests._estate import lay_down, read, spawn
+    from tools.graph.tests._listing import allow_listing, deny_listing, lists
+    lay_down(tmp_path, estate(join(onto="svc:web@nowhere"),
+                              runner={"compose.yaml": "services:\n  side:\n    image: x/side\n",
+                                      "infra/notes.txt": "x\n"}))
+    guarded = tmp_path / "ws" / "runner" / "infra"
+    deny_listing(guarded)
+    try:
+        binds = not lists(guarded)
+        proc = spawn(tmp_path)
+    finally:
+        allow_listing(guarded)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (row,) = deploys_rows(read(proc.returncode, tmp_path / "out"))
+    listed = (" - `runner/infra` could not be listed and may hold it: allow listing it, then "
+              "rebuild" if binds else "")
+    assert row["why"] == (f"names `svc:web@nowhere`, which no build the graph read is on{listed}. "
+                          f"Correct the block's `onto`, as an `image-join-proposed` row spells it, "
+                          f"or remove it"), row["why"]
