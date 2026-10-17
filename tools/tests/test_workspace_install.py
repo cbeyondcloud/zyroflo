@@ -331,3 +331,47 @@ def test_without_the_flag_nothing_changes(tmp_path: Path):
     assert doc["scope"] == "repo" and doc["gate_profile"] == "solo"
     assert "components" not in doc
     assert doc["test_command"] == "go test ./...", "single-repo commands must stay top-level"
+
+
+#: Batch 23 (T589): each way a [[deploys]] block is refused, as a developer meets it.
+DEPLOYS_REFUSED = [
+    ('[[deploys]]\nservice = "web"\ncomponent = "deploy"\nonto = "svc:web@orders"\n',
+     "names component 'deploy', which is not a discovered component"),
+    ('[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = "svc:web@billing"\n'
+     '[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = ""\n',
+     "two [[deploys]] blocks both declare service 'web' of 'orders'"),
+    ('[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = "ep:/orders/v1"\n',
+     "is not a service node id"),
+    ('[[deploys]]\nservice = "web"\ncomponent = "orders"\n', "needs `onto`"),
+]
+
+
+@pytest.mark.parametrize("block,fragment", DEPLOYS_REFUSED,
+                         ids=["unknown-component", "identical-duplicate", "onto-not-a-service-id",
+                              "no-onto"])
+def test_a_bad_deploys_block_exits_with_a_message(bench, block: str, fragment: str):
+    """D23-5, D23-10, D23-24, D23-47: refused before anything is written, in words."""
+    proc = run("--workspace", str(bench('root = "repos"\n' + block)),
+               "--target", str(bench.target))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert fragment in proc.stderr, proc.stderr
+    assert not (bench.target / ".sdlc").exists(), "a rejected config still wrote files"
+
+
+@pytest.mark.parametrize("blocks", [
+    '[[apart]]\nservice = "web"\ncomponent = "orders"\n'
+    '[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = "svc:web@billing"\n',
+    '[[apart]]\nservice = "web"\ncomponent = "orders"\n'
+    '[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = ""\n',
+    '[[deploys]]\nservice = "@acme/api"\ncomponent = "orders"\nonto = "svc:@acme/api@billing"\n',
+    '[[deploys]]\nservice = "web"\ncomponent = "orders"\nonto = "svc:web@nowhere"\n',
+], ids=["a-join-beside-apart", "a-decline-beside-apart", "an-at-sign-service",
+        "onto-an-undiscovered-component"])
+def test_a_valid_deploys_block_installs(bench, blocks: str):
+    """D23-59, D23-72: the installer checks `onto`'s spelling alone - which component it names,
+    and whether it is the node an `[[apart]]` refuses, are judged at link time by comparing ids;
+    a join beside the `[[apart]]` of its pair is accepted (decision 54)."""
+    proc = run("--workspace", str(bench('root = "repos"\n' + blocks)),
+               "--target", str(bench.target))
+    assert proc.returncode == 0, proc.stdout + proc.stderr

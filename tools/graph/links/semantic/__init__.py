@@ -178,7 +178,8 @@ class SemanticPass:
             res.unresolved.append(unresolved_row(
                 self.name, component, "apart-unmatched", str(block.get("file") or ""),
                 int(block.get("line") or 0),
-                accounting.none_read(r, component, head, refusing=True), service=written))
+                accounting.none_read(r, component, head, mode=accounting.REFUSING),
+                service=written))
 
 
 LINK_PASSES = (SemanticPass(),)

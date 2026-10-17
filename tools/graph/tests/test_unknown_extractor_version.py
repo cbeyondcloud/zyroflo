@@ -165,7 +165,7 @@ def test_a_load_whose_only_reason_carries_its_way_on_offers_no_other(site):
                 if line.startswith("this load was narrowed")]
     assert len(narrowed) == 1, load.stdout
     assert f"stale - {UNKNOWN}: a, b" in narrowed[0]
-    assert narrowed[0].endswith("To judge both: do what each reason says."), narrowed[0]
+    assert narrowed[0].endswith("To judge them: do what each reason says."), narrowed[0]
     assert "re-publish the shards it names" not in narrowed[0]
 
 

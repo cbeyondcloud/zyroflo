@@ -227,6 +227,21 @@ profile = ""
 # service   = "redis"          # the service name the deployment file declares
 # component = "deploy"         # the component whose deployment file declares it
 # note      = "a stock redis container, not the redis component"   # OPTIONAL: why
+#
+# AN IMAGE TWO NAMES SHARE is the third case. A chart, or a compose service that only
+# runs an image, deploying the image another component's compose file builds lands on
+# a node of its own when its name differs. The graph proposes the join in an
+# `image-join-proposed` row and moves nothing until you declare it: name the build node
+# it deploys in `onto`, spelled as the row spells it - or decline with `onto = ""` when
+# it deploys no build the graph reads (a staging image of the same name, a stock image
+# a component happens to build). A declaration the files contradict - the images
+# differ - is not followed, and a row says so. Editing a block stales no shard.
+
+# [[deploys]]
+# service   = "web"            # the service name the deployment file declares
+# component = "charts"         # the component whose deployment file declares it
+# onto      = "svc:web@orders" # the build node, as `image-join-proposed` spells it; "" declines
+# note      = "the chart runs the image orders builds"   # OPTIONAL: why
 
 
 # ═════════════════════════════════════════════════════════════════════════════

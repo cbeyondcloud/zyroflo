@@ -182,6 +182,40 @@
       },
       "type": "array"
     },
+    "deploys": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `deploys` is documented there.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "component": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `component` is documented there.",
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "note": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `note` is documented there.",
+            "type": "string"
+          },
+          "onto": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `onto` is documented there.",
+            "pattern": "^\\s*$|^\\s*svc:.*@",
+            "type": "string"
+          },
+          "service": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `service` is documented there.",
+            "pattern": "\\S",
+            "type": "string"
+          }
+        },
+        "required": [
+          "component",
+          "onto",
+          "service"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "entrypoint": {
       "description": "See sdlc_templates/workspace.example.toml \u2014 the key `entrypoint` is documented there.",
       "items": {

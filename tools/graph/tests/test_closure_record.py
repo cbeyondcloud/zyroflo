@@ -357,7 +357,7 @@ def test_a_dependent_whose_sibling_re_published_alone_is_stale_at_every_door(tmp
     report = json.loads((tmp_path / "load" / "build_report.json").read_text(encoding="utf-8"))
     (note,) = report["notes"]
     assert f"stale - {reason}: b" in note
-    assert note.endswith("To judge both: re-publish the shards it names from a build of the "
+    assert note.endswith("To judge them: re-publish the shards it names from a build of the "
                          "workspace (`--check-fresh` then exits 0), or build the whole "
                          "workspace."), "main's way on: the words carry none of their own"
 

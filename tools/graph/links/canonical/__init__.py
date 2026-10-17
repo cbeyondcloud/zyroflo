@@ -223,15 +223,48 @@ def is_held(claims: list[tuple[int, Edge]]) -> bool:
 def held_on(edge: Edge, edges: list[Edge], nodes_by_id: dict[str, Node],
             layout: dict[str, str]) -> tuple[str, list[str], list[str]]:
     """A held claim's component's own node, the files of every other package's claims on
-    it (ruling 15; D15b-140 i), and those of them a build placed - one reading for the
-    contest row's held clause and `apart-held` alike."""
+    it (ruling 15; D15b-140 i), and those of them that build - a build placed them, or could
+    not place them (`namejoin.is_build_claim`, batch 23: the claims a `[[deploys]]` block's
+    `onto` is judged by) - one reading for the contest row's held clause and `apart-held`
+    alike."""
+    from tools.graph.links.namejoin import is_build_claim
     own = ids.service_id(str(edge.props.get("service", "")), component_of(edge, nodes_by_id))
     mine = package_of(edge, nodes_by_id, layout)
     there = [e for e in edges if e.type == CLAIM_TYPE and e.dst == own
              and package_of(e, nodes_by_id, layout) != mine]
     return (own, sorted({where_of(e, nodes_by_id) for e in there}),
-            sorted({where_of(e, nodes_by_id) for e in there
-                    if e.props.get("mapped_by") == "build"}))
+            sorted({where_of(e, nodes_by_id) for e in there if is_build_claim(e)}))
+
+
+def held_offer(edge: Edge, own: str, service: str, builds: list[str], config: dict,
+               edges: list[Edge], nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
+    """What `apart-held` says of the builds holding a chart's own node (batch 23, D23-58): the
+    `[[deploys]]` block that places it there, as a proposal spells it - offered unless the
+    chart's image and the holders' build keys (the keyed producers' rule, D23-135) are both
+    readable and different, which only a COMPLETE run compares (D23-71, D23-84: offered blind,
+    the block was refused as contradicted). Where both are readable and the run is not
+    complete, the offer points at what says why: a whole run's `image-proposals-withheld`, a
+    narrowed run's own line (D23-138, D23-140, D23-154)."""
+    from tools.graph.links.namejoin import is_build_claim, key_of
+    mine = package_of(edge, nodes_by_id, layout)
+    keys = sorted({key for e in edges if e.type == CLAIM_TYPE and e.dst == own
+                   and is_build_claim(e) and package_of(e, nodes_by_id, layout) != mine
+                   and (key := key_of(e))})
+    files = ", ".join(f"`{b}`" for b in builds)
+    verb = f"build{'s' if len(builds) == 1 else ''}"
+    chart, both = key_of(edge), bool(key_of(edge)) and bool(keys)
+    complete = accounting.complete(config, list(nodes_by_id.values()), edges)
+    if both and complete and chart not in keys:
+        return (f"; the image `{where_of(edge, nodes_by_id)}` runs is not the image {files} "
+                f"{verb} ({accounting.capped_ticked(keys)}), so the graph does not offer that "
+                f"join")
+    why_not = ("" if not both or complete else
+               " - this run could not compare the images - see its `image-proposals-withheld` row"
+               if config.get("narrowed") is False else
+               " - this run compared no images (the report's note says what it could not see)")
+    return (f"; if it deploys what {files} {verb}, declare it - `[[deploys]] service = "
+            f"\"{service}\" component = \"{component_of(edge, nodes_by_id)}\" onto = "
+            f"\"{own}\"`" + why_not)
 
 
 def _node_props(edge: Edge, nodes_by_id: dict[str, Node]) -> dict:
@@ -570,9 +603,8 @@ class CanonicalPass:
                       f"{', '.join(refused)}; removing it releases them all."
                       if len(refused) > 1 else "")
                    + " If the chart is that service after all, remove the block"
-                   + (f"; if it deploys what {', '.join(f'`{b}`' for b in builds)} "
-                      f"build{'s' if len(builds) == 1 else ''}, the graph cannot place it "
-                      f"there yet (the image link, filed as T589)" if builds else "")
+                   + (held_offer(edge, own, named, builds, config, edges, nodes_by_id, layout)
+                      if builds else "")
                    + "; otherwise this row is the record of where it stays"
                    + (f". {accounting.NOT_READ}" if absent else ""))
             res.unresolved.append(unresolved_row(
@@ -623,7 +655,7 @@ class CanonicalPass:
                     + (", or remove the `path` to let `owner` decide alone" if one else ""))
         head = (f"The graph read no deployment of `{service}` in `{owner}`, so this block "
                 f"designates nothing it read.")
-        return accounting.none_read(r, owner, head, refusing=False)
+        return accounting.none_read(r, owner, head, mode=accounting.DESIGNATING)
 
     def _rank_held(self, edges: list[Edge], packages: dict[str, list[tuple[int, Edge]]],
                    decl: dict | None, nodes_by_id: dict[str, Node]) -> tuple[str, str] | None:
@@ -661,8 +693,9 @@ class CanonicalPass:
                      nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
         """The contested row's sentence (batch 15b): what decides it, and one clause per
         claim an `[[apart]]` block matched (D15b-73, D15b-85) - so a refusal is never a
-        silent no-op - and, for a name-joined claim, the block that would refuse it
-        (D15b-65)."""
+        silent no-op - and, for a name-joined claim, the block that would refuse it, naming the
+        claim's own service (D15b-65, D23-7); for a claim a `[[deploys]]` block moved, that
+        block, once per block and never an `[[apart]]` (batch 23, D23-29b)."""
         from tools.graph.links.namejoin import apart_matches, apart_offer
         logical = _logical(service)
         cite = (f"`{decl.get('file')}:{decl.get('line')}`"
@@ -750,10 +783,20 @@ class CanonicalPass:
                 why += (f". `{file}` is declared apart (`{block}`){note} and moved to its "
                         f"component's own node, with the claims of that component the block "
                         f"also matches; they contest here")
-        joined = sorted({component_of(e, nodes_by_id) for _, e in claims
-                         if e.props.get("joined_by") and not apart_state(e)} - {""})
-        for deployer in joined:
-            why += ". Or, " + apart_offer(logical, deployer, edges, nodes_by_id, layout)
+        joined = sorted({(component_of(e, nodes_by_id), str(e.props.get("service", "")))
+                         for _, e in claims if e.props.get("joined_by") in ("claim", "component")
+                         and not apart_state(e) and component_of(e, nodes_by_id)})
+        for deployer, own in joined:
+            why += ". Or, " + apart_offer(own, deployer, edges, nodes_by_id, layout)
+        moved_by: dict[str, set[str]] = {}
+        for _, e in claims:
+            if e.props.get("joined_by") == "declared":
+                moved_by.setdefault(str(e.props.get("declared_at", "")), set()).add(
+                    where_of(e, nodes_by_id))
+        for at, moved in sorted(moved_by.items()):
+            why += (f". Or, if {', '.join(f'`{f}`' for f in sorted(moved))} "
+                    f"{'does' if len(moved) == 1 else 'do'} not deploy this build, correct or "
+                    f"remove the `[[deploys]]` block at `{at}`")
         return why
 
     def _duplicates(self, res: ExtractResult, config: dict) -> None:

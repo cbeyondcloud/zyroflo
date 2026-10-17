@@ -84,6 +84,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools import cli  # noqa: E402
 from tools.graph.core.lib import (  # noqa: E402
     emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
+# How a row names a long list - shared with the link passes (batch 23, D23-42).
+from tools.graph.core.lib.rows import capped  # noqa: E402
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # One judgment of a shard (batch 16): the stamp's one producer and the verdict. It owns the
 # stamp helpers; `stamp_matches` is re-exported here for the callers that name it through
@@ -1650,7 +1652,8 @@ def config_digest(config: dict, component: str) -> str:
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
     refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
-    `[[entrypoint]]`, `[[apart]]`, `[[generated]]`), the pipeline-only component fields, the
+    `[[entrypoint]]`, `[[apart]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
+    component fields, the
     workspace's name and every run-scoped key leave it: link passes run on every build and
     every load, so nothing they read needs a shard to go stale.
 
@@ -1992,7 +1995,8 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                     config: dict, *, narrowed: bool,
                     deployment_inputs: dict[str, list[str]],
                     deployment_claims: dict[str, list[str]],
-                    deployment_off_case: dict[str, list[str]]
+                    deployment_off_case: dict[str, list[str]],
+                    unlisted: dict[str, list[str]]
                     ) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each link pass over the whole graph, in declared order.
 
@@ -2008,15 +2012,17 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     workspace through its deployment readers, so no accounting row is judged - and, per
     component, the files its deployment readers were handed (`deployment_inputs`), the
     claim files among them (`deployment_claims`) and the files they missed only by case
-    (`deployment_off_case`), which decide whether a component was read at all. Every pass gets its own copy of the config with them added;
-    the caller's `config` - the dict the freshness stamps digest - never holds them.
+    (`deployment_off_case`), which decide whether a component was read at all - and, batch 23,
+    the directories the walk could not list (`unlisted`, `unlisted_scope`). Every pass gets
+    its own copy of the config with them added; the caller's `config` - the dict the
+    freshness stamps digest - never holds them.
     """
     out: dict[str, ExtractResult] = {}
     failures: dict[str, str] = {}
     violations: list[str] = []
     scoped = {**config, "narrowed": narrowed, "deployment_inputs": deployment_inputs,
               "deployment_claims": deployment_claims,
-              "deployment_off_case": deployment_off_case}
+              "deployment_off_case": deployment_off_case, "unlisted": unlisted}
     for lp in links:
         ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id,
                              config=dict(scoped))
@@ -2093,6 +2099,15 @@ def link_failure_line(name: str, why: str) -> str:
             f"findings are absent, not clean ({why}). Fix or remove the pass, then rebuild.")
 
 
+def unlisted_scope(act: Activation) -> dict[str, list[str]]:
+    """Per component, the directories the activation walk entered but could not list (T611) -
+    run-scoped, handed to the extractors and to each link pass, so neither calls such a
+    component read whole: a build in one may be what it could not see (batch 23, D23-32,
+    D23-68). Never in the config the freshness stamps digest."""
+    return {comp: sorted(directory for directory, _ in gaps)
+            for comp, gaps in sorted(act.unlisted.items())}
+
+
 def deployment_scope(act: Activation, components: list[dict], root: Path,
                      registry: list[Registration]) -> dict[str, dict[str, list[str]]]:
     """The run-scoped lists the accounting rows read (batch 15b, T573 decision 3): per
@@ -2126,23 +2141,23 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
 
 
 #: What a narrowed run does not judge, and the one exception it makes, said in every
-#: narrowed line (batch 15b; T573 decision 3, D15b-72).
-NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatched`, which "
-                 "what it could not see could change; and an `[[apart]]` refusal, judged over "
-                 "fewer claims, may move a chart onto its component's own node where a whole "
-                 "build holds it back, because the package that claims that node was not read")
+#: narrowed line (batch 15b; T573 decision 3, D15b-72): since batch 23 a counted list - the
+#: rows an absence or a contradiction judges, the image judgements, the declarations it does not
+#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140).
+NARROWED_TAIL = ("so it judged none of the five rows what it could not see could change: "
+                 "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
+                 "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
+                 "named no image unreadable and compared no held chart's image, since a build it "
+                 "did not read may produce the image; it followed no `[[deploys]]` block whose "
+                 "`onto` it does not hold, or whose images it could not judge; and an `[[apart]]` "
+                 "refusal, judged over fewer claims, may move a chart onto its component's own "
+                 "node where a whole build holds it back, because the package that claims that "
+                 "node was not read")
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
                  "layout, the profile's name, and each component's own path as recorded, "
                  "role, stack and shallow flag)")
-
-
-def _capped(names: list[str], cap: int = 5) -> str:
-    """At most `cap` names, the cap admitted - a truncated list that does not say so reads
-    exactly like a complete one, as the report's row printer knows (D15b-75)."""
-    return ", ".join(names[:cap]) + (f" and {len(names) - cap} more" if len(names) > cap
-                                     else "")
 
 
 def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
@@ -2228,7 +2243,7 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
         + [f"fix what `{n}`'s warning names" for n in failed] \
         + [_lacked_way(n, lacking[n][1]) for n in unparsed]
     return (f"this run was narrowed ({'; '.join(reasons)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways)}"
+            f"them: {'; '.join(ways)}"
             + (" - a whole-workspace build is narrowed too while a deployment reader fails "
                "or has no parser" if failed or unparsed else "") + ".")
 
@@ -2246,21 +2261,21 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     One channel per line (batch 22, D22-79): a group whose words carry their own way on in
     parentheses - an unknown extractor version's, claim 9a's inputs that cannot be read now
     (`freshness.carries_way`) - is offered no other, and where only such groups narrow the
-    load, its line ends "To judge both: do what each reason says.", each way on in its reason."""
+    load, its line ends "To judge them: do what each reason says.", each way on in its reason."""
     digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
-    groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
-        + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
+    groups = ([f"no shard: {capped(sorted(missing))}"] if missing else []) \
+        + ([f"refused for a digest mismatch: {capped(digest)}"] if digest else [])
     by_refusal: dict[str, list[str]] = {}
     for name, v in sorted(refused.items()):
         if name not in digest:
             by_refusal.setdefault(v.load, []).append(name)
-    groups += [f"refused - {why}: {_capped(names)}" for why, names in sorted(by_refusal.items())]
+    groups += [f"refused - {why}: {capped(names)}" for why, names in sorted(by_refusal.items())]
     by_reason: dict[str, list[str]] = {}
     for name, why in sorted(stale.items()):
         if name not in missing and name not in refused:
             by_reason.setdefault(why, []).append(name)
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
-               f"{_capped(names)}" for why, names in sorted(by_reason.items())]
+               f"{capped(names)}" for why, names in sorted(by_reason.items())]
     unparsed = unparsed or {}
     groups += parser_group(unparsed, lacked)
     if not groups:
@@ -2273,7 +2288,7 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
             if missing or refused or plain else []) \
         + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways) or 'do what each reason says'}.")
+            f"them: {'; '.join(ways) or 'do what each reason says'}.")
 
 
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
@@ -2305,7 +2320,7 @@ def parser_group(unparsed: dict[str, list[str]],
     parsers its rows say it lacked, from `lacked` (T636)."""
     return [f"`{name}` could not parse its files when its shard was published - "
             f"{_lacked_words(name, (lacked or {}).get(name))}: "
-            f"{_capped(names)}" for name, names in unparsed.items()]
+            f"{capped(names)}" for name, names in unparsed.items()]
 
 
 def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
@@ -2473,6 +2488,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": workspace_components, "profile": str(profile_dir or "")}
 
     inc: dict | None = None
@@ -2502,8 +2518,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     # Batch 15b: the deployment readers' case record reaches the extractors in their own
     # copy of the config, run-scoped - `helm-deployments` counts a template lost to its case
     # as one of its chart's own (ruling 20, D15b-139) - never in the dict the stamps digest.
+    # Batch 23: so do the directories the walk could not list, per component, which compose
+    # reads for `deployment_only` - a build in one may be what it could not see (D23-68).
     extract_config = {**config, "deployment_off_case":
-                      deployment_scope(act, components, root, registry)["deployment_off_case"]}
+                      deployment_scope(act, components, root, registry)["deployment_off_case"],
+                      "unlisted": unlisted_scope(act)}
     owned, failures, violations = run_extractors_owned(
         regs, run_act, components, root, run_id, extract_config)
     results = {}
@@ -2549,7 +2568,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                                 merged.unresolved, registry)
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
-        **deployment_scope(act, components, root, registry))
+        unlisted=unlisted_scope(act), **deployment_scope(act, components, root, registry))
     failures.update(link_failures)
     violations.extend(link_violations)
 
@@ -2831,6 +2850,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": components, "profile": str(profile_dir or "")}
     # Ruling 16, and batch 16's one judgment of a shard: the load reads every shard once and
     # judges it by the verdict `--check-fresh` prints (an activation walk and an input hash -
@@ -2882,7 +2902,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         unparsed_parsers(readings, verdicts, regs, probe))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
-        **deployment_scope(act, components, root, regs))
+        unlisted=unlisted_scope(act), **deployment_scope(act, components, root, regs))
     for res in link_results.values():
         merged.extend(res)
 
@@ -3032,6 +3052,7 @@ def check_freshness(workspace: Path | dict | None, *,
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": components, "profile": str(profile_dir or "")}
     readings, verdicts = shard_verdicts(root, components, regs, act, config, keep_facts=False)
     probe = parser_probe(regs)

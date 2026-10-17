@@ -34,8 +34,14 @@ from tools.graph.core.lib import props  # noqa: E402
 from tools.graph.extractors import helm, openapi  # noqa: E402
 from tools.graph.tests._estate import ROOT, build, compose, producer, svc  # noqa: E402
 
-JUDGED_NEITHER = ("so it judged neither `canonical-unmatched` nor `apart-unmatched`, which "
-                  "what it could not see could change")
+#: Batch 23 (D23-63): what a narrowed run did not judge, counted - the rows, the image
+#: judgements, the declarations it did not follow.
+JUDGED_NONE = ("so it judged none of the five rows what it could not see could change: "
+               "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
+               "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
+               "named no image unreadable and compared no held chart's image, since a build it "
+               "did not read may produce the image; it followed no `[[deploys]]` block whose "
+               "`onto` it does not hold, or whose images it could not judge")
 APART_CLAUSE = ("an `[[apart]]` refusal, judged over fewer claims, may move a chart onto its "
                 "component's own node where a whole build holds it back, because the package "
                 "that claims that node was not read")
@@ -80,8 +86,8 @@ def test_a_components_run_leaving_one_out_is_narrowed(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (line,) = narrowed(tmp_path)
     assert line.startswith("this run was narrowed (`--components` left out 1 component(s)), ")
-    assert JUDGED_NEITHER in line and APART_CLAUSE in line
-    assert "build the whole workspace" in line
+    assert JUDGED_NONE in line and APART_CLAUSE in line
+    assert ". To judge them: build the whole workspace" in line
     assert line in proc.stdout, "the report's line is printed as the build's notes are"
     # Followed: the whole workspace is not narrowed.
     assert spawn(tmp_path).returncode == 0
@@ -98,7 +104,7 @@ def test_an_only_run_is_narrowed(tmp_path):
     assert build(tmp_path, ESTATE, "--only", "helm-deployments").code == 0
     (line,) = narrowed(tmp_path)
     assert line.startswith("this run was narrowed (`--only`), ")
-    assert JUDGED_NEITHER in line
+    assert JUDGED_NONE in line
 
 
 def test_narrowed_never_reaches_a_stamp(tmp_path):
@@ -177,7 +183,7 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     assert ("stale - its shard was published while `helm-configmaps`, `helm-deployments` had "
             "no parser installed: a") in line
     assert "could not parse its files" not in line
-    assert JUDGED_NEITHER in line
+    assert JUDGED_NONE in line
     assert ("re-publish the shards it names from a build of the workspace (`--check-fresh` "
             "then exits 0), or build the whole workspace") in line
     assert "install the parser" not in line
@@ -393,7 +399,8 @@ def test_a_missing_shard_narrows_a_load(tmp_path):
     proc = spawn(tmp_path, "--from-snapshot")
     (line,) = narrowed(tmp_path)
     assert line.startswith("this load was narrowed (no shard: b), ")
-    assert JUDGED_NEITHER in line and APART_CLAUSE in line
+    assert ". To judge them: re-publish" in line
+    assert JUDGED_NONE in line and APART_CLAUSE in line
     assert "re-publish" in line and "`--check-fresh` then exits 0" in line
     assert line in proc.stdout, "the snapshot branch prints its notes"
 
@@ -460,11 +467,13 @@ def test_each_pass_gets_its_own_copy_with_the_run_scoped_keys():
     B.run_link_passes(passes, ExtractResult(), [], Path("."), "rid", config, narrowed=True,
                       deployment_inputs={"a": ["values.yaml"]},
                       deployment_claims={"a": ["values.yaml"]},
-                      deployment_off_case={"a": ["Docker-Compose.yml"]})
+                      deployment_off_case={"a": ["Docker-Compose.yml"]},
+                      unlisted={"a": ["sub"]})
     assert config == {"canonical": []}
     assert [c["narrowed"] for c in seen] == [True, True]
     assert seen[1]["deployment_inputs"] == {"a": ["values.yaml"]}
     assert seen[1]["deployment_off_case"] == {"a": ["Docker-Compose.yml"]}
+    assert seen[1]["unlisted"] == {"a": ["sub"]}, "batch 23: run-scoped, every pass's copy"
     assert "leaked" not in seen[1]
 
 

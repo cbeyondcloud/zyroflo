@@ -250,11 +250,16 @@ BY_DESIGN = ("platform reads nothing by design: every file an extractor would re
 #: Batch 15b (D15b-57): a `--components` build that leaves a component out - 15a's own
 #: remedy included - is narrowed, and says so after the by-design line. The exact text.
 NARROWED_ONE = ("this run was narrowed (`--components` left out 1 component(s)), so it "
-                "judged neither `canonical-unmatched` nor `apart-unmatched`, which what it "
-                "could not see could change; and an `[[apart]]` refusal, judged over fewer "
-                "claims, may move a chart onto its component's own node where a whole build "
-                "holds it back, because the package that claims that node was not read. To "
-                "judge both: build the whole workspace, with no `--components` or `--only`.")
+                "judged none of the five rows what it could not see could change: "
+                "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
+                "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image "
+                "join, named no image unreadable and compared no held chart's image, since a "
+                "build it did not read may produce the image; it followed no `[[deploys]]` "
+                "block whose `onto` it does not hold, or whose images it could not judge; and an "
+                "`[[apart]]` refusal, judged over fewer claims, may move a chart onto its "
+                "component's own node where a whole build holds it back, because the package "
+                "that claims that node was not read. To judge them: build the whole workspace, "
+                "with no `--components` or `--only`.")
 
 
 @pytest.mark.parametrize("flags", [(), ("--empty-ok",)], ids=["bare", "empty-ok"])

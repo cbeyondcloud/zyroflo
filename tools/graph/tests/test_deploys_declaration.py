@@ -1,0 +1,583 @@
+"""Batch 23 (T589; design pass 23, section 4): `[[deploys]]` - a join declared. Each block judged in
+its order, each claim gated one by one, the joined consumer moved onto `onto`, and every state that
+does not join said in its own row.
+
+Everything here is synthetic and none of it names a real workspace.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from tools.graph.links.canonical.accounting import NOT_READ  # noqa: E402
+from tools.graph.tests._estate import build  # noqa: E402
+
+CODE = {"main.py": "print(1)\n"}
+TEMPLATE = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: x\n"
+
+
+def chart(service: str = "web", image: str = "org/web") -> dict:
+    return {"charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n",
+            "charts/web/values.yaml": f"nameOverride: {service}\nimage:\n  repository: {image}\n",
+            "charts/web/templates/deployment.yaml": TEMPLATE}
+
+
+def estate(*blocks: dict, build_image: str = "org/web", chart_image: str = "org/web",
+           **more) -> dict:
+    """P1: a chart `web` in `charts` running `chart_image`, and a compose build of `web` in
+    `deploy` from `orders` producing `build_image`."""
+    return {"charts": chart(image=chart_image),
+            "deploy": {"compose.yaml": f"services:\n  web:\n    build: ../orders\n"
+                                       f"    image: {build_image}\n"},
+            "orders": dict(CODE), "__deploys__": list(blocks), **more}
+
+
+def join(onto: str = "svc:web@orders", **extra) -> dict:
+    return {"service": "web", "component": "charts", "onto": onto, **extra}
+
+
+def chart_claim(built) -> dict:
+    return built.deploy("charts/charts/web/values.yaml")
+
+
+def deploys_rows(built) -> list[dict]:
+    return [r for r in built.rows if str(r.get("kind", "")).startswith("deploys-")]
+
+
+def test_a_declared_join_moves_the_chart_onto_the_builds_node(tmp_path):
+    """P1 followed: the claim on `onto`, saying how it got there, and nothing left behind."""
+    built = build(tmp_path, estate(join()))
+    edge = chart_claim(built)
+    props = edge["props"]
+    assert edge["dst"] == "svc:web@orders"
+    assert (props["mapped_by"], props["joined_by"], props["declared"], props["component"],
+            props["extracted_from"]) == ("image", "declared", True, "orders", "svc:web@web")
+    assert props["declared_at"].startswith("workspace.toml:")
+    assert edge["provenance"] == "INFERRED"
+    assert "svc:web@web" not in built.svc_ids(), "no edge-less node left behind (D23-8)"
+    assert deploys_rows(built) == []
+
+
+def test_a_declining_block_moves_nothing_and_says_nothing(tmp_path):
+    """D23-33: declined before anything reads `onto`, in a whole run and a narrowed one."""
+    for flags in ((), ("--components", "charts")):
+        built = build(tmp_path / ("narrowed" if flags else "whole"), estate(join(onto="")), *flags)
+        assert chart_claim(built)["dst"] == "svc:web@web", flags
+        assert deploys_rows(built) == [], flags
+
+
+def test_a_pair_equal_once_normalised_is_a_duplicate_the_first_deciding(tmp_path):
+    """D23-5, D15b-56: never withheld."""
+    built = build(tmp_path, estate({"service": "my api", "component": "charts", "onto": ""},
+                                   {"service": "my-api", "component": "charts",
+                                    "onto": "svc:web@orders"}))
+    (row,) = [r for r in deploys_rows(built) if r["kind"] == "deploys-duplicate"]
+    assert (row["service"], row["ignored"]) == ("my-api", "my-api"), row
+    assert "block #1" in row["why"] and "decides nothing" in row["why"]
+
+
+def test_a_join_onto_the_node_an_apart_refuses_is_refused_and_any_other_is_followed(tmp_path):
+    """D23-25, D23-36, D23-50: the refusal wins over a join onto its node; a join beside it
+    onto a build's node agrees with it (decision 54)."""
+    apart = {"__apart__": [{"service": "web", "component": "charts"}]}
+    refused = build(tmp_path / "a", estate(join(onto="svc:web@web"), **apart))
+    (row,) = deploys_rows(refused)
+    assert row["kind"] == "deploys-apart" and "the refusal wins" in row["why"]
+    followed = build(tmp_path / "b", estate(join(), **apart))
+    assert chart_claim(followed)["dst"] == "svc:web@orders"
+    assert "apart" not in chart_claim(followed)["props"], "the move drops what the refusal set"
+    assert chart_claim(followed)["props"]["extracted_from"] == "svc:web@web", \
+        "D23-46: read before the move drops `apart` - the node extraction gave it"
+
+
+def test_a_block_whose_pair_the_run_holds_no_claim_of_is_unmatched_on_its_claim_side(tmp_path):
+    """D23-44, D23-89, D23-98: worded by the joining framing - what it read, by each claim's own
+    service, and the block's own way on."""
+    built = build(tmp_path, estate({"service": "nope", "component": "charts",
+                                    "onto": "svc:web@orders"}))
+    (row,) = deploys_rows(built)
+    assert (row["kind"], row["side"], row["service"]) == ("deploys-unmatched", "claim", "nope")
+    assert ("It read: `web`. Correct the block's `service` or `component`, or remove it"
+            in row["why"])
+    corrected = build(tmp_path / "corrected", estate(join()))
+    assert chart_claim(corrected)["dst"] == "svc:web@orders", "D23-79: its way on followed"
+    assert deploys_rows(corrected) == []
+
+
+LIBRARY = "apiVersion: v2\nname: lib\nversion: 1.0.0\ntype: library\n"
+#: What the graph read of `a`, for each of the joining framing's four branches but the first.
+JOINING = {
+    "read-declaring-nothing": (
+        {"compose.yaml": "version: '3'\n"},
+        "The graph read no claim of `a` on a service `web`, so this block joins nothing it read. "
+        "The graph read `compose.yaml` of `a`, and none declares a deployment (a library chart, a "
+        "chart with no templates of its own, or a compose file with no `services:`). Correct the "
+        "block's `service` or `component`, or remove it"),
+    "unread": (
+        {"compose.yaml": "services: [\n"},
+        "`compose.yaml` could not be read (see its row), so what it declares is unknown; fix it, "
+        "then: The graph read no claim of `a` on a service `web`, so this block joins nothing it "
+        "read. None of `a`'s deployment files could be read. Correct the block's `service` or "
+        "`component`, or remove it"),
+    "read-whole-claiming-nothing": (
+        {"charts/lib/Chart.yaml": LIBRARY, "charts/lib/values.yaml": "web: [\n"},
+        "`charts/lib/values.yaml` would claim nothing even read: its chart is a library chart, "
+        "which deploys nothing whatever this file holds. The graph read no claim of `a` on a "
+        "service `web`, so this block joins nothing it read. None of `a`'s deployment files "
+        "declares a service the graph read. Correct the block's `service` or `component`, or "
+        "remove it"),
+    "no-deployment-file": (
+        {"charts/web/templates/cm.yaml": "kind: ConfigMap\n"},
+        "The graph read no claim of `a` on a service `web`, so this block joins nothing it read. "
+        "The graph read no deployment file of `a`, so this block can join nothing it read. "
+        "Correct the block's `service` or `component`, or remove it"),
+}
+
+
+@pytest.mark.parametrize("branch", sorted(JOINING))
+def test_each_branch_of_the_joining_framing_says_what_the_graph_read(tmp_path, branch):
+    """D23-89, D23-97, D23-98, D23-107, D23-108, reviews B23-2, B23-3 and B23-10: a file read
+    whole that claims nothing is never 'could not be read' (T624, T625), no branch says the head's
+    clause twice, and each ends with its one way on and what the graph does not read. Followed -
+    the block's `component` corrected to the one that deploys it - the claim joins."""
+    files, words = JOINING[branch]
+    built = build(tmp_path, estate({"service": "web", "component": "a",
+                                    "onto": "svc:web@orders"}, a=files))
+    (row,) = deploys_rows(built)
+    assert (row["kind"], row["side"]) == ("deploys-unmatched", "claim")
+    assert row["why"] == f"{words}. {NOT_READ}", row["why"]
+    corrected = build(tmp_path / "corrected", estate(join(), a=files))
+    assert chart_claim(corrected)["dst"] == "svc:web@orders"
+    assert deploys_rows(corrected) == []
+
+
+def test_an_onto_no_build_of_the_run_is_on_is_unmatched_on_its_onto_side(tmp_path):
+    """D23-47, D23-59: an undiscovered component, or a component written unnormalised -
+    compared as an id, never parsed."""
+    for onto in ("svc:web@nowhere", "svc:web@My Comp"):
+        built = build(tmp_path / onto.replace(" ", "_").replace(":", "_").replace("@", "_"),
+                      estate(join(onto=onto)))
+        (row,) = deploys_rows(built)
+        assert (row["kind"], row["side"]) == ("deploys-unmatched", "onto")
+        assert row["why"].startswith(f"names `{onto}`, which no build the graph read is on")
+        assert chart_claim(built)["dst"] == "svc:web@web"
+    corrected = build(tmp_path / "corrected", estate(join()))
+    assert chart_claim(corrected)["dst"] == "svc:web@orders", "D23-79: its way on followed"
+
+
+def test_the_onto_side_names_what_compose_did_not_read_that_may_hold_the_build(tmp_path):
+    """D23-115, D23-121, D23-124, review B23-6: an unread file and an unreachable chain, each said
+    in the number it has, the chain by its service and file; following the file's way on - fix
+    it, rebuild - leaves the row with only the block's own."""
+    block = join(onto="svc:web@nowhere")
+    broken = build(tmp_path / "file", estate(block, broken={"compose.yaml": "services: [\n"}))
+    (row,) = deploys_rows(broken)
+    assert ("names `svc:web@nowhere`, which no build the graph read is on - "
+            "`broken/compose.yaml` was not read and may hold it: fix it as its own row says - an "
+            "`include:`'s by naming a compose file the reader reads - and rebuild. Correct the "
+            "block's `onto`, as an `image-join-proposed` row spells it, or remove it") == row["why"]
+    fixed = build(tmp_path / "fixed", estate(block, broken={"compose.yaml": "services: {}\n"}))
+    (row,) = deploys_rows(fixed)
+    assert row["why"] == ("names `svc:web@nowhere`, which no build the graph read is on. Correct "
+                          "the block's `onto`, as an `image-join-proposed` row spells it, or "
+                          "remove it")
+    chain = {"compose.yaml": "services:\n  job:\n    extends:\n      file: base.yml\n"
+                             "      service: job\n",
+             "base.yml": "services:\n  job:\n    image: x\n"}
+    unreached = build(tmp_path / "chain", estate(block, deploy2=chain))
+    (row,) = deploys_rows(unreached)
+    assert ("- `job` of `deploy2/compose.yaml` extends a base the graph cannot reach, which may "
+            "place a build on it: fix what its `compose-extends-unresolved` row names, and "
+            "rebuild.") in row["why"]
+
+
+def test_a_block_naming_only_a_build_claim_names_a_service_that_is_no_consumer(tmp_path):
+    """D23-14, D23-23: a build claim is known not to be a deployment the image link joins."""
+    built = build(tmp_path, estate({"service": "web", "component": "deploy",
+                                    "onto": "svc:web@orders"}))
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-not-a-consumer" and "a build" in row["why"]
+
+
+def test_images_the_files_contradict_are_not_followed_in_a_complete_run(tmp_path):
+    """D23-19, decision 52: the chart runs `ghcr.io/org/web`, the build produces `org/web`."""
+    built = build(tmp_path, estate(join(), chart_image="ghcr.io/org/web"))
+    (row,) = deploys_rows(built)
+    assert (row["kind"], row["node"]) == ("deploys-contradicted", "svc:web@orders")
+    assert "joins two images, so it is not followed" in row["why"]
+    assert chart_claim(built)["dst"] == "svc:web@web"
+
+
+def test_a_build_image_that_cannot_be_compared_is_followed(tmp_path):
+    """D23-19: interpolated whole, the build's image has no key - the declaration states what
+    the files cannot show."""
+    built = build(tmp_path, estate(join(), build_image="${IMAGE}"))
+    assert chart_claim(built)["dst"] == "svc:web@orders"
+    assert deploys_rows(built) == []
+
+
+def test_a_claim_whose_component_compose_did_not_read_whole_is_unconfirmed(tmp_path):
+    """D23-61, D23-150: never read as not-a-consumer - a fact about this run's reading."""
+    built = build(tmp_path, {
+        "runner": {"compose.yaml": "services:\n  web:\n    image: org/web\n",
+                   "compose.prod.yml": "services: [\n"},
+        "deploy": {"compose.yaml": "services:\n  web:\n    build: ../orders\n"
+                                   "    image: org/web\n"},
+        "orders": dict(CODE),
+        "__deploys__": [{"service": "web", "component": "runner", "onto": "svc:web@orders"}]})
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-unconfirmed"
+    assert "`compose.prod.yml` was not read" in row["why"]
+    assert "fix it as its own row says" in row["why"], "review B23-6: one file, said as one"
+    assert built.deploy("runner/compose.yaml")["dst"] != "svc:web@orders"
+
+
+def test_a_block_naming_a_component_no_reader_read_is_unconfirmed_never_silent(tmp_path):
+    """D23-78: no deployment file at all."""
+    built = build(tmp_path, estate({"service": "web", "component": "orders",
+                                    "onto": "svc:web@orders"}))
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-unconfirmed"
+    assert "no deployment file of `orders` was read" in row["why"]
+    assert "correct the block's `component`, or add the deployment file it means" in row["why"]
+    corrected = build(tmp_path / "corrected", estate(join()))
+    assert chart_claim(corrected)["dst"] == "svc:web@orders", "D23-79: its way on followed"
+
+
+def test_a_declared_compose_consumer_is_never_name_joined_again(tmp_path):
+    """D23-4, D23-16, D23-27: beside a component named like its service, the declared claim
+    stays where the block put it, with no name-joined-service row, and records where
+    extraction placed it."""
+    built = build(tmp_path, {
+        "runner": {"compose.yaml": "services:\n  web:\n    image: org/web\n"},
+        "web": dict(CODE),
+        "deploy": {"compose.yaml": "services:\n  web:\n    build: ../orders\n"
+                                   "    image: org/web\n"},
+        "orders": dict(CODE),
+        "__deploys__": [{"service": "web", "component": "runner", "onto": "svc:web@orders"}]})
+    edge = built.deploy("runner/compose.yaml")
+    assert edge["dst"] == "svc:web@orders"
+    assert edge["props"]["extracted_from"] == "svc:web@runner"
+    assert not built.kinds("name-joined-service")
+
+
+def test_a_pair_holding_a_consumer_and_a_build_moves_the_consumer_alone(tmp_path):
+    """D23-37, D23-61, D23-71: a narrowed run too - no row beside the move."""
+    charts = {**chart(), "compose.yaml": "services:\n  web:\n    build: ../orders\n"
+                                          "    image: org/web\n"}
+    for flags in ((), ("--components", "charts")):
+        where = tmp_path / ("narrowed" if flags else "whole")
+        built = build(where, {"charts": charts, "orders": dict(CODE),
+                              "__deploys__": [join()]}, *flags)
+        assert chart_claim(built)["dst"] == "svc:web@orders", flags
+        assert built.deploy("charts/compose.yaml")["props"]["mapped_by"] == "build", flags
+        assert deploys_rows(built) == [], flags
+
+
+def test_an_unplaced_builds_node_can_be_declared_onto(tmp_path):
+    """D23-60: an unplaced build's claim carries `mapped_by` empty, and is still a build."""
+    built = build(tmp_path, {"charts": chart(),
+                             "deploy": {"compose.yaml": "services:\n  web:\n"
+                                                        "    build: ../nowhere\n"
+                                                        "    image: org/web\n"},
+                             "__deploys__": [join(onto="svc:web@deploy")]})
+    assert chart_claim(built)["dst"] == "svc:web@deploy"
+    assert not [r for r in deploys_rows(built) if r["kind"] == "deploys-unmatched"]
+
+
+def test_an_entrypoint_on_the_node_a_declaration_moved_the_claim_off_is_unmatched(tmp_path):
+    """D23-8: a declared join moves the claim off its old node - re-aim the entrypoint."""
+    built = build(tmp_path, estate(join(), __entrypoint__=["svc:web@web"]))
+    assert [r for r in built.rows if r.get("kind") == "entrypoint-unmatched"]
+
+
+def test_a_held_chart_declared_onto_its_own_components_build_drops_the_hold(tmp_path):
+    """D23-57, decision 54: ruling 15 holds a refused chart on its estate node where its own
+    component's node holds a build; a declaration onto that node moves it, ranked."""
+    charts = {**chart(), "compose.yaml": "services:\n  web:\n    build: .\n"}
+    built = build(tmp_path, {"charts": {**charts, **CODE},
+                             "__apart__": [{"service": "web", "component": "charts"}],
+                             "__deploys__": [join(onto="svc:web@charts")]})
+    edge = chart_claim(built)
+    assert edge["dst"] == "svc:web@charts"
+    assert edge.get("canonical", True) is not False, "the hold's `canonical: false` dropped"
+    assert "apart" not in edge["props"]
+
+
+def test_a_declared_joins_contest_row_names_its_block_and_a_canonical_block_decides_it(tmp_path):
+    """D23-7, D23-29b, D23-57, ruling 10: the build's claim and the moved chart are two packages
+    on one node; the contest row's way on for the moved claim is its block, never an
+    `[[apart]]`, and a `[[canonical]]` block decides the node either way."""
+    built = build(tmp_path, estate(join()))
+    (row,) = [r for r in built.kinds("contested-service") if r["service"] == "svc:web@orders"]
+    at = chart_claim(built)["props"]["declared_at"]
+    assert row["why"].endswith(
+        f". Or, if `charts/charts/web/values.yaml` does not deploy this build, correct or "
+        f"remove the `[[deploys]]` block at `{at}`"), row["why"]
+    assert "[[apart]]" not in row["why"]
+    for owner in ("charts", "deploy"):
+        decided = build(tmp_path / owner, estate(join(), __canonical__=[
+            {"service": "web", "owner": owner}]))
+        assert not [r for r in decided.kinds("contested-service")
+                    if r["service"] == "svc:web@orders"], owner
+
+
+def test_a_name_joined_claims_apart_offer_names_its_own_service(tmp_path):
+    """D23-7: the block matches a claim by its own service, normalised - the contest row spells
+    it as the claim does, never as the node's name."""
+    built = build(tmp_path, {"runner": {"compose.yaml": "services:\n  my api:\n"
+                                                         "    image: org/api\n"},
+                             "my-api": {**CODE, "compose.yaml": "services:\n  my-api:\n"
+                                                                "    build: .\n"}})
+    (row,) = [r for r in built.kinds("contested-service") if r["service"] == "svc:my-api@my-api"]
+    assert ("add [[apart]] service = \"my api\" component = \"runner\"") in row["why"], row["why"]
+
+
+def test_the_mcp_door_serves_where_a_join_was_declared(tmp_path):
+    """D23-26: `row()` whitelists props, so `declared_at` is served beside `declared`."""
+    from tools.graph.mcp_server import GraphService
+    built = build(tmp_path, estate(join()))
+    assert built.code == 0
+    incoming = GraphService(graph_dir=tmp_path / "out").node_neighbors("svc:web@orders")["in"]
+    declared = [r for r in incoming if r.get("declared")]
+    assert declared and declared[0]["declared_at"].startswith("workspace.toml:")
+
+
+def test_images_a_run_that_is_not_complete_cannot_judge_leave_the_block(tmp_path):
+    """D23-122: a run holding a compose file it could not parse may hold the build that runs the
+    consumer's image - the block is neither refused nor followed: LEFT, no row of its own."""
+    built = build(tmp_path, estate(join(), chart_image="ghcr.io/org/web",
+                                   broken={"compose.yaml": "services: [\n"}))
+    assert chart_claim(built)["dst"] == "svc:web@web"
+    assert not [r for r in deploys_rows(built) if r["kind"] == "deploys-contradicted"]
+
+
+def test_a_narrowed_run_judges_no_absence(tmp_path):
+    """D23-44: a narrowed run may hold a pair's build claims without its consumers, so it says
+    nothing of a block naming only a build."""
+    built = build(tmp_path, estate({"service": "web", "component": "deploy",
+                                    "onto": "svc:web@orders"}), "--components", "deploy")
+    assert not deploys_rows(built)
+
+
+def test_extracted_at_answers_where_extraction_placed_each_kind_of_move():
+    """D23-46: a name join (either meeting point), an `[[apart]]` move and a declared move each
+    answer the node extraction gave the claim."""
+    from tools.graph.core.model import Edge, Node
+    from tools.graph.links.namejoin import extracted_at
+    compose = Node(id="deploy:runner/compose.yaml", type="deploy",
+                   props={"kind": "compose", "component": "runner"})
+    helm = Node(id="deploy:charts/web/values.yaml", type="deploy",
+                props={"kind": "helm", "component": "charts"})
+    nodes = {n.id: n for n in (compose, helm)}
+
+    def claim(node: Node, dst: str, **props) -> Edge:
+        return Edge(src=node.id, type="DG_DEPLOYS", dst=dst, source_file="f", line=1,
+                    extractor="x", props={"service": "web", **props})
+
+    assert extracted_at(claim(compose, "svc:web@web", joined_by="component"), nodes) == \
+        "svc:web@runner"
+    assert extracted_at(claim(compose, "svc:web@web", joined_by="claim"), nodes) == \
+        "svc:web@runner"
+    assert extracted_at(claim(helm, "svc:web@charts", apart="moved"), nodes) == "svc:web@web"
+    assert extracted_at(claim(helm, "svc:web@orders", joined_by="declared",
+                              extracted_from="svc:web@web"), nodes) == "svc:web@web"
+
+
+def test_extracted_at_reads_a_declared_moves_record_never_a_name_join():
+    """D23-27, D23-39: `joined_by` tested for truth read a declared move as a name join - a
+    chart's claim then 'extracted' onto its own component's node."""
+    from tools.graph.core.model import Edge, Node
+    from tools.graph.links.namejoin import extracted_at
+    node = Node(id="deploy:charts/web/values.yaml", type="deploy",
+                props={"kind": "helm", "component": "charts"})
+    edge = Edge(src=node.id, type="DG_DEPLOYS", dst="svc:web@orders", source_file="v.yaml",
+                line=1, extractor="helm-deployments",
+                props={"service": "web", "joined_by": "declared",
+                       "extracted_from": "svc:web@web"})
+    assert extracted_at(edge, {node.id: node}) == "svc:web@web"
+
+
+#: A base in a file no compose glob matches: the graph cannot reach it.
+UNREACHABLE = "    extends:\n      file: base.yml\n      service: {service}\n"
+BASE = "services:\n  {service}:\n    image: x/base\n"
+
+
+def runner_compose(*services: str) -> dict:
+    """`runner`'s compose file, each service given as its YAML body under `services:`."""
+    return {"compose.yaml": "services:\n" + "".join(services)}
+
+
+def test_an_unparsable_file_of_the_pair_and_of_the_build_are_each_named(tmp_path):
+    """D23-67: the pair's values file unparsable - the claim side worded as `apart-unmatched`'s
+    is, naming it; the build's own file unparsable - the `onto` side naming it. Each way on
+    followed: the file fixed, the block joins."""
+    charts = {**chart(), "charts/web/values.yaml": "nameOverride: [\n"}
+    values = build(tmp_path / "values", estate(join(), charts=charts))
+    (row,) = deploys_rows(values)
+    assert (row["kind"], row["side"]) == ("deploys-unmatched", "claim")
+    assert "`charts/web/values.yaml` could not be read (see its row)" in row["why"], row["why"]
+    builds = build(tmp_path / "build", estate(join(), deploy={"compose.yaml": "services: [\n"}))
+    (row,) = deploys_rows(builds)
+    assert (row["kind"], row["side"]) == ("deploys-unmatched", "onto")
+    assert ("names `svc:web@orders`, which no build the graph read is on - `deploy/compose.yaml` "
+            "was not read and may hold it") in row["why"]
+    assert chart_claim(build(tmp_path / "fixed", estate(join())))["dst"] == "svc:web@orders"
+
+
+def test_a_deployment_only_claim_whose_chain_cannot_be_reached_is_unconfirmed(tmp_path):
+    """D23-90, D23-94, D23-137: the node case, its cause the chain, its way on beside it; never
+    moved; and the run's proposals withheld, naming that chain."""
+    built = build(tmp_path, {**estate(), "runner": {**runner_compose(
+        "  web:\n    image: org/web\n" + UNREACHABLE.format(service="web")),
+        "base.yml": BASE.format(service="web")},
+        "__deploys__": [{"service": "web", "component": "runner", "onto": "svc:web@orders"}]})
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-unconfirmed"
+    assert ("its `extends:` chain names a base the graph cannot reach - so it is not followed "
+            "until it can be: fix what its `compose-extends-unresolved` row names, and "
+            "rebuild") in row["why"], row["why"]
+    assert built.deploy("runner/compose.yaml")["dst"] != "svc:web@orders"
+    (withheld,) = built.kinds("image-proposals-withheld")
+    assert withheld["services"] == ["web of runner/compose.yaml"]
+
+
+@pytest.mark.parametrize("where", ["one-file", "another-file"])
+def test_a_siblings_unreachable_chain_leaves_a_block_unconfirmed(tmp_path, where):
+    """D23-105, D23-106, D23-116: a sibling's chain may declare a build, so the component is not
+    known to build nothing - whether it sits in the block's own file or another of the
+    component's - and the run's proposals are withheld naming it."""
+    job = "  job:\n" + UNREACHABLE.format(service="job")
+    files = (runner_compose("  web:\n    image: org/web\n", job) if where == "one-file" else
+             {**runner_compose("  web:\n    image: org/web\n"),
+              "compose.prod.yml": "services:\n" + job})
+    built = build(tmp_path, {**estate(),
+                             "runner": {**files, "base.yml": BASE.format(service="job")},
+                             "__deploys__": [{"service": "web", "component": "runner",
+                                              "onto": "svc:web@orders"}]})
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-unconfirmed"
+    assert ("another service of `runner`, `job`, extends a base the graph cannot reach, which may "
+            "declare a build") in row["why"], row["why"]
+    (withheld,) = built.kinds("image-proposals-withheld")
+    assert [s.split(" of ")[0] for s in withheld["services"]] == ["job"]
+
+
+def test_a_build_claim_whose_chain_compose_refuses_is_known_not_to_be_a_consumer(tmp_path):
+    """D23-104: an unfollowed claim with its own `build:` is the gate's second case - known not a
+    consumer - never the node case."""
+    refused = {"compose.yaml": "services:\n  web:\n    build: ../orders\n    image: org/web\n"
+                               "    extends: ghost\n"}
+    built = build(tmp_path, estate({"service": "web", "component": "deploy",
+                                    "onto": "svc:web@orders"}, deploy=refused))
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-not-a-consumer"
+
+
+def test_a_building_components_stock_service_with_an_unreachable_chain_is_no_consumer(tmp_path):
+    """D23-114: ruling 13's answer - a building component's own service - wins over the node
+    case: `deploys-not-a-consumer`, never `deploys-unconfirmed`."""
+    api = {**CODE, "compose.yaml": "services:\n  api:\n    build: .\n  web:\n"
+                                   "    image: org/web\n" + UNREACHABLE.format(service="web"),
+           "base.yml": BASE.format(service="web")}
+    built = build(tmp_path, estate({"service": "web", "component": "api",
+                                    "onto": "svc:web@orders"}, api=api))
+    (row,) = deploys_rows(built)
+    assert row["kind"] == "deploys-not-a-consumer"
+
+
+def test_an_onto_holding_only_a_claim_that_builds_nothing_is_unmatched(tmp_path):
+    """D23-103: the `onto` side is an existence test over BUILD claims - a node holding only a
+    deployment claim, its chain refused, holds none."""
+    built = build(tmp_path, estate(join(onto="svc:job@runner"), runner=runner_compose(
+        "  job:\n    image: x/job\n    extends: ghost\n")))
+    (row,) = deploys_rows(built)
+    assert (row["kind"], row["side"]) == ("deploys-unmatched", "onto")
+
+
+def test_an_onto_whose_only_build_cannot_be_judged_leaves_the_block_named(tmp_path):
+    """D23-123: the build places itself and writes another image, but its chain names a base the
+    graph cannot reach - neither refused nor followed in silence: left, and named."""
+    deploy = {"compose.yaml": "services:\n  web:\n    build: ../orders\n    image: org/other\n"
+                              + UNREACHABLE.format(service="web"),
+              "base.yml": BASE.format(service="web")}
+    built = build(tmp_path, estate(join(), deploy=deploy))
+    assert chart_claim(built)["dst"] == "svc:web@web"
+    assert not [r for r in deploys_rows(built) if r["kind"] == "deploys-contradicted"]
+    (withheld,) = built.kinds("image-proposals-withheld")
+    assert len(withheld["blocks"]) == 1 and withheld["blocks"][0].startswith("workspace.toml:")
+
+
+def test_a_block_naming_a_component_whose_include_is_unread_is_unconfirmed_and_followed(tmp_path):
+    """D23-142: the file the `include:` names was not read, so the component may build; its way on
+    followed - the `include:` naming a compose file the reader reads - the block is followed."""
+    stack = "services:\n  side:\n    image: x/side\n"
+    block = {"service": "web", "component": "runner", "onto": "svc:web@orders"}
+    unread = build(tmp_path / "unread", {**estate(block), "runner": {
+        "compose.yaml": "include:\n  - stack.yml\nservices:\n  web:\n    image: org/web\n",
+        "stack.yml": stack}})
+    (row,) = deploys_rows(unread)
+    assert row["kind"] == "deploys-unconfirmed"
+    assert "`stack.yml` was not read" in row["why"]
+    assert ("fix it as its own row says - an `include:`'s by naming a compose file the reader "
+            "reads - and rebuild") in row["why"]
+    followed = build(tmp_path / "followed", {**estate(block), "runner": {
+        "compose.yaml": "include:\n  - compose.stack.yml\nservices:\n  web:\n    image: org/web\n",
+        "compose.stack.yml": stack}})
+    assert deploys_rows(followed) == []
+    assert followed.deploy("runner/compose.yaml", "web")["dst"] == "svc:web@orders"
+
+
+def test_a_component_with_a_directory_the_walk_cannot_list_is_unconfirmed(tmp_path):
+    """D23-68: the directory may hold the component's build, so a block naming its service is
+    unconfirmed, naming it, its way on beside it. Whether the refusal binds is measured."""
+    from tools.graph.tests._estate import lay_down, read, spawn
+    from tools.graph.tests._listing import allow_listing, deny_listing, lists
+    lay_down(tmp_path, {**estate(), "runner": {**runner_compose("  web:\n    image: org/web\n"),
+                                               "infra/notes.txt": "x\n"},
+                        "__deploys__": [{"service": "web", "component": "runner",
+                                         "onto": "svc:web@orders"}]})
+    guarded = tmp_path / "ws" / "runner" / "infra"
+    deny_listing(guarded)
+    try:
+        binds = not lists(guarded)
+        proc = spawn(tmp_path)
+    finally:
+        allow_listing(guarded)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    built = read(proc.returncode, tmp_path / "out")
+    if binds:
+        (row,) = deploys_rows(built)
+        assert row["kind"] == "deploys-unconfirmed"
+        assert ("`infra` could not be listed - so it is not followed until it can be: allow "
+                "listing it, then rebuild") in row["why"], row["why"]
+    else:
+        assert deploys_rows(built) == []
+
+
+def test_the_onto_side_names_a_directory_the_walk_could_not_list_with_its_own_way_on(tmp_path):
+    """Review B23-11: a directory is not a file an `include:` names - it is listed, then rebuilt.
+    Whether the refusal binds is measured."""
+    from tools.graph.tests._estate import lay_down, read, spawn
+    from tools.graph.tests._listing import allow_listing, deny_listing, lists
+    lay_down(tmp_path, estate(join(onto="svc:web@nowhere"),
+                              runner={"compose.yaml": "services:\n  side:\n    image: x/side\n",
+                                      "infra/notes.txt": "x\n"}))
+    guarded = tmp_path / "ws" / "runner" / "infra"
+    deny_listing(guarded)
+    try:
+        binds = not lists(guarded)
+        proc = spawn(tmp_path)
+    finally:
+        allow_listing(guarded)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (row,) = deploys_rows(read(proc.returncode, tmp_path / "out"))
+    listed = (" - `runner/infra` could not be listed and may hold it: allow listing it, then "
+              "rebuild" if binds else "")
+    assert row["why"] == (f"names `svc:web@nowhere`, which no build the graph read is on{listed}. "
+                          f"Correct the block's `onto`, as an `image-join-proposed` row spells it, "
+                          f"or remove it"), row["why"]

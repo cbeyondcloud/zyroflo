@@ -104,6 +104,8 @@ def workspace_toml(estate: dict) -> str:
         text += "\n[[canonical]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
     for block in estate.get("__apart__", []):
         text += "\n[[apart]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
+    for block in estate.get("__deploys__", []):
+        text += "\n[[deploys]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
     for node in estate.get("__entrypoint__", []):
         text += f'\n[[entrypoint]]\nnode = "{node}"\nnote = "n"\n'
     return text

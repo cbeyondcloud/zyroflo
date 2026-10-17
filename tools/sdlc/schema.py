@@ -555,6 +555,16 @@ def workspace_schema() -> dict:
             "type": "array", "description": _cites("workspace", "apart"),
             "items": block(si._WS_APART_KEYS, ("component", "service"),
                            {"service": NONBLANK, "component": NONBLANK})},
+        # Batch 23 (T589): the image join declared. `onto` is blank - a decline - or a service
+        # node id, `svc:` and an `@` after it, whitespace-tolerant as the reader strips every
+        # value (D23-72, D23-80). Two blocks naming one `component` and the identical
+        # `service` are refused by the reader whatever their `onto` - the same uniqueness over
+        # two fields `[[apart]]` documents as a residual.
+        "deploys": {
+            "type": "array", "description": _cites("workspace", "deploys"),
+            "items": block(si._WS_DEPLOYS_KEYS, ("component", "onto", "service"),
+                           {"service": NONBLANK, "component": NONBLANK,
+                            "onto": {"pattern": r"^\s*$|^\s*svc:.*@"}})},
     }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

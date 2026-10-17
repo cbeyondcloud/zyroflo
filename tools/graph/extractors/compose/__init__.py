@@ -207,6 +207,12 @@ class Claim(NamedTuple):
     build_from: str = ""    # `<file>:<line>` of the base whose build placed it (T620)
     unfollowed: str = ""    # why its `extends:` chain could not be followed - a row (T620)
     extends: str = ""       # the base that could not be followed, as written ("" for none)
+    image: str = ""         # the image its service runs with, as compose merges it (batch 23)
+    image_from: str = ""    # `<file>:<line>` writing that image, where its own declaration does not
+    #: Why its `extends:` chain broke at a base the graph does not read - `reach`'s reason - so
+    #: the base may declare a build of any image; "" for a chain compose itself refuses, which
+    #: hides no build (batch 23, D23-119, D23-132).
+    extends_unread: str = ""
 
 
 def _layout(ctx: ExtractContext) -> dict[str, str]:
@@ -263,8 +269,7 @@ def _explicit_context(service: Any) -> tuple[bool, bool, str | None]:
 
 #: The files this reader reads, by name - an `include:` or `extends:` naming another is not
 #: followed (T620). The class's own globs, spelled once, here, so the rows can name them.
-COMPOSE_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml",
-                 "compose*.yaml")
+COMPOSE_GLOBS = _canonical.COMPOSE_FILES
 
 
 def reach(file_dir: str, written: Any, *, base: str, layout: dict[str, str], own: str,
@@ -534,6 +539,14 @@ class Chain(NamedTuple):
     #: places it (review B21-18). For the edge and the row only - never for T588's layering,
     #: since a context-less build leaves its base file's context standing (review B21-25).
     declared_at: str = ""
+    #: The first `image:` a base up the chain writes - its value node - and the `<file>:<line>`
+    #: writing it, the chain walked whole, past the base whose context places the build (batch
+    #: 23, D23-86): compose merges a base's `image:` into a service that writes none.
+    image: Any = None
+    image_from: str = ""
+    #: Where it broke at a `file:` naming a file this reader does not read, `reach`'s reason -
+    #: every reason but "names no file", which compose refuses (batch 23, D23-119).
+    extends_unread: str = ""
 
 
 def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
@@ -545,9 +558,15 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     compose resolves every base: one the graph cannot reach is a row, named through the bases
     it was reached by (batch 21's review). Where it breaks before any context, the service
     keeps its own reading. `index` maps a file to its services `(body, line)`;
-    `follow(file_dir, written)` is `reach` for this component."""
+    `follow(file_dir, written)` is `reach` for this component. The first `image:` a base
+    writes is read off the base's own node, which `index` keeps beside its body (D23-95)."""
     current, cur_name, cur_rel = service, name, rel
     seen = {(rel, name)}
+    img: tuple[Any, str] = (None, "")
+
+    def done(chain: Chain, unread: str = "") -> Chain:
+        return chain._replace(image=img[0], image_from=img[1], extends_unread=unread)
+
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
     # The first base declaring a `build:` with no context: with none written up the chain, its
@@ -558,6 +577,10 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     while True:
         did, explicit, context = _explicit_context(current)
         mine = (cur_rel, cur_name) == (rel, name)
+        if not mine and img[0] is None:
+            written_image = _yaml.mapping_get(index[cur_rel][cur_name][2], "image")
+            if written_image is not None:
+                img = (written_image, f"{cur_rel}:{_yaml.line_of(written_image)}")
         if found is None:
             declares = declares or did
             if did and not mine and not declared_at and not own_build:
@@ -569,9 +592,9 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
         # Present, even written as null, is an `extends:` to follow or row (review B21-19).
         if not (isinstance(current, dict) and "extends" in current):
             if found is not None:
-                return Chain(*found, "", "")
-            return Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
-                         declared_at)
+                return done(Chain(*found, "", ""))
+            return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
+                              declared_at))
         ext = current["extends"]
         base_name, base_file = ((ext, None) if isinstance(ext, str) else
                                 (ext.get("service"), ext.get("file")) if isinstance(ext, dict)
@@ -582,13 +605,16 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
                    if named and isinstance(base_file, str) and base_file.strip() else named)
         via = ("" if (cur_rel, cur_name) == (rel, name) else
                f"reaches `{cur_name}` in `{cur_rel}` through `extends:`, which ")
-        why, base_rel, entry = "", cur_rel, None
+        why, base_rel, entry, unread = "", cur_rel, None, ""
         if not named:
             why = "names no base service to extend"
         elif base_file is not None:
             base_rel, reason = follow(dir_of(cur_rel), base_file)
             if reason:
                 why = f"extends `{named}`, but its `file:` {reason}"
+                # A base this reader does not read may declare a build of any image; a `file:`
+                # naming no file is compose's own refusal and hides none (D23-119, D23-132).
+                unread = "" if reason == "names no file" else reason
         if not why and (base_rel, named) in seen:
             why = f"extends itself through `{named}` in `{base_rel}`, which compose refuses"
         if not why:
@@ -597,10 +623,10 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
                 why = f"extends `{named}`, which `{base_rel}` does not declare as a service"
         if why:
             if found is not None:
-                return Chain(*found, written, via + why)
+                return done(Chain(*found, written, via + why), unread)
             # What the chain declared up to the break stands, as where it ends (review B21-18).
-            return Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
-                         via + why, declared_at)
+            return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
+                              via + why, declared_at), unread)
         seen.add((base_rel, named))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
@@ -619,11 +645,14 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     it is several.
 
     Before that rule, a service an override declares no `build:` of takes its base's claim
-    for the same name (T588; `layers` maps each override to its base): eight of `Claim`'s
-    eleven fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
-    `inferred` and `local` - and none of the other three. `view` stays the override's own,
-    main's rule (ruling 10), and `unplaced` and `ambiguous` are the reasons for the base's
-    own rows, which stay the base's (design review D15a-15).
+    for the same name (T588; `layers` maps each override to its base): nine of `Claim`'s
+    seventeen fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
+    `inferred`, `local` and `build_from` - and its `extends_unread` where it carries none of
+    its own, a fact no row is emitted from (D23-118). `view` stays the override's own, main's
+    rule (ruling 10); `unplaced` and `ambiguous` are the reasons for the base's own rows,
+    which stay the base's (design review D15a-15); `unfollowed` and `extends` are its own
+    chain's, whose row is its own (D23-134); and `image` and `image_from` are its package's,
+    computed once and set on both claims (D23-158).
     """
     layout = _layout(ctx)
     listed = repo.alias in layout
@@ -635,7 +664,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int, tuple[str, str, str, bool, bool]]] = []
+                       int, tuple[str, str, str, bool, bool, str], tuple[Any, str]]] = []
     building = False
 
     def dir_of(rel: str) -> str:
@@ -646,11 +675,13 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     # declaration of a name, where two keys YAML types apart spell one (B10-14).
     declared = {rel: [(k, v, _body(v)) for k, v in _yaml.mapping_pairs(services_node)]
                 for rel, services_node in parsed}
-    index: dict[str, dict[str, tuple[Any, int]]] = {}
+    # Each base's value node is kept beside its body, so a chain reads the `image:` it writes
+    # and the line writing it, which the constructed body cannot give (D23-95).
+    index: dict[str, dict[str, tuple[Any, int, Any]]] = {}
     for rel, items in declared.items():
-        for key_node, _node, body in items:
+        for key_node, value_node, body in items:
             index.setdefault(rel, {}).setdefault(str(key_node.value),
-                                                 (body, _yaml.line_of(key_node)))
+                                                 (body, _yaml.line_of(key_node), value_node))
 
     def follow(file_dir: str, written: Any) -> tuple[str, str]:
         return reach(file_dir, written, base=base, layout=layout, own=repo.alias,
@@ -662,8 +693,13 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         for key_node, node, service in declared[rel]:
             name = str(key_node.value)
             declares, context = _context_of(service)
-            context_dir, followed = file_dir, ("", "", "", False, False)
+            context_dir, followed = file_dir, ("", "", "", False, False, "")
             where, extended_from = "this file", ""
+            # The image it runs with (batch 23): an `image:` it writes decides, as compose
+            # merges a service's own key over a base's; else its chain's, below.
+            own_image = _yaml.mapping_get(node, "image")
+            imaged: tuple[Any, str] = ((own_image, f"{rel}:{_yaml.line_of(own_image)}")
+                                       if own_image is not None else (None, ""))
             if isinstance(service, dict) and "extends" in service:
                 chain = _through_extends(rel, name, service, index, dir_of, follow)
                 own = bool(_explicit_context(service)[1])
@@ -678,7 +714,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 # The base whose build places it, for the edge and the row; and whether a base
                 # WROTE that build's context, which alone stops T588's layering (B21-25).
                 followed = ((chain.build_from or chain.declared_at) if not own else "",
-                            chain.why, chain.extends, own, bool(chain.build_from) and not own)
+                            chain.why, chain.extends, own, bool(chain.build_from) and not own,
+                            chain.extends_unread)
+                if own_image is None:
+                    imaged = (chain.image, chain.image_from)
             comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
                                        where=where)
                               if declares else ("", "", ""))
@@ -697,7 +736,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             view = env_view(repo.path / rel, service or {}, ctx.repos, name)
             pending.append((rel, name, node, service,
                             (declares, comp, why, within, how == "within"), view,
-                            _yaml.line_of(key_node), followed))
+                            _yaml.line_of(key_node), followed, imaged))
             if comp:
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
@@ -707,17 +746,26 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: B21-33) - which no override layers over its base (T588); a base's context-less build
     #: leaves that context standing.
     brought: set[tuple[str, int]] = set()
-    for rel, name, node, service, decl, view, line, followed in pending:
-        frm, unfollowed, written, _own, context_brought = followed
+    #: Per declaration - `(file, its index in that file's declarations)` - the image it runs
+    #: with (its value node, the `<file>:<line>` writing it), and where its OWN `image:` is
+    #: written ("" where it writes none).
+    imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
+    own_place: dict[tuple[str, int], str] = {}
+    for rel, name, node, service, decl, view, line, followed, imaged in pending:
+        frm, unfollowed, written, _own, context_brought, unread = followed
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
         if frm and claim.mapped_by == "build":
             claim = claim._replace(build_from=frm)
         if unfollowed:
-            claim = claim._replace(unfollowed=unfollowed, extends=written)
+            claim = claim._replace(unfollowed=unfollowed, extends=written, extends_unread=unread)
         items = decls.setdefault(rel, [])
         if context_brought:
             brought.add((rel, len(items)))
+        imaged_of[(rel, len(items))] = imaged
+        own_written = _yaml.mapping_get(node, "image")
+        own_place[(rel, len(items))] = (f"{rel}:{_yaml.line_of(own_written)}"
+                                        if own_written is not None else "")
         items.append(Decl(name, node, service, claim, line))
     for override, base_rel in layers.items():
         if override not in decls:
@@ -728,10 +776,34 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         decls[override] = [
             decl._replace(claim=inherited[decl.name]._replace(
                 view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
-                extends=decl.claim.extends))
+                extends=decl.claim.extends,
+                extends_unread=decl.claim.extends_unread or inherited[decl.name].extends_unread))
             if decl.name in inherited and not _context_of(decl.service)[0]
             and (override, k) not in brought else decl
             for k, decl in enumerate(decls[override])]
+    # The image each claim's service runs with (batch 23), set after the layering so an
+    # override's inherited claim never carries its base's superseded image: a T588 package
+    # runs the override's image - its own `image:`, else its chain's - else its base
+    # declaration's, computed ONCE, and BOTH its claims carry it (D23-153, D23-158, D23-166);
+    # `image_from` cites where it is written wherever a claim's own declaration does not.
+    runs = dict(imaged_of)
+    for override, base_rel in layers.items():
+        first: dict[str, int] = {}
+        for kb, decl in enumerate(decls.get(base_rel, [])):
+            first.setdefault(decl.name, kb)
+        for k, decl in enumerate(decls.get(override, [])):
+            if decl.name in first:
+                o_key, b_key = (override, k), (base_rel, first[decl.name])
+                runs[o_key] = runs[b_key] = (imaged_of[o_key] if imaged_of[o_key][0] is not None
+                                             else imaged_of[b_key])
+    for rel, items in decls.items():
+        for k, decl in enumerate(items):
+            image_node, place = runs.get((rel, k), (None, ""))
+            text = (_yaml.scalar_text(image_node).strip()
+                    if isinstance(image_node, props.yaml.ScalarNode) else "")
+            if text:
+                items[k] = decl._replace(claim=decl.claim._replace(
+                    image=text, image_from="" if place == own_place[(rel, k)] else place))
     # Worded from the claim each ends with - an override's is its base's - since the claim
     # stays the component's only where no build places it (batch 21's review).
     return {rel: [decl._replace(claim=_unfollowed_worded(decl)) if decl.claim.unfollowed
@@ -817,6 +889,7 @@ UNRESOLVED_FIELDS = {
     "compose-build-ambiguous": ('service', 'components'),
     "compose-extends-unresolved": ('service', 'extends'),
     "compose-include-unresolved": ('include',),
+    "compose-image-unresolved": ('service',),
 }
 
 
@@ -835,6 +908,30 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
                 f"they publish are missing from the graph, and this row is the only "
                 f"record of that"),
     }
+
+def _deployment_only(ctx: ExtractContext, repo: RepoRef, decls: dict[str, list["Decl"]],
+                     lost: set[str], include_unread: dict[str, list[dict]]) -> bool | None:
+    """Whether the component deploys only images it does not build, as far as compose can say
+    (batch 23, D23-6, D23-61, D23-101, D23-116): False wherever a compose file it read declares
+    `build:` - a file it did not read cannot make a building component deployment-only; True
+    only where it read every compose file of the component - none unread, none whose
+    `include:` names a file it does not read, none lost to its case, no directory of the
+    component unlisted, and no claim of the component, in any file, whose chain names a base
+    it does not read, which may declare a build - and none declares `build:`; else None, not
+    known, so not published. Per component, so a sibling file's gap reaches every node."""
+    items = [decl for file_decls in decls.values() for decl in file_decls]
+    if any(_context_of(decl.service)[0] for decl in items):
+        return False
+    config = ctx.config or {}
+    # Compose's own names over the case record, which holds every deployment reader's losses,
+    # as helm applies its own (D23-31).
+    case_lost = [rel for rel in (config.get("deployment_off_case") or {}).get(repo.alias, [])
+                 if _canonical.names_compose_file(rel, folded=True)]
+    unknown = (lost or any(include_unread.values()) or case_lost
+               or (config.get("unlisted") or {}).get(repo.alias)
+               or any(decl.claim.extends_unread for decl in items))
+    return None if unknown else True
+
 
 def _unread(repo: RepoRef, rel: str, kind: str) -> Node:
     """A deployment file this reader was handed and could not read or parse (batch 15b,
@@ -882,6 +979,7 @@ class ComposeExtractor:
         #: (review B10-4). Local for the same reason as `owned`.
         held: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
+            first_node = len(res.nodes)
             # In main's order. Nothing placed depends on it, since each file places its own
             # `build:` (D534-7), but which env value is read last does, so it stays main's
             # (ruling 10). Each file is read and parsed once (remainder E).
@@ -899,19 +997,46 @@ class ComposeExtractor:
                 for decl in declared:
                     if decl.service is not None:
                         on_node.setdefault(decl.claim.target, []).append(rel)
+            # Batch 23: what each file's `include:` names that this reader does not read goes
+            # on the file's node (D23-131), so the include is read before the files are (the
+            # rows' order is the writer's, which sorts them).
+            include_unread = {rel: self._includes(res, ctx, repo, rel, includes[rel], inputs,
+                                                  lost)
+                              for rel in sorted(includes)}
             for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held, layers.get(rel, ""), on_node)
-            for rel in sorted(includes):
-                self._includes(res, ctx, repo, rel, includes[rel], inputs, lost)
+                           held, layers.get(rel, ""), on_node, include_unread.get(rel, []))
+            # A file declaring no service of its own whose `include:` names a file this reader
+            # does not read: its node, carrying no claim, says so - else nothing in the graph
+            # would, as an unreadable file's `unread` node says its own gap.
+            claiming = {rel for rel, _ in parsed}
+            for rel, unread in include_unread.items():
+                if unread and rel not in claiming and rel not in lost:
+                    res.nodes.append(Node(id=ids.deployment_id(repo.alias, rel), type="deploy",
+                                          props={"kind": CONFIG_KIND, "path": rel,
+                                                 "component": repo.alias,
+                                                 "include_unread": unread}))
+            only = _deployment_only(ctx, repo, decls, lost, include_unread)
+            if only is not None:
+                for node in res.nodes[first_node:]:
+                    if node.type == "deploy" and node.props.get("kind") == CONFIG_KIND:
+                        node.props["deployment_only"] = only
         return res
 
     def _includes(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
-                  node: Any, inputs: set[str], lost: set[str]) -> None:
+                  node: Any, inputs: set[str], lost: set[str]) -> list[dict]:
         """T620: each `include:` entry this reader cannot follow is a row on its line - its
         services are missing from the graph, not absent. One it can follow is a compose file
         this component reads, on its own and from its own directory, so an entry moving that
-        directory (`project_directory`) is said too."""
+        directory (`project_directory`) is said too.
+
+        Batch 23: an `include:` that is no list is read as a list of what it spells - a scalar's
+        text, a single mapping's `path` or each file of its `path` list - beside its "is not a
+        list" row, and one spelling no file hides nothing, that row alone (D23-141, D23-148,
+        D23-149); a value that is not a string - a number - names no file, listed or not
+        (D23-160). Returns the files it names that this reader does not read - `reach`'s every
+        reason but "names no file", which compose refuses - each `{"file", "line"}`, for the
+        compose node's `include_unread` (D23-131, D23-161)."""
         layout = _layout(ctx)
         listed = repo.alias in layout
         if not listed:
@@ -926,14 +1051,19 @@ class ComposeExtractor:
                 f"`include:` {why}. The services it declares are missing from the graph, not "
                 f"absent", include=written))
 
-        if not isinstance(node, y.SequenceNode):
+        unread: list[dict] = []
+        listed_entries = isinstance(node, y.SequenceNode)
+        if not listed_entries:
             row("", _yaml.line_of(node), "is not a list of files")
-            return
-        for item in node.value:
+        for item in node.value if listed_entries else [node]:
             line = _yaml.line_of(item)
             project_dir: Any = None
             if isinstance(item, y.ScalarNode):
-                paths: Any = [_yaml.scalar_text(item)]
+                # The value as YAML constructs it: a number is no file name (D23-160); one
+                # spelling nothing, written alone, hides nothing beyond its row (D23-149).
+                value = _yaml.constructed(item)
+                paths: Any = ([value] if isinstance(value, str)
+                              and (listed_entries or value.strip()) else None)
             elif isinstance(item, y.MappingNode):
                 body = _yaml.constructed(item)
                 paths = body.get("path")
@@ -942,7 +1072,8 @@ class ComposeExtractor:
             else:
                 paths = None
             if not isinstance(paths, list) or not paths:
-                row("", line, "has an entry that names no file")
+                if listed_entries:
+                    row("", line, "has an entry that names no file")
                 continue
             for written in paths:
                 target, why = reach(file_dir, written, base=base, layout=layout,
@@ -950,6 +1081,8 @@ class ComposeExtractor:
                 shown = written if isinstance(written, str) else ""
                 if why:
                     row(shown, line, why)
+                    if why != "names no file":
+                        unread.append({"file": shown, "line": line})
                     continue
                 if isinstance(project_dir, str) and project_dir.strip():
                     moved = posixpath.normpath(posixpath.join(file_dir, project_dir.strip()))
@@ -962,6 +1095,7 @@ class ComposeExtractor:
                             f"that file on its own, from its own directory, so a relative "
                             f"`build:` in it is placed from there, not from the project "
                             f"directory - and what it builds may be misplaced")
+        return unread
 
     def _read(self, res: ExtractResult, repo: RepoRef, path: Path,
               includes: dict[str, Any] | None = None,
@@ -1026,14 +1160,17 @@ class ComposeExtractor:
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
               held: dict[str, dict[str, tuple[str, ...]]], package: str,
-              on_node: dict[str, list[str]] | None = None) -> None:
+              on_node: dict[str, list[str]] | None = None,
+              include_unread: list[dict] | None = None) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
         # to - and it names a file this same component reads (D15a-22).
         res.nodes.append(Node(id=deploy, type="deploy", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias,
-            **({"package": package} if package else {})}))
+            **({"package": package} if package else {}),
+            # Batch 23: the files its `include:` names that this reader does not read (D23-131).
+            **({"include_unread": include_unread} if include_unread else {})}))
         cfg = ids.config_id(repo.alias, rel)
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
@@ -1067,6 +1204,18 @@ class ComposeExtractor:
         if placed.build_from:
             # T620: placed by the build a base declares - where, so the edge cites it.
             edge_props["build_from"] = placed.build_from
+        # Batch 23: the reasons a claim carries, as they are - the image link reads a claim
+        # whose build could not be placed, whose chain could not be followed, and whose chain
+        # broke at a base the graph does not read, which may build any image (D23-43, D23-119).
+        for reason in ("unplaced", "unfollowed", "extends", "extends_unread"):
+            if getattr(placed, reason):
+                edge_props[reason] = getattr(placed, reason)
+        if placed.image:
+            # Batch 23: the image it runs with, as compose merges it, and where that image is
+            # written wherever its own declaration does not write it.
+            edge_props["image"] = placed.image
+            if placed.image_from:
+                edge_props["image_from"] = placed.image_from
         res.edges.append(Edge(
             src=deploy, type="DG_DEPLOYS", dst=placed.target, source_file=rel, line=line,
             extractor=self.name, confidence=1.0, props=edge_props,
@@ -1079,6 +1228,13 @@ class ComposeExtractor:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-extends-unresolved", rel, line,
                 f"`{name}` {placed.unfollowed}", service=name, extends=placed.extends))
+        written_image = _yaml.mapping_get(node, "image")
+        if isinstance(written_image, (props.yaml.MappingNode, props.yaml.SequenceNode)):
+            shape = "a mapping" if isinstance(written_image, props.yaml.MappingNode) else "a list"
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "compose-image-unresolved", rel, line,
+                f"`{name}`'s `image:` is {shape}, not one image reference, so it takes part in "
+                f"no image proposal; write it as one string", service=name))
         if placed.ambiguous:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-build-ambiguous", rel, line,

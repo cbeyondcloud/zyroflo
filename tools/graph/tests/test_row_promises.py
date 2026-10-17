@@ -189,3 +189,15 @@ def test_neither_reader_accepts_what_the_other_refuses(tmp_path: Path, field: st
 
     for name, message in refusals.items():
         assert repr(field) in message, f"{name} did not name {field!r}: {message}"
+
+
+def test_a_long_list_is_capped_at_five_and_says_how_many_more():
+    """Batch 23 (D23-42, D23-52): `capped`, moved from the pipeline into core so the link passes
+    word their rows with the same helper - at most five names, the cap admitted, a short list
+    whole, an empty one empty."""
+    from tools.graph.core.lib.rows import capped
+    assert capped([]) == ""
+    assert capped(["a"]) == "a"
+    assert capped(list("abcde")) == "a, b, c, d, e"
+    assert capped(list("abcdefgh")) == "a, b, c, d, e and 3 more"
+    assert capped(list("abc"), cap=2) == "a, b and 1 more"

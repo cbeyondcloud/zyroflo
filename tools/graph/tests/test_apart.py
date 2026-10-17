@@ -287,7 +287,8 @@ def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_i
         f"otherwise this row is the record of where it stays. (the graph does not read a "
         f"compose file under another name - an `include:` or `extends:` naming one is its "
         f"own row - nor a chart's values overlays)")
-    assert "T589" not in row["why"], "no build holds `svc:web@a`"
+    assert "[[deploys]]" not in row["why"] and "T589" not in row["why"], \
+        "no build holds `svc:web@a`"
     assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
 
 
@@ -389,15 +390,94 @@ def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):
         assert "apart" not in edge_props(released, f"a/charts/{name}/values.yaml")
 
 
-def test_a_chart_a_build_holds_back_is_told_what_would_place_it(tmp_path):
+def test_a_chart_a_build_holds_back_is_offered_the_block_that_places_it(tmp_path):
     """Ruling 25, D15b-101's shape: `deploy`'s build of `a` holds `svc:web@a`, so the row
-    names what would place the chart with it - the image link, filed as T589."""
+    offers the block that places the chart with it, as a proposal spells it (batch 23, D23-58):
+    neither image is readable here, so nothing gates it. Followed, the chart is moved there,
+    the hold dropped, and the row is gone (D23-57)."""
     (row,) = build(tmp_path, {**HELD, "__apart__": [apart("web", "a")]}).kinds("apart-held")
     assert ("its component's own node `svc:web@a` holds the claims of "
             "`deploy/docker-compose.yml`") in row["why"]
-    assert ("remove the block; if it deploys what `deploy/docker-compose.yml` builds, the "
-            "graph cannot place it there yet (the image link, filed as T589); otherwise this "
-            "row is the record of where it stays") in row["why"]
+    assert ("remove the block; if it deploys what `deploy/docker-compose.yml` builds, declare "
+            "it - `[[deploys]] service = \"web\" component = \"a\" onto = \"svc:web@a\"`; "
+            "otherwise this row is the record of where it stays") in row["why"]
+    assert "T589" not in row["why"]
+    followed = build(tmp_path / "2", {**HELD, "__apart__": [apart("web", "a")],
+                                      "__deploys__": [{"service": "web", "component": "a",
+                                                       "onto": "svc:web@a"}]})
+    assert followed.deploy("a/charts/web/values.yaml")["dst"] == "svc:web@a"
+    assert followed.kinds("apart-held") == []
+
+
+#: HELD, its chart running `org/web` and `deploy` building `org/other` onto `svc:web@a`.
+HELD_IMAGED = {"a": {"charts/web/values.yaml": "fullnameOverride: web\nimage:\n"
+                                               "  repository: org/web\n",
+                     "charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n",
+                     "src/main/java/C.java": JAVA},
+               "deploy": {"docker-compose.yml": compose(svc("web", "../a", None,
+                                                            image="org/other"))}}
+
+
+def test_a_held_charts_offer_reads_a_registry_as_docker_does(tmp_path):
+    """Review B23-1's reach: a chart's registry naming no host (`myreg`) is a Docker Hub path, so
+    the chart runs what the holder's `myreg/org/web` builds - offered, never told the images
+    differ."""
+    hub = {"a": {**HELD_IMAGED["a"], "charts/web/values.yaml": "fullnameOverride: web\nimage:\n"
+                                                                "  registry: myreg\n"
+                                                                "  repository: org/web\n"},
+           "deploy": {"docker-compose.yml": compose(svc("web", "../a", None,
+                                                        image="myreg/org/web"))}}
+    (row,) = build(tmp_path, {**hub, "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert "declare it - `[[deploys]] service = \"web\" component = \"a\"" in row["why"]
+    assert "is not the image" not in row["why"]
+
+
+def test_a_held_charts_holders_are_read_as_the_image_link_reads_a_build(tmp_path):
+    """D23-60, D23-135: a build that could not be placed is still a build - its node is offered,
+    as a `[[deploys]]` onto it is followed; and a holder that builds nothing gates no offer,
+    whatever image it runs."""
+    unplaced = {"a": {**chart("web"), "src/main/java/C.java": JAVA,
+                      "docker-compose.yml": compose(svc("web", "../nowhere", None))}}
+    (row,) = build(tmp_path / "u", {**unplaced,
+                                    "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert ("if it deploys what `a/docker-compose.yml` builds, declare it - `[[deploys]] service "
+            "= \"web\" component = \"a\" onto = \"svc:web@a\"`") in row["why"]
+    stock_beside = {**HELD_IMAGED, "deploy": {"docker-compose.yml": compose(svc("web", "../a",
+                                                                                None))},
+                    "a": {**HELD_IMAGED["a"], "docker-compose.yml": "services:\n"
+                                                                     + stock("web", "org/other")}}
+    (row,) = build(tmp_path / "s", {**stock_beside,
+                                    "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert "declare it - `[[deploys]] service = \"web\" component = \"a\"" in row["why"]
+    assert "is not the image" not in row["why"]
+
+
+def test_a_held_charts_offer_is_not_made_where_a_complete_run_reads_two_images(tmp_path):
+    """D23-71, D23-84: offered blind, the block would be refused as contradicted - a fact about
+    two images, never that the chart deploys none of the builds."""
+    (row,) = build(tmp_path, {**HELD_IMAGED,
+                              "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert ("remove the block; the image `a/charts/web/values.yaml` runs is not the image "
+            "`deploy/docker-compose.yml` builds (`docker.io/org/other`), so the graph does not "
+            "offer that join; otherwise this row is the record of where it stays") in row["why"]
+    assert "[[deploys]]" not in row["why"]
+
+
+def test_a_held_charts_offer_says_why_a_run_could_not_compare_the_images(tmp_path):
+    """D23-122, D23-138, D23-140, D23-154: a whole run that did not read everything compose
+    merges points at its `image-proposals-withheld` row; a narrowed run at its own line."""
+    estate = {**HELD_IMAGED, "broken": {"docker-compose.yml": "services: [\n"},
+              "__apart__": [apart("web", "a")]}
+    whole = build(tmp_path / "w", estate)
+    (row,) = whole.kinds("apart-held")
+    assert ("if it deploys what `deploy/docker-compose.yml` builds, declare it - `[[deploys]] "
+            "service = \"web\" component = \"a\" onto = \"svc:web@a\"` - this run could not "
+            "compare the images - see its `image-proposals-withheld` row; otherwise") in row["why"]
+    assert whole.kinds("image-proposals-withheld"), "the row it points at is filed"
+    narrowed = build(tmp_path / "n", estate, "--components", "a,deploy")
+    (row,) = narrowed.kinds("apart-held")
+    assert ("onto = \"svc:web@a\"` - this run compared no images (the report's note says what "
+            "it could not see); otherwise") in row["why"]
 
 
 def test_a_held_chart_on_a_decided_node_gets_its_row_and_a_contested_one_does_not(tmp_path):
@@ -457,7 +537,9 @@ def test_the_offer_reads_the_components_names_as_written(tmp_path):
     out, though compose files `my api`'s values under `my api`, which reads them."""
     built = build(tmp_path, TWINS)
     (row,) = built.kinds("name-joined-service")
-    assert ("the values `deploy/docker-compose.yml` sets for `my-api` are still read as "
+    # Batch 23 (D23-7): the block names the claim as its file spells its service.
+    assert "add [[apart]] service = \"my api\" component = \"deploy\"" in row["why"]
+    assert ("the values `deploy/docker-compose.yml` sets for `my api` are still read as "
             "`my api`'s configuration") in row["why"]
     assert not [r for r in built.kinds("env-key-unset") if r["component"] == "my api"]
 
@@ -468,7 +550,9 @@ def test_a_contest_reads_the_components_names_as_written(tmp_path):
     joined node's."""
     estate = {**TWINS, "x": {"charts/my-api/values.yaml": "fullnameOverride: my-api\n"}}
     row = contest(build(tmp_path, estate), "svc:my-api@my-api")
-    assert ("the values `deploy/docker-compose.yml` sets for `my-api` are still read as "
+    # Batch 23 (D23-7): the block names the claim as its file spells its service.
+    assert "add [[apart]] service = \"my api\" component = \"deploy\"" in row["why"]
+    assert ("the values `deploy/docker-compose.yml` sets for `my api` are still read as "
             "`my api`'s configuration") in row["why"]
 
 
