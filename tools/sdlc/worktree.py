@@ -59,7 +59,12 @@ MODES = ("worktree", "in-place")
 
 
 class WorktreeError(RuntimeError):
-    """A tree that cannot be made, moved, or trusted."""
+    """A tree that cannot be made, moved, or trusted. `notes` carries the plan's notes beside a
+    refusal: they say how widely its checks reached (batch 25, D25-58, D25-69)."""
+
+    def __init__(self, message: str, notes: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.notes = list(notes or [])
 
 
 def _now() -> str:
@@ -150,14 +155,32 @@ def is_own_tree(target: Path, path: str) -> bool:
     return clean == prefix or clean.startswith(prefix + "/")
 
 
-def home(policy: dict, target: Path, run_id: str, name: str) -> Path:
-    """Where one component's tree for one run lives.
+def tree_at(policy: dict, target: Path, run_id: str, name: str) -> Path:
+    """Where one tree for one run lives.
 
-    `<worktrees_root>/<run-id>/<component>` — deliberately the same shape
+    `<worktrees_root>/<run-id>/<name>` — deliberately the same shape
     `policy.confinement` allows, so the wall and the thing it guards cannot
-    disagree about the address.
+    disagree about the address. Since batch 25 (T550) a tree holds every component of one
+    repository whose branch pattern gives its branch, `name` the first of them the profile
+    declares there (decision 49), and each component's `home` is its own directory inside it.
     """
     return root_of(policy, target) / run_id / name
+
+
+def tree_of(entry: dict) -> str:
+    """A record entry's tree: its `tree` where one is recorded, else its `home` - a run recorded
+    before batch 25 reads each component's `home` as its tree, so a legacy record's distinct trees
+    stay distinct (D25-7). The ONE reading every grouping site takes."""
+    return str(entry.get("tree") or entry.get("home") or "")
+
+
+def _same(a: str | Path, b: str | Path) -> bool:
+    """Whether two spellings name one place, resolved - a stored and a live spelling of one root
+    differ, so a literal comparison never fires (D25-107)."""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return str(a) == str(b)
 
 
 #: Written into the worktrees root the first time one is made. A directory whose
@@ -253,8 +276,9 @@ def load_record(target: Path, run_id: str) -> dict:
             f"{ledger.run_rel(target, run_id)}/{RECORD} is not an object")
     data.setdefault("components", {})
     for entry in data["components"].values():
-        if isinstance(entry, dict) and isinstance(entry.get("home"), str):
-            entry["home"] = _live_home(target, entry["home"])
+        for field in ("home", "tree"):
+            if isinstance(entry, dict) and isinstance(entry.get(field), str):
+                entry[field] = _live_home(target, entry[field])
     return data
 
 
@@ -266,10 +290,11 @@ def save_record(target: Path, run_id: str, data: dict) -> None:
         # sent to a directory that does not exist. Twin of stage.py:704/:819.
         raise WorktreeError(
             f"no run folder for {run_id} at {ledger.RUNS_REL.as_posix()}/{run_id}")
+    # `home` and, since batch 25, `tree`: both stored relative, both read back live (D25-6).
     stored = {**data, "components": {
-        name: ({**entry, "home": _stored_home(target, entry["home"])}
-               if isinstance(entry, dict) and isinstance(entry.get("home"), str)
-               else entry)
+        name: ({**entry, **{field: _stored_home(target, entry[field]) for field in ("home", "tree")
+                            if isinstance(entry.get(field), str)}}
+               if isinstance(entry, dict) else entry)
         for name, entry in (data.get("components") or {}).items()}}
     # LF on every platform (batch-2 review, F4): the record is committed with the run.
     path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n",
@@ -310,30 +335,204 @@ def _live_home(target: Path, home: str) -> str:
 # ── creating ─────────────────────────────────────────────────────────────────
 
 
-def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict]:
-    """What `create` would do, per component, without doing any of it.
+# ── which repository, and where in it (design pass 25, section 1) ───────────
+
+
+def repo_key(where: Path) -> tuple[str, str]:
+    """(the repository's key, why it could not be read): git's common directory for `where`,
+    absolute and resolved, `--path-format` written before `--git-common-dir`, which it governs
+    (D25-26a). `--git-common-dir` alone answers relative to the cwd, so two repositories collided
+    and one repository at two depths split (round 1). Git before 2.31 echoes the unknown flag and
+    answers relative, so a relative last line is joined to the resolved directory. A failure is
+    the component's own problem, never raised (D25-43)."""
+    try:
+        out = git(where, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except WorktreeError as exc:
+        return "", str(exc)
+    line = out.splitlines()[-1].strip() if out else ""
+    if not line:
+        return "", f"git rev-parse --git-common-dir in {where} answered nothing"
+    found = Path(line)
+    if not found.is_absolute():
+        found = where.resolve() / found
+    return str(found.resolve()), ""
+
+
+def _facts(policy: dict, target: Path, run_id: str, comp: dict) -> dict:
+    """What `plan` reads of one DECLARED component, in the run or not: its branch, its directory,
+    its repository's key - `state` "repo", "none" (a directory in no repository) or "unknown"
+    (missing, or git could not say, with `why`) - its place in that repository (`--show-prefix`,
+    as `suite` asks it, T596; never `relative_to(--show-toplevel)`, which raises through a
+    junction) and its checkout (`--show-toplevel`): one repository may be checked out twice."""
+    vcs = comp.get("vcs") or {}
+    pattern = guardrails.branch_pattern(policy, vcs)
+    path = comp.get("path") or "."
+    where = guardrails.component_dir(target, path).resolve()
+    out = {"comp": comp, "name": comp["name"], "path": path, "vcs": vcs, "pattern": pattern,
+           "branch": guardrails.branch_for(pattern, run_id), "where": where, "state": "unknown",
+           "why": "", "key": "", "place": "", "checkout": ""}
+    if not where.is_dir():
+        out["why"] = f"{path} is not a directory"
+        return out
+    if not is_repo(where):
+        out["state"] = "none"
+        return out
+    key, why = repo_key(where)
+    if not key:
+        out["why"] = why
+        return out
+    try:
+        place = git(where, "rev-parse", "--show-prefix")
+        checkout = git(where, "rev-parse", "--show-toplevel")
+    except WorktreeError as exc:
+        out["why"] = str(exc)
+        return out
+    out.update(state="repo", key=key, place=place.strip().strip("/"),
+               checkout=str(Path(checkout).resolve()))
+    return out
+
+
+def place_entry(at: Path, base: str, place: str) -> tuple[str, str]:
+    """git's answer for a component's place in a commit - the ONE helper creation, a join and the
+    rebase's note ask (design pass 25, section 2): `git --literal-pathspecs ls-tree --full-tree
+    <base> -- <place>`, git's EXIT read first, then its entry. Five answers: "dir" (040000);
+    "submodule" (160000, which a fresh checkout leaves uninitialised - accepted, as `main` makes
+    it, D25-118, D25-128); "file" or "symlink" (a blob, 100644/100755 or 120000); "none" (exit 0
+    and no entry: the place holds nothing git tracks); "error" (a non-zero exit, 1 included -
+    could-not-look, with git's own text, since a tree object missing on the way to the place
+    prints the same nothing as an untracked place, D25-139). Never `-r`, which answers a
+    directory by its first file (D25-134); never `cat-file -t`, which cannot answer for a
+    submodule (D25-128); `--literal-pathspecs`, since a place beginning `:` is otherwise
+    pathspec magic (D25-136); never an empty place or base, nor `.` or a trailing slash, each
+    answered for something else (D25-135, D25-138, D25-142)."""
+    if not place or not base or place in (".", "./") or place.endswith("/"):
+        raise WorktreeError(f"place_entry was asked of place {place!r} at base {base!r} - a "
+                            f"question git answers for something else")
+    try:
+        proc = subprocess.run(["git", "-C", str(at), "--literal-pathspecs", "ls-tree",
+                               "--full-tree", base, "--", place], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "error", str(exc)
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip().splitlines()
+        return "error", tail[-1] if tail else f"git exited {proc.returncode} saying nothing"
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        return "none", ""
+    mode = lines[0].split(None, 1)[0]
+    kind = {"040000": "dir", "160000": "submodule", "120000": "symlink"}.get(mode, "file")
+    return kind, mode
+
+
+def _place_problem(name: str, place: str, base: str, answer: tuple[str, str]) -> str:
+    """What creation says of a component whose place is not a directory in its tree's base, in
+    each answer's own words (D25-105, D25-116, D25-119, D25-129, D25-130); "" for a directory or
+    a submodule."""
+    kind, detail = answer
+    short = base[:12]
+    if kind in ("dir", "submodule"):
+        return ""
+    if kind in ("file", "symlink"):
+        return (f"`{place}` is a {kind} in `{short}`, not a directory; make it a directory and "
+                f"commit that, or point the component's `path` at the directory")
+    if kind == "none":
+        return (f"`{place}` holds nothing git tracks, so a tree made from `{short}` would not "
+                f"hold it; commit a file in it, or, where `.gitignore` ignores it, `git add -f` "
+                f"it or un-ignore it")
+    return f"`{name}`: could not look whether `{place}` is a directory in `{short}` ({detail})"
+
+
+def _join_problem(run_id: str, name: str, place: str, tree: Path, head: str, base: str,
+                  answer: tuple[str, str], mate: str) -> str:
+    """What a join says of a component whose place is not a directory in its tree (D25-97): what
+    it looked at, the rebase offered only where the tree's base lacks the directory and its
+    history never held it - a deletion the base postdates, or a directory only an ancestor holds,
+    has no later commit to rebase onto (D25-106, D25-114, D25-125)."""
+    if answer[0] == "error":
+        return (f"`{name}`: could not look whether `{place}` is a directory in {tree} "
+                f"({answer[1]})")
+    kind = answer[0]
+    said = (f"`{place}` is a {kind} in {tree} (the tree is at `{head[:12]}`), not a directory"
+            if kind in ("file", "symlink") else
+            f"`{place}` is not a directory in {tree} (the tree is at `{head[:12]}`)")
+    in_base = place_entry(tree, base, place)[0] if base else "error"
+    held = git(tree, "log", "-1", "--format=%H", base, "--", place, check=False) if base else ""
+    if in_base in ("none", "file", "symlink") and not held:
+        said += (f"; the tree's base lacks it, so rebase the tree onto a later commit that holds "
+                 f"it, if one does (`worktree.py --run {run_id} --component {mate} --rebase "
+                 f"<ref>`), then add `{name}`")
+    return said + f"; or run `{name}` as a run of its own"
+
+
+def _is_live(checkout: Path, tree: Path, rows: list[tuple[str, dict]]) -> bool:
+    """Whether this run's recorded tree is live (D25-49): its directory exists, `git worktree
+    list` knows it, and no row naming it carries a `removed_at` newer than the tree's own `at` -
+    the newest `at` among those rows, the one reading of it (D25-101), so a tree-mate's removal
+    from before a re-create never withholds it (D25-73)."""
+    if not tree.is_dir():
+        return False
+    listed = [line.split(" ", 1)[1] for line in
+              git(checkout, "worktree", "list", "--porcelain", check=False).splitlines()
+              if line.startswith("worktree ")]
+    if not any(_same(p, tree) for p in listed):
+        return False
+    newest = max(str(e.get("at") or "") for _, e in rows)
+    return not any(str(e.get("removed_at") or "") > newest for _, e in rows)
+
+
+PROFILE_REL = f".sdlc/{guardrails.PROFILE_NAME}"
+
+
+def plan(target: Path, run_id: str, names: list[str] | None = None) -> dict:
+    """What `create` would do, per component, without doing any of it: `{"steps": [...],
+    "notes": [...]}`.
 
     Every refusal is collected rather than raised at the first one: an operator
-    fixing a workspace should need one round trip. The same list is what
+    fixing a workspace should need one round trip. The same steps are what
     `create` executes, so `--dry-run` is the plan and not a description of it.
+
+    **The components of one repository whose branch patterns give one branch share one tree**
+    (T550; design pass 25, sections 1-2): the repository is git's common directory, a group is
+    its components on one branch, its tree is named after the first component the profile
+    declares in that repository on that branch, and its base is the group's checkouts' `HEAD`.
+    Patterns giving different branches keep a tree each, as on `main` (decision 50). What must
+    agree is checked at the scope its hazard has; the other checks at their own levels. A group
+    whose tree this run already has registers inside it (stepwise creation). The notes say how
+    widely the checks reached - a declared component outside the run whose repository could not
+    be determined - and never reach the committed record (D25-53e, D25-58).
     """
     policy = guardrails.load(target)
     every = guardrails.components(target)
-    wanted = [c for c in every if names is None or c["name"] in names]
     if names is not None and (missing := sorted(set(names) - {c["name"] for c in every})):
         raise WorktreeError(f"no component named {', '.join(map(repr, missing))} - one of "
                             + ", ".join(repr(c["name"]) for c in every))
-    out: list[dict] = []
-    for comp in wanted:
-        step: dict = {"name": comp["name"], "path": comp.get("path") or ".",
-                      "role": comp.get("role", "authoritative"), "problems": []}
-        step["problems"] += guardrails.vcs_problems(policy, comp)
-        vcs = comp.get("vcs") or {}
-        pattern = guardrails.branch_pattern(policy, vcs)
-        step["branch"] = guardrails.branch_for(pattern, run_id)
-        step["pattern"] = pattern
-        where = guardrails.component_dir(target, step["path"]).resolve()
-        step["where"] = str(where)
+    wanted = {id(c) for c in every if names is None or c["name"] in names}
+    record = load_record(target, run_id)
+    facts = [_facts(policy, Path(target), run_id, comp) for comp in every]
+    in_run = [f for f in facts if id(f["comp"]) in wanted]
+    notes = [f"`{f['name']}`'s repository could not be determined ({f['why']}), so the agreements "
+             f"below were not judged against it"
+             for f in facts if id(f["comp"]) not in wanted and f["state"] == "unknown"]
+    steps: list[dict] = []
+    step_of: dict[int, dict] = {}
+    groups: dict[tuple[str, str], list[dict]] = {}
+    seen: dict[str, dict] = {}
+    for f in in_run:
+        comp, vcs = f["comp"], f["vcs"]
+        step: dict = {"name": f["name"], "path": f["path"],
+                      "role": comp.get("role", "authoritative"),
+                      "problems": guardrails.vcs_problems(policy, comp), "branch": f["branch"],
+                      "pattern": f["pattern"], "where": str(f["where"])}
+        step_of[id(f)] = step
+        if (first := seen.get(f["name"])) is not None:
+            # D25-22: the record is keyed by name, so within one tree - no collision at `git
+            # worktree add` - the second silently replaced the first.
+            step["problems"].append(f"two components are named `{f['name']}` ({first['path']} "
+                                    f"and {f['path']}); the run's record is keyed by name, so "
+                                    f"one would replace the other - rename one in the profile")
+        seen.setdefault(f["name"], step)
+        steps.append(step)
         if vcs.get("deny_raw_git"):
             # Stated, not skipped. A worktree carries only the primary `.git`, so
             # a repository with a second one would lose it — and losing it
@@ -345,49 +544,175 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
             # A base all the same (review B4-10). `deny_raw_git` forbids commit,
             # push and worktree - not a read - and with no base the component
             # could never be diffed: run at P5 on every run and owed a deploy at
-            # P9 for ever, whatever the run changed.
-            step["base"] = (git(where, "rev-parse", "HEAD", check=False)
-                            if where.is_dir() else "")
-            out.append(step)
+            # P9 for ever, whatever the run changed. In no repository, an empty
+            # base, as `main` records one (D25-32).
+            step["base"] = (git(f["where"], "rev-parse", "HEAD", check=False)
+                            if f["where"].is_dir() else "")
             continue
         step["mode"] = "worktree"
-        step["home"] = str(home(policy, Path(target), run_id, comp["name"]))
-        # The DESTINATION is part of what a plan is about. `git worktree add`
-        # refuses an occupied one, and until item 156 nothing looked - so that
-        # refusal arrived half way through creation, with the components before
-        # it already made. Validated here, the common case never gets that far.
-        spot = Path(step["home"])
-        if spot.exists() and (not spot.is_dir() or any(spot.iterdir())):
-            step["problems"].append(
-                f"{step['name']}: {step['home']} is not empty - git worktree add "
-                f"refuses an occupied destination. A stopped run leaves one; "
-                f"remove it, or use a different run id")
-        if not where.is_dir():
-            step["problems"].append(f"{step['path']} is not a directory")
-        elif not is_repo(where):
-            step["problems"].append(f"{step['path']} is not a git repository - there "
-                                    f"is no branch to make and no base to record")
+        if f["state"] == "unknown":
+            step["problems"].append(f"{f['path']} is not a directory" if not f["where"].is_dir()
+                                    else f"`{f['name']}`'s repository could not be determined "
+                                         f"({f['why']})")
+        elif f["state"] == "none":
+            step["problems"].append(f"`{f['name']}` is not in a git repository, so it cannot "
+                                    f"have a worktree")
         else:
-            # `intake.dirty_paths`, not a second `git status` — the run ledger is
-            # written INTO a single-repo target by intake itself, so a check that
-            # does not exclude it refuses every run on the harness's headline case.
-            dirty, why = intake_mod.dirty_paths(where)
-            if dirty is None:
-                step["problems"].append(f"{step['path']}: {why}")
-            elif dirty:
-                step["problems"].append(
-                    f"{step['path']} has {len(dirty)} uncommitted change(s) - the "
-                    f"base commit would describe a tree nobody can reconstruct, and "
-                    f"the run's diffs would carry someone else's work: "
-                    + ", ".join(dirty[:5]))
-            step["base"] = git(where, "rev-parse", "HEAD", check=False)
-            if not step["base"]:
-                step["problems"].append(f"{step['path']} has no commits yet")
-            if git(where, "rev-parse", "--verify", "--quiet", step["branch"], check=False):
-                step["problems"].append(f"branch {step['branch']} already exists in "
-                                        f"{step['path']}")
-        out.append(step)
-    return out
+            groups.setdefault((f["key"], f["branch"]), []).append(f)
+
+    # `vcs.deny_raw_git` over EVERY component the profile declares in a repository the run
+    # touches, in the run or not, by its value - any tree is that repository's second `.git`,
+    # whichever component the run holds (D25-12, D25-36b, D25-37, D25-53c).
+    for key in sorted({f["key"] for f in in_run if f["state"] == "repo"}):
+        mates = [f for f in facts if f["state"] == "repo" and f["key"] == key]
+        trues = [f for f in mates if f["vcs"].get("deny_raw_git")]
+        falses = [f for f in mates if not f["vcs"].get("deny_raw_git")]
+        if trues and falses:
+            lead = next(step_of[id(f)] for f in mates if id(f) in step_of)
+            lead["problems"].append(
+                f"`{trues[0]['name']}` ({trues[0]['path']}) sets vcs.deny_raw_git true and "
+                f"`{falses[0]['name']}` ({falses[0]['path']}) false in {PROFILE_REL}, but they are "
+                f"one repository, and any tree is its second .git whichever of them a run "
+                f"holds; set deny_raw_git true for both, or give them separate repositories")
+
+    checkouts_checked: set[str] = set()
+    repos_checked: set[str] = set()
+    for (key, branch), members in groups.items():
+        namer = next(f for f in facts
+                     if f["state"] == "repo" and f["key"] == key and f["branch"] == branch)
+        tree = tree_at(policy, Path(target), run_id, namer["name"])
+        lead = step_of[id(members[0])]
+        problems: list[str] = []
+        if why := guardrails.tree_name_problem(namer["name"]):
+            problems.append(f"component `{namer['name']}` names this run's tree for its "
+                            f"repository's components on branch {branch}, and {why}; rename "
+                            f"it in the profile")
+        else:
+            wall = (root_of(policy, Path(target)) / run_id).resolve()
+            try:
+                inside = tree.resolve().relative_to(wall) != Path(".")
+            except ValueError:
+                inside = False
+            if not inside:
+                problems.append(f"the tree {tree} resolves outside {wall}; rename "
+                                f"`{namer['name']}` in the profile")
+        rows = [(n, e) for n, e in record["components"].items()
+                if isinstance(e, dict) and e.get("mode") == "worktree"
+                and _same(tree_of(e), tree)]
+        checkout = Path(members[0]["checkout"])
+        live = bool(rows) and _is_live(checkout, tree, rows)
+        if live:
+            # A component joining takes the tree's recorded branch and base, whatever its own
+            # checkout's `HEAD` is: the two-commit refusal judges a tree's FIRST creation (D25-96).
+            base = str(max(rows, key=lambda r: str(r[1].get("at") or ""))[1].get("base") or "")
+        else:
+            heads: dict[str, list[dict]] = {}
+            for f in members:
+                heads.setdefault(f["checkout"], []).append(f)
+            commits = {co: git(Path(co), "rev-parse", "HEAD", check=False) for co in heads}
+            if len(set(commits.values())) > 1:
+                c1 = next(iter(heads))
+                f1 = heads[c1][0]
+                c2, f2 = next((co, fs[0]) for co, fs in heads.items()
+                              if commits[co] != commits[c1])
+                problems.append(
+                    f"`{f1['name']}` (at `{c1}`, HEAD `{commits[c1][:12]}`) and `{f2['name']}` "
+                    f"(at `{c2}`, HEAD `{commits[c2][:12]}`) would share one tree but start from "
+                    f"two commits; one tree has one base, so check one out at the other's "
+                    f"commit (`git -C {c2} checkout --detach {commits[c1]}`, which moves that "
+                    f"checkout), give them per-component branch patterns (a tree each), or run "
+                    f"them as two runs")
+            base = commits[members[0]["checkout"]]
+            if not base and key not in repos_checked:
+                problems.append(f"{members[0]['path']} has no commits yet")
+            repos_checked.add(key)
+            if git(checkout, "rev-parse", "--verify", "--quiet", branch, check=False):
+                problems.append(f"branch {branch} already exists in {members[0]['path']}")
+                if rows:
+                    notes.append(f"this run's record names the removed tree {tree} "
+                                 f"({', '.join(n for n, _ in rows)}), which left branch "
+                                 f"{branch} behind")
+            # The DESTINATION is part of what a plan is about. `git worktree add`
+            # refuses an occupied one, and until item 156 nothing looked - so that
+            # refusal arrived half way through creation, with the trees before it
+            # already made. Validated here, the common case never gets that far.
+            if tree.exists() and (not tree.is_dir() or any(tree.iterdir())):
+                problems.append(f"{namer['name']}: {tree} is not empty - git worktree add "
+                                f"refuses an occupied destination. A stopped run leaves one; "
+                                f"remove it, or use a different run id")
+            for co, fs in heads.items():
+                if co in checkouts_checked:
+                    continue
+                checkouts_checked.add(co)
+                # `intake.dirty_paths`, not a second `git status` - the run ledger is written
+                # INTO a single-repo target by intake itself. Asked once per CHECKOUT: `git
+                # status` answers for the checkout it is asked in (round 2).
+                dirty, why = intake_mod.dirty_paths(Path(co))
+                who = ", ".join(f"`{f['name']}`" for f in fs)
+                if dirty is None:
+                    problems.append(f"{co} ({who}): {why}")
+                elif dirty:
+                    problems.append(
+                        f"{co}, the checkout of {who}, has {len(dirty)} uncommitted change(s) "
+                        f"- the base commit would describe a tree nobody can reconstruct, and "
+                        f"the run's diffs would carry someone else's work: "
+                        + ", ".join(dirty[:5]))
+
+        # Over the components that will share this tree, those this run already recorded in it
+        # included - their `vcs` re-read from the profile by name (D25-38).
+        mates = list(members)
+        for n, _ in rows:
+            if not any(f["name"] == n for f in mates):
+                mates += [f for f in facts if f["name"] == n][:1]
+        if len(mates) > 1:
+            for field in ("push_remote", "commit_command", "push_command"):
+                values: dict[str, dict] = {}
+                for f in mates:
+                    values.setdefault(str(f["vcs"].get(field) or "").strip(), f)
+                if len(values) > 1:
+                    (v1, f1), (v2, f2) = list(values.items())[:2]
+                    problems.append(
+                        f"`{f1['name']}` ({f1['path']}) sets vcs.{field} {v1!r} and "
+                        f"`{f2['name']}` ({f2['path']}) {v2!r} in {PROFILE_REL}, but they would "
+                        f"share one tree and its branch; make them agree, or give one a branch "
+                        f"pattern of its own, which gives it a tree of its own")
+            for f in mates:
+                if f["comp"].get("role") == "fork":
+                    other = next(g for g in mates if g is not f)
+                    problems.append(
+                        f"`{f['name']}` is a fork and would share a tree with `{other['name']}` "
+                        f"- pushing the tree's branch would push the fork's directory with the "
+                        f"rest; give `{f['name']}` a branch pattern of its own, which gives it a "
+                        f"tree of its own; or change its role")
+
+        recorded = {n for n, _ in rows}
+        mate = sorted(recorded)[0] if recorded else ""
+        for f in members:
+            step = step_of[id(f)]
+            step.update(tree=str(tree), home=str(tree / f["place"]) if f["place"] else str(tree),
+                        base=base, place=f["place"], checkout=f["checkout"], live=live)
+            if live and f["name"] in recorded:
+                held = record["components"][f["name"]]
+                if held.get("path") != f["path"]:
+                    step["problems"].append(
+                        f"the record holds `{f['name']}` at {held.get('path')} and the profile at "
+                        f"{f['path']}; restore the profile's path for this run, or start a new "
+                        f"run")
+                step["accepted"] = True
+                continue
+            if not f["place"] or not base:
+                continue        # a root component's empty place is never asked (D25-135)
+            if live:
+                head = git(tree, "rev-parse", "HEAD", check=False)
+                answer = place_entry(tree, head, f["place"]) if head else ("error", "no HEAD")
+                if answer[0] not in ("dir", "submodule"):
+                    step["problems"].append(_join_problem(run_id, f["name"], f["place"], tree,
+                                                          head, base, answer, mate))
+            elif why := _place_problem(f["name"], f["place"], base,
+                                       place_entry(Path(f["checkout"]), base, f["place"])):
+                step["problems"].append(why)
+        lead["problems"] += problems
+    return {"steps": steps, "notes": notes}
 
 
 def _unwind(made: list[tuple[Path, Path, str]]) -> tuple[list[str], list[str]]:
@@ -417,11 +742,19 @@ def _unwind(made: list[tuple[Path, Path, str]]) -> tuple[list[str], list[str]]:
 
 def create(target: Path, run_id: str, names: list[str] | None = None,
            dry_run: bool = False) -> dict:
-    """Make this run's branches and trees. All or nothing.
+    """Make this run's branches and trees. All or nothing. Returns the record, with the plan's
+    `notes`, and the components it `made` and `accepted` beside it (D25-79, D25-93) - never in the
+    committed record.
 
-    A partial creation is worse than none: half the components isolated and half
-    not is a run whose diffs come from two different worlds. So every problem is
+    A partial creation is worse than none: some components in the run's trees and some not is a
+    run whose diffs come from two different worlds. So every problem is
     found first, and the first one refuses the whole thing.
+
+    **One `git worktree add` per tree** (T550): a group of one repository's components on one
+    branch gets one tree, each component registered at its own directory inside it; a group
+    whose tree this run already has registers with no `worktree add`, and a component already
+    recorded there is accepted and left as it is - but for a stale `removed_at`, which is cleared
+    (D25-92), as re-making a tree clears it on every row naming it (D25-101).
 
     **And a failure the plan could not foresee is unwound rather than left.**
     Validation closes the common case; it cannot close a race, a permission or a
@@ -433,17 +766,21 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     what it took - for ANY failure after the first tree exists, the record write
     included, because a raise one step outside the unwind leaves the same state.
     """
-    steps = plan(target, run_id, names)
+    planned = plan(target, run_id, names)
+    steps, notes = planned["steps"], planned["notes"]
     if problems := [p for s in steps for p in s["problems"]]:
         raise WorktreeError(f"{len(problems)} problem(s), and none of the trees were "
-                            f"made: " + "; ".join(problems))
+                            f"made: " + "; ".join(problems), notes)
     if not steps:
-        raise WorktreeError("no components to work in")
+        raise WorktreeError("no components to work in", notes)
     record = load_record(target, run_id)
     if dry_run:
-        return {"components": {s["name"]: s for s in steps}, "dry_run": True}
+        return {"components": {s["name"]: s for s in steps}, "dry_run": True, "notes": notes}
     policy = guardrails.load(target)
     made: list[tuple[Path, Path, str]] = []
+    remade: list[str] = []
+    fresh: list[str] = []
+    accepted: list[str] = []
     # The guarded region is EVERYTHING after the first tree can exist, not just
     # the `worktree add`. The record write was one step outside it, and with no
     # run folder - a run id nobody opened, or a ledger removed under a live run
@@ -452,22 +789,38 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     # unwind exists to prevent, reached one step past where it was watching.
     try:
         for s in steps:
-            if s["mode"] == "worktree":
-                spot = Path(s["home"])
+            if s["mode"] == "worktree" and not s.get("live") \
+                    and not any(_same(s["tree"], t) for t in remade):
+                spot = Path(s["tree"])
                 claim_root(policy, Path(target))
                 spot.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    git(Path(s["where"]), "worktree", "add", "-b", s["branch"],
+                    git(Path(s["checkout"]), "worktree", "add", "-b", s["branch"],
                         str(spot), s["base"])
                 except WorktreeError as exc:
                     raise WorktreeError(f"{s['name']}: {exc}") from None
-                made.append((Path(s["where"]), spot, s["branch"]))
+                made.append((Path(s["checkout"]), spot, s["branch"]))
+                remade.append(s["tree"])
+            if s.get("accepted"):
+                held = record["components"][s["name"]]
+                rows = [e for e in record["components"].values()
+                        if isinstance(e, dict) and _same(tree_of(e), s["tree"])]
+                newest = max(str(e.get("at") or "") for e in rows)
+                if held.get("removed_at") and str(held["removed_at"]) < newest:
+                    held.pop("removed_at")
+                accepted.append(s["name"])
+                continue
             record["components"][s["name"]] = {
                 "mode": s["mode"], "path": s["path"], "branch": s["branch"],
                 "pattern": s["pattern"], "base": s.get("base", ""),
                 "home": s.get("home", s["where"]), "role": s["role"],
                 "why": s.get("why", ""), "at": _now(),
+                **({"tree": s["tree"]} if s["mode"] == "worktree" else {}),
             }
+            fresh.append(s["name"])
+        for entry in record["components"].values():
+            if isinstance(entry, dict) and any(_same(tree_of(entry), t) for t in remade):
+                entry.pop("removed_at", None)
         record["run_id"] = run_id
         save_record(target, run_id, record)
     except WorktreeError as exc:
@@ -485,8 +838,8 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
                    f"component - before re-running this run id")
         else:
             end = ". No record was written: this run has no trees."
-        raise WorktreeError(f"{exc}. All or nothing, so {took}{end}") from None
-    return record
+        raise WorktreeError(f"{exc}. All or nothing, so {took}{end}", notes) from None
+    return {**record, "notes": notes, "made": fresh, "accepted": accepted}
 
 
 def base_of(target: Path, run_id: str, name: str) -> str:
@@ -898,8 +1251,12 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {name:<20} {e['mode']:<9} {e.get('branch', '')}  {where}")
                     if e.get("why"):
                         print(f"      {e['why']}")
+                # Each of the plan's notes on a line of its own (D25-58, D25-81).
+                for note in result.get("notes") or []:
+                    print(f"  note: {note}")
                 print("(plan only - nothing was made)" if args.dry_run else
-                      f"{len(result['components'])} component(s) ready")
+                      f"{len(result['components'])} component(s) ready - made "
+                      f"{len(result['made'])}, accepted {len(result['accepted'])}")
             return 0
         if args.list:
             if not args.run:
@@ -953,6 +1310,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if result["conflicts"] else 0
     except (WorktreeError, guardrails.PolicyError, RuntimeError, ValueError) as exc:
         print(f"!! {exc}")
+        # A refusal prints the plan's notes beside its problems: they say how widely the
+        # checks reached (D25-69).
+        for note in getattr(exc, "notes", None) or []:
+            print(f"  note: {note}")
         return 2
     ap.print_help()
     return 2
