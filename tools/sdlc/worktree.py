@@ -4,8 +4,12 @@ Item 35 shipped the WALL — `confinement()` refuses a write outside
 `<worktrees_root>/<run-id>` — and nothing had ever created the thing it guards.
 Agents were told to work in a worktree by prose in an SOP, and prose is not a
 directory. This module is the mechanism: one branch and one linked worktree per
-touched component, a base commit recorded at P4 start so every later diff is
-against a fixed point, and removal at closure.
+touched repository and branch pattern - components of one repository whose
+patterns give one branch share one tree, each working in its own directory
+inside it, so they are isolated from each other only where the components are
+on different branches or in different repositories (T550) - a base commit
+recorded at P4 start so every later diff is against a fixed point, and removal
+at closure.
 
 Three properties are the item, and each is a way concurrency goes wrong:
 

@@ -279,8 +279,9 @@ STAGES: tuple[Stage, ...] = (
         Value("component", "caller", "the component this agent owns; one agent, one"),
         Value("branch", "caller", "the branch the work lands on"),
         Value("worktree", "run",
-              "the isolated checkout to work in; the run's own record says "
-              "where, so nobody has to be told twice"),
+              "the run's tree to work in - isolated where the components are on "
+              "different branches or in different repositories; the run's own "
+              "record says where, so nobody has to be told twice"),
     ), reads=(DESIGN,)),
     Stage("P5", "test", ("50-tests.md",), (SCOPE_ADD,), "", "", (
         Value("test-command", "profile:test_command",

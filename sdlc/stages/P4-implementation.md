@@ -10,7 +10,7 @@ after_gate: []
 needs: none
 gate: G3
 ---
-# P4 · implementation — one agent per component, isolated, and it never pushes
+# P4 · implementation — one agent per component, isolated where the components are on different branches or in different repositories, and it never pushes
 
 ## Purpose
 
@@ -66,14 +66,19 @@ stranger's repository quietly gaining a `.venv`.
    tools/sdlc/worktree.py --target <repo> --run <id> --create
    ```
 
-   One branch and one linked worktree per component, under the worktrees root
-   the repository's own policy names. It records the **base commit** for each,
+   One branch and one linked worktree per repository and branch pattern, under
+   the worktrees root the repository's own policy names: components of one
+   repository whose patterns give one branch share one tree, each working in its
+   own directory inside it, so they are isolated from each other only where the
+   components are on different branches or in different repositories - declare
+   per-component patterns that give different branches to keep them apart, or
+   sequence them. It records the **base commit** for each tree,
    which every later diff in this run is computed against. Add `--dry-run`
    first to see the plan without making anything, and `--component <name>` to
    limit it.
 
    It refuses the whole set rather than making half of them: a run with some
-   components isolated and some not produces diffs from two different worlds.
+   components in its trees and some not produces diffs from two different worlds.
    A dirty component is one of those refusals — a base commit recorded over
    uncommitted work describes a tree nobody can reconstruct.
 2. **A component with `vcs.deny_raw_git` gets no worktree**, and the record says
