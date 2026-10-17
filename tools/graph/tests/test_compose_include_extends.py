@@ -581,3 +581,19 @@ def test_an_inherited_value_a_nearer_base_leaves_unresolvable_is_rowed_by_that_b
     assert [(r["source_file"], r["line"], r["key"]) for r in rows] == [
         ("docker-compose.yml", 9, "other"), ("docker-compose.yml", 14, "topic")]
     assert "`base1` takes from `base2` through `extends:`" in rows[1]["why"]
+
+
+def test_an_inherited_unresolvable_value_names_the_base_that_writes_it(tmp_path):
+    """Review B24-10: `web` extends `b1`, which extends `b2`, and only `b2` writes `TOPIC: ${OTHER}`
+    - `web`'s own `OTHER: ${MISSING}` leaves it unresolvable, so `web` rows it where `b2` writes it,
+    naming `b2` as the base it takes it from, never its immediate base `b1`."""
+    built = build(tmp_path, s8(
+        "services:\n  web:\n    build: ../orders\n    extends: b1\n    environment:\n"
+        "      OTHER: ${MISSING}\n"
+        "  b1:\n    image: org/x:1\n    extends: b2\n"
+        "  b2:\n    image: org/x:1\n    environment:\n      OTHER: b2-other\n"
+        "      TOPIC: ${OTHER}\n"))
+    rows = sorted(built.kinds("compose-env-unresolved"), key=lambda r: r["line"])
+    assert [(r["source_file"], r["line"], r["key"]) for r in rows] == [
+        ("docker-compose.yml", 6, "other"), ("docker-compose.yml", 14, "topic")]
+    assert "which `web` takes from `b2` through `extends:`" in rows[1]["why"], rows[1]["why"]

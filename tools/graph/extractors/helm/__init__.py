@@ -670,8 +670,9 @@ def apart_charts(repo: RepoRef, inputs: Iterable[Path], config: dict) -> frozens
         rel = _rel(repo, path)
         if posixpath.basename(rel) not in VALUES_GLOBS:
             continue
-        if verdicts.get(posixpath.dirname(rel), ("", "", ""))[0] in (
-                "library", "refused", "unparsable"):
+        # Read by the rule `helm-deployments` decides by - one rule, read in one place (review
+        # B24-12).
+        if nothing_claimed(*verdicts.get(posixpath.dirname(rel), ("", "", ""))[:2]):
             continue
         doc, error = _load_values(path)
         name = logical_service(_flat(doc))[0] if not error and doc is not None else ""

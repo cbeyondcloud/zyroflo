@@ -1519,13 +1519,16 @@ class ComposeExtractor:
                        "package": package or deploy, "wins": False,
                        **({"inherited_from": f"{entry['file']}:{entry['line']}"}
                           if entry.get("inherited") else {})}))
+        # Its immediate base's own declaration resolves the whole chain beyond it - read once.
+        base_unresolved = (_resolve(base_declarations(bases, 0))["unresolved"] if brought
+                           else {})
         for key, miss in view["unresolved"].items():
             if key in brought:
-                # Its immediate base's own declaration resolves the whole chain beyond it, and
-                # rows - or defers - by this same rule where that chain leaves the value
-                # unresolved; where only this service's own environment does, overriding what
-                # the value names, it is rowed here, where its base writes it (review B24-3).
-                if key in _resolve(base_declarations(bases, 0))["unresolved"]:
+                # That base's declaration rows - or defers - by this same rule where its chain
+                # leaves the value unresolved; where only this service's own environment does,
+                # overriding what the value names, it is rowed here, where its base writes it
+                # (review B24-3).
+                if key in base_unresolved:
                     continue
                 res.unresolved.append({
                     "extractor": self.name,

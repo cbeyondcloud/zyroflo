@@ -223,8 +223,9 @@ profile = ""
 # values that file sets for the service are no longer read as the same-named
 # component's configuration (a service the file builds keeps them - a block refuses
 # no build - and so does a component's own namesake service), and a chart it names
-# publishes no host address for that component. An
-# edit to these blocks marks every published shard stale, as a [[canonical]] edit does.
+# publishes no host address for that component. An edit to a block's `service` or
+# `component` marks every published shard stale, as a [[canonical]] edit does; its
+# `note` reaches only the rows, so editing that alone stales nothing.
 
 # [[apart]]
 # service   = "redis"          # the service name the deployment file declares
