@@ -414,3 +414,132 @@ def test_a_service_with_its_own_build_is_never_placed_by_a_bases(tmp_path):
         assert "build_from" not in edge["props"]
     (row,) = [r for r in breaks.kinds("compose-extends-unresolved") if r["service"] == "web"]
     assert row["why"].endswith("It is placed by its own `build:`")
+
+
+# ── the environment a chain brings (decision 57; design pass 24, section 4) ───────────────
+
+#: S8: `web` builds `orders` and extends a base that sets `TOPIC`; `web` writes none.
+S8 = ("services:\n  web:\n    build: ../orders\n    extends: base\n"
+      "  base:\n    image: org/x:1\n    environment:\n      TOPIC: base-value\n")
+
+
+def s8(text: str = S8) -> dict:
+    return {"deploy": {"docker-compose.yml": text}, "orders": {"app.py": producer("TOPIC")}}
+
+
+def test_a_service_takes_the_environment_its_chain_brings(tmp_path):
+    """S8, D24-10: compose runs `web` with the base's `TOPIC`, and `web` is built from `orders`,
+    so `orders`' code reads `base-value` - `main` filed nothing under `orders`, `env-key-unset`."""
+    built = build(tmp_path, s8())
+    assert built.topics == ["topic:base-value"]
+    assert not [r for r in built.kinds("env-key-unset") if r["component"] == "orders"]
+    (edge,) = [e for e in built.edges if e.get("type") == "DG_CONFIGURES"
+               and e["props"].get("service") == "web"]
+    assert (edge["source_file"], edge["line"]) == ("docker-compose.yml", 2)
+    assert edge["props"]["inherited_from"] == "docker-compose.yml:8"
+    assert (edge["props"]["declared_as"], edge["props"]["raw"]) == ("TOPIC", "base-value")
+    assert edge["props"]["view"] == "orders" and edge["props"]["wins"] is True
+
+
+def test_the_services_own_value_wins_over_its_bases(tmp_path):
+    """D24-10: compose merges the base's `environment:` under the service's own - its value
+    wins, and nothing is inherited for that key."""
+    built = build(tmp_path, s8(S8.replace("    extends: base\n",
+                                          "    extends: base\n    environment:\n"
+                                          "      TOPIC: own-value\n")))
+    assert built.topics == ["topic:own-value"]
+    assert not [e for e in built.edges if e.get("type") == "DG_CONFIGURES"
+                and e["props"].get("inherited_from")]
+
+
+def test_the_nearer_base_wins_up_a_chain(tmp_path):
+    """D24-10: `web` extends `mid`, which extends `base`; both set `TOPIC` - compose merges
+    `base` into `mid` and `mid` into `web`, so `mid`'s value runs."""
+    built = build(tmp_path, s8(
+        "services:\n  web:\n    build: ../orders\n    extends: mid\n"
+        "  mid:\n    extends: base\n    environment:\n      TOPIC: mid-value\n"
+        "  base:\n    image: org/x:1\n    environment:\n      TOPIC: base-value\n"))
+    assert built.topics == ["topic:mid-value"]
+
+
+def test_a_broken_chain_brings_what_it_reached(tmp_path):
+    """D24-24: the chain reaches `mid` and breaks at `nope`, which no file declares - `mid`'s
+    environment is brought, and the chain's row says where it broke."""
+    built = build(tmp_path, s8(
+        "services:\n  web:\n    build: ../orders\n    extends: mid\n"
+        "  mid:\n    extends: nope\n    environment:\n      TOPIC: mid-value\n"))
+    assert built.topics == ["topic:mid-value"]
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert "reaches `mid` in `docker-compose.yml` through `extends:`" in row["why"], row["why"]
+
+
+def two_components(block: bool) -> dict:
+    """S8 in `deploy-a`, beside `deploy-b`'s own `web` building `orders` with `b-value`."""
+    return {"deploy-a": {"docker-compose.yml": S8},
+            "deploy-b": {"docker-compose.yml": "services:\n  web:\n    build: ../orders\n"
+                                               "    environment:\n      TOPIC: b-value\n"},
+            "orders": {"app.py": producer("TOPIC")},
+            **({"__canonical__": [{"service": "web", "owner": "deploy-a",
+                                   "path": "docker-compose.yml"}]} if block else {})}
+
+
+def test_a_block_naming_the_extending_services_file_selects_its_inherited_value(tmp_path):
+    """D24-37: the inherited value is ranked in the EXTENDING service's package - a block naming
+    `deploy-a/docker-compose.yml` selects it; with no block the last component by name wins."""
+    assert build(tmp_path / "1", two_components(False)).topics == ["topic:b-value"]
+    assert build(tmp_path / "2", two_components(True)).topics == ["topic:base-value"]
+
+
+def test_the_pass_reads_the_inherited_candidate_as_extraction_ranks_it(tmp_path):
+    """D24-79: the inherited key is published as `web`'s own `DG_CONFIGURES` edge, citing the base
+    (`inherited_from`) - so the pass's winner is the view's, and `deploy-b`'s row cites the
+    inherited value where the base writes it."""
+    built = build(tmp_path, two_components(True))
+    assert built.topics == ["topic:base-value"]
+    (row,) = [r for r in built.kinds("superseded-declaration")
+              if r.get("extractor") == "env-ranking"]
+    assert row["component"] == "deploy-b" and row["value"] == "b-value"
+    assert ("so `deploy-a`'s value `base-value` (`docker-compose.yml:8`) is what the graph "
+            "keeps") in row["why"], row["why"]
+
+
+def test_an_inherited_values_origin_is_the_file_its_base_writes_it_in(tmp_path):
+    """D24-37: `a` builds code and runs `payments`, which it does not build, from a base in another
+    of its compose files - `env-key-from-building-repo` names the base's file, where the value is
+    written, never the extending one."""
+    built = build(tmp_path, {
+        "a": {"docker-compose.yml": "services:\n  a:\n    build: .\n  payments:\n"
+                                    "    extends:\n      file: docker-compose.base.yml\n"
+                                    "      service: base\n",
+              "docker-compose.base.yml": "services:\n  base:\n    image: org/x:1\n"
+                                         "    environment:\n      TOPIC: base-value\n",
+              "app.py": "x = 1\n"},
+        "payments": {"app.py": producer("TOPIC")}})
+    assert built.topics == ["topic:base-value"]
+    (row,) = built.kinds("env-key-from-building-repo")
+    assert row["origin"] == "a/docker-compose.base.yml"
+
+
+def test_an_inherited_unresolved_value_is_rowed_once_by_its_base(tmp_path):
+    """The base's own declaration rows `${MISSING}` where it is written; the service extending it
+    from another file brings the key and rows nothing - a second row would cite the extending file
+    at the base's line."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": "services:\n  web:\n    build: ../orders\n"
+                                         "    extends:\n      file: docker-compose.base.yml\n"
+                                         "      service: base\n",
+                   "docker-compose.base.yml": "services:\n  base:\n    image: org/x:1\n"
+                                              "    environment:\n      TOPIC: ${MISSING}\n"},
+        "orders": {"app.py": producer("TOPIC")}})
+    rows = built.kinds("compose-env-unresolved")
+    assert [(r["source_file"], r["line"]) for r in rows] == [("docker-compose.base.yml", 5)], rows
+
+
+def test_an_inherited_values_readings_ride_on_its_edge(tmp_path):
+    """D24-79: the inherited edge carries what every compose `DG_CONFIGURES` edge carries - its
+    value's typed readings among them, which the pass's endings read."""
+    built = build(tmp_path, s8(S8.replace("TOPIC: base-value", "TOPIC: yes")))
+    (edge,) = [e for e in built.edges if e.get("type") == "DG_CONFIGURES"
+               and e["props"].get("service") == "web"]
+    assert edge["props"]["inherited_from"] == "docker-compose.yml:8"
+    assert edge["props"]["readings"], edge["props"]

@@ -160,9 +160,14 @@ class EnvRankingPass:
                            key=lambda e: (e.source_file, e.line)):
             component = canonical.component_of(edge, nodes_by_id)
             key = ids.relaxed_key(str(edge.props.get("declared_as", "")))
+            # An inherited value is cited where its base writes it (decision 57, D24-79).
+            file, line = edge.source_file, edge.line
+            written = str(edge.props.get("inherited_from") or "")
+            if written.rpartition(":")[2].isdigit():
+                file, line = written.rpartition(":")[0], int(written.rpartition(":")[2])
             candidates.setdefault((str(edge.props["view"]), key), {}).setdefault(component, {
-                "value": str(edge.props.get("value", "")), "file": edge.source_file,
-                "line": edge.line, "service": str(edge.props.get("service", "")),
+                "value": str(edge.props.get("value", "")), "file": file,
+                "line": line, "service": str(edge.props.get("service", "")),
                 "readings": list(edge.props.get("readings") or ()),
                 "package": str(edge.props.get("package", "")), "component": component})
 

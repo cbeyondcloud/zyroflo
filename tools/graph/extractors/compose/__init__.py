@@ -72,8 +72,11 @@ name, another component, a declared child, a path compose interpolates or fetche
 whose services could not be read) is a row naming why. A chain is followed whole, whatever
 places the service - its own `build:` included - since compose resolves every base: a base
 the graph cannot reach is a row (the owner's decision 40, and batch 21's review), and the
-claim stays the component's unless a build places it. The env view does not move (ruling
-10): a service's values stay where `main` files them, whatever its base builds.
+claim stays the component's unless a build places it. The env view follows the placement
+(decision 55), and a service takes the environment its chain brings (decision 57): each base's
+`environment:`, nearest first, where nothing nearer writes the key - cited where the base writes
+it, published as the extending service's own `DG_CONFIGURES` edge with `inherited_from`, and
+ranked in the extending service's package; a chain that breaks brings what it reached.
 
 ## `${VAR:-default}`
 
@@ -467,6 +470,9 @@ class Decl(NamedTuple):
     #: quoted name (`"my api":`) was looked for in the text as written bare, never found,
     #: and every edge and row about the service cited line 0.
     line: int
+    #: Batch 24 (decision 57): the bases its `extends:` chain reaches, nearest first - each
+    #: `(file, name, node)` - whose `environment:` it takes where nothing nearer writes the key.
+    bases: tuple = ()
 
 
 def _body(node: Any) -> dict | None:
@@ -585,6 +591,10 @@ class Chain(NamedTuple):
     #: Where it broke at a `file:` naming a file this reader does not read, `reach`'s reason -
     #: every reason but "names no file", which compose refuses (batch 23, D23-119).
     extends_unread: str = ""
+    #: Every base the chain reached, nearest first - `(file, name, node)` - up to where it ends
+    #: or breaks: compose merges each base's `environment:` into the service, the nearer
+    #: winning, and a broken chain brings what it reached (decision 57, D24-24).
+    bases: tuple = ()
 
 
 def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
@@ -601,9 +611,11 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     current, cur_name, cur_rel = service, name, rel
     seen = {(rel, name)}
     img: tuple[Any, str] = (None, "")
+    reached: list[tuple[str, str, Any]] = []
 
     def done(chain: Chain, unread: str = "") -> Chain:
-        return chain._replace(image=img[0], image_from=img[1], extends_unread=unread)
+        return chain._replace(image=img[0], image_from=img[1], extends_unread=unread,
+                              bases=tuple(reached))
 
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
@@ -666,6 +678,7 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
             return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
                               via + why, declared_at), unread)
         seen.add((base_rel, named))
+        reached.append((base_rel, named, entry[2]))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
 
@@ -707,7 +720,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     placed_in: dict[str, dict[str, list[tuple[str, str]]]] = {}
     declaring: dict[str, set[str]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int, tuple[str, str, str, bool, bool, str], tuple[Any, str]]] = []
+                       int, tuple[str, str, str, bool, bool, str, tuple],
+                       tuple[Any, str]]] = []
     building = False
 
     def dir_of(rel: str) -> str:
@@ -736,7 +750,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         for key_node, node, service in declared[rel]:
             name = str(key_node.value)
             declares, context = _context_of(service)
-            context_dir, followed = file_dir, ("", "", "", False, False, "")
+            context_dir, followed = file_dir, ("", "", "", False, False, "", ())
             where, extended_from = "this file", ""
             # The image it runs with (batch 23): an `image:` it writes decides, as compose
             # merges a service's own key over a base's; else its chain's, below.
@@ -758,7 +772,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 # WROTE that build's context, which alone stops T588's layering (B21-25).
                 followed = ((chain.build_from or chain.declared_at) if not own else "",
                             chain.why, chain.extends, own, bool(chain.build_from) and not own,
-                            chain.extends_unread)
+                            chain.extends_unread, chain.bases)
                 if own_image is None:
                     imaged = (chain.image, chain.image_from)
             comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
@@ -797,7 +811,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
     own_place: dict[tuple[str, int], str] = {}
     for rel, name, node, service, decl, how, line, followed, imaged in pending:
-        frm, unfollowed, written, _own, context_brought, unread = followed
+        frm, unfollowed, written, _own, context_brought, unread, bases = followed
         view = env_view(name, rel, decl[0], decl[1], how, placed_in.get(name, {}),
                         declaring.get(name, set()))
         claim = _claim(name, *decl, own=repo.alias, building=building,
@@ -813,7 +827,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         own_written = _yaml.mapping_get(node, "image")
         own_place[(rel, len(items))] = (f"{rel}:{_yaml.line_of(own_written)}"
                                         if own_written is not None else "")
-        items.append(Decl(name, node, service, claim, line))
+        items.append(Decl(name, node, service, claim, line, bases))
     for override, base_rel in layers.items():
         if override not in decls:
             continue
@@ -1277,14 +1291,14 @@ class ComposeExtractor:
             self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
                           owned, held, decl.line, placed=decl.claim,
                           files=(on_node or {}).get(decl.claim.target, [rel]), env=env,
-                          package=pkg, declared=declared)
+                          package=pkg, declared=declared, bases=decl.bases)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, node: Any,
                  views: dict[str, dict], owned: dict[str, set[str]],
                  held: dict[str, dict[str, tuple[str, ...]]], line: int, *,
                  placed: Claim, env: dict, files: list[str] | None = None,
-                 package: str = "", declared: str = "") -> None:
+                 package: str = "", declared: str = "", bases: tuple = ()) -> None:
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
         # naming one service produce two of these, identically, and the workspace's own
         # [[canonical]] block decides — never this extractor, which cannot see intent.
@@ -1354,16 +1368,30 @@ class ComposeExtractor:
                 service=name, components=list(placed.ambiguous)))
 
         entries = environment_entries(_yaml.mapping_get(node, "environment"))
-        if not entries:
+        # Decision 57: what its `extends:` chain brings - each base's environment, nearest
+        # first, where neither the service nor a nearer base writes the key, as compose merges
+        # a base's `environment:` under the service's own (design pass 24, section 4). Cited
+        # where its base writes it; its rows are the base's own declaration's, never repeated.
+        known = {ids.relaxed_key(e["key"]) for e in entries}
+        inherited: list[dict] = []
+        for base_rel, _base_name, base_node in bases:
+            for e in environment_entries(_yaml.mapping_get(base_node, "environment")):
+                if ids.relaxed_key(e["key"]) not in known:
+                    known.add(ids.relaxed_key(e["key"]))
+                    inherited.append({**e, "file": base_rel})
+        if not entries and not inherited:
             return
         declarations = [{"key": e["key"], "value": e["value"], "file": rel,
-                         "line": e["line"]} for e in entries]
+                         "line": e["line"]} for e in entries] + [
+            {"key": e["key"], "value": e["value"], "file": e["file"], "line": e["line"],
+             "inherited": True} for e in inherited]
+        brought = {ids.relaxed_key(e["key"]) for e in inherited}
         view = _resolve(declarations)
         view_key = placed.view
         views.setdefault(view_key, {"values": {}, "unresolved": {}})
         claim = canonical_claim(ctx.config, name, repo.alias, files or [rel])
         written: set[str] = set()
-        readings_of = {ids.relaxed_key(e["key"]): e["readings"] for e in entries}
+        readings_of = {ids.relaxed_key(e["key"]): e["readings"] for e in entries + inherited}
         superseded = _merge(views[view_key], view,
                             owned.setdefault(view_key, set()),
                             contested=claim is not None,
@@ -1371,21 +1399,21 @@ class ComposeExtractor:
                             held=held.setdefault(view_key, {}),
                             readings=readings_of,
                             written=written)
-        # Ruling 4: where each value the view now holds came from, in a compose-private
-        # table beside the shared view, so a component reading a value a building repo set
-        # for a service it does not build is told so (`origin_for`). Recorded for the keys
-        # the merge says it wrote from this file, never inferred by comparing entries.
+        # Ruling 4: whose each value the component's view now holds is, beside it - its
+        # service, `local` and `unplaced` for `env-key-from-building-repo`, and the package its
+        # candidate is ranked in. `_publish` writes the shared origin table from the winner:
+        # its component, and the file its entry cites - the base's for an inherited value
+        # (D24-13, D24-37). Recorded for the keys the merge says it wrote from this file,
+        # never inferred by comparing entries.
         origins = env["origins"].setdefault(view_key, {})
-        # Where each superseded value was held from BEFORE this file's values land - another
-        # of this component's files, the views being the component's own (batch 24).
+        # Whose each superseded value was BEFORE this file's values land - another of this
+        # component's declarations, the views being the component's own (batch 24).
         prior = {row["key"]: origins.get(row["key"]) for row in superseded}
         for relaxed in sorted(written):
-            origins[relaxed] = {"component": repo.alias, "file": rel,
-                                "service": name, "local": placed.local,
+            origins[relaxed] = {"service": name, "local": placed.local,
                                 # A build this file declares and nothing could place is
                                 # not "a container it does not build" (D534-35).
                                 "unplaced": bool(placed.unplaced or placed.ambiguous),
-                                # Batch 24: the package its candidate is ranked in.
                                 "package": package or deploy}
         for row in superseded:
             # The row names the DROPPED declaration where it is written. This file's value
@@ -1457,19 +1485,27 @@ class ComposeExtractor:
             # and package it is filed under, whether it resolved (an unresolved value was never
             # a candidate), what it may be read as, and, once the component's files are all
             # read, whether it is the component's own winner (`wins`, set in `_publish`).
-            env["configures"].append((len(res.edges), view_key, relaxed, rel, entry["line"],
-                                      name))
+            # `wins` is judged where the value is written: an inherited one, the base's place.
+            env["configures"].append((len(res.edges), view_key, relaxed, entry["file"],
+                                      entry["line"], name))
+            # An inherited key is the extending service's own edge (D24-79): from its file's
+            # `cfg` node, at its declaration line, citing where the base writes it.
+            here = line if entry.get("inherited") else entry["line"]
             res.edges.append(Edge(
                 src=cfg, type="DG_CONFIGURES", dst=envkey, source_file=rel,
-                line=entry["line"], extractor=self.name, confidence=1.0,
+                line=here, extractor=self.name, confidence=1.0,
                 provenance=Provenance.EXTRACTED,
                 props={"declared_as": entry["key"], "service": name,
                        "value": resolved["value"] if resolved else "",
                        "raw": entry["value"], "view": view_key,
                        "resolved": resolved is not None,
                        "readings": list(readings_of.get(relaxed, ())),
-                       "package": package or deploy, "wins": False}))
+                       "package": package or deploy, "wins": False,
+                       **({"inherited_from": f"{entry['file']}:{entry['line']}"}
+                          if entry.get("inherited") else {})}))
         for key, miss in view["unresolved"].items():
+            if key in brought:
+                continue        # the base's own declaration rows it
             res.unresolved.append({
                 "extractor": self.name,
                 "kind": "compose-env-unresolved", "component": repo.alias, "key": key,
