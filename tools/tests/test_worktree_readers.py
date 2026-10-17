@@ -91,9 +91,14 @@ def drop(where: Path, rel: str, message: str = "drop it") -> None:
 
 
 def init(path: Path) -> Path:
+    """A repository with its own committer identity, which its worktrees share: `rebase`
+    replays the run's commits, and the CI image's user has no global identity."""
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(path), "init", "-q", "-b", "main"], check=True,
                    timeout=120, capture_output=True)
+    for key, value in (("user.email", "dev@x.invalid"), ("user.name", "Dev")):
+        subprocess.run(["git", "-C", str(path), "config", key, value], check=True,
+                       timeout=120, capture_output=True)
     return path
 
 
