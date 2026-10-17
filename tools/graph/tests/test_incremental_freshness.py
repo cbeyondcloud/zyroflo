@@ -316,7 +316,8 @@ def test_a_published_tree_moved_to_another_directory_stays_fresh(tmp_path):
 
 def test_a_comment_line_above_any_block_changes_no_stamp(tmp_path):
     """A block's citation is its line, and a line moves when a comment is added above
-    it. Only the [[canonical]] blocks are stamped, and without their citations."""
+    it. Only the [[canonical]] and - since batch 24 (T621, A') - [[apart]] blocks are
+    stamped, and without their citations (an [[apart]] block without its `note` too)."""
     work = ws(tmp_path)
     toml = work / "workspace.toml"
     toml.write_text(toml.read_text(encoding="utf-8")

@@ -431,8 +431,9 @@ def test_a_configuration_change_says_what_the_configuration_covers(tmp_path):
     spawn(tmp_path, "--from-snapshot")
     (line,) = narrowed(tmp_path)
     assert f"stale - {STALE_CONFIG}" in line
-    assert ("the `[[canonical]]` blocks, the layout, the profile's name, and each "
-            "component's own path as recorded, role, stack and shallow flag") in line
+    # Batch 24 (T621, A'): the `[[apart]]` blocks are stamped too.
+    assert ("the `[[canonical]]` and `[[apart]]` blocks, the layout, the profile's name, and "
+            "each component's own path as recorded, role, stack and shallow flag") in line
 
 
 def test_a_long_group_admits_its_cap(tmp_path):

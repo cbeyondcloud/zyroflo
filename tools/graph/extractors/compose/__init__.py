@@ -36,9 +36,12 @@ a name matching is a coincidence that usually holds.
 
 ## The cache contract
 
-`ctx.cache["composeenv"][<component alias or service name>]` has **exactly the shape the
-properties extractor publishes**, so `properties.lookup()` reads it unchanged and there is
-one resolution rule rather than two that can disagree:
+`ctx.cache["composeenv"][<view>]` has **exactly the shape the properties extractor
+publishes**, so `properties.lookup()` reads it unchanged and there is one resolution rule
+rather than two that can disagree. A view is a component's name - the one its build places a
+declaration on, or the service's name, which the component named like it reads (decision 55) -
+or, for a claim an `[[apart]]` block names that no build places, the claim's own node key,
+`<service>@<declaring component>`, which no component reads (T621, A'):
 
     {"values": {"<relaxed key>": {"value", "file", "line", "raw", "spellings"}},
      "unresolved": {"<relaxed key>": {"raw", "missing", "file", "line"}}}
@@ -487,6 +490,24 @@ def _body(node: Any) -> dict | None:
     return None
 
 
+def apart_view(claim: Claim, name: str, declaring: str, apart: list[dict]) -> str:
+    """The view a declaration's settings keep where an `[[apart]]` block names its pair (T621,
+    A'; design pass 24, section 5), the rules in order: a claim of its component's OWN namesake
+    service - `_claim`'s namesake test, never `own == edge.dst`, which every compose claim meets
+    (D24-71, D24-77, D24-89) - has no join to refuse, and keeps its view; a claim a build places -
+    a `-f` layer keyed with its component's building files among them, a workspace contradicting
+    itself (D24-43) - keeps it, since a block refuses no build (D24-7); any other is filed under
+    its own claim's node key, `<service>@<declaring component>`, a view no component's code
+    reads: it feeds neither the component named like the service nor the declaring component's
+    own code (D24-8, D24-16)."""
+    if ids.service_id(name, declaring) == ids.component_service_id(declaring):
+        return claim.view
+    if claim.mapped_by == "build" or not any(
+            _canonical.apart_pair(block, declaring, name) for block in apart):
+        return claim.view
+    return ids.service_id(name, declaring).removeprefix("svc:")
+
+
 def env_view(name: str, rel: str, declares: bool, comp: str, how: str,
              placed_in: dict[str, list[tuple[str, str]]], declaring: set[str]) -> str:
     """The env view a declaration's values are published under (decision 55, design pass 24 -
@@ -810,12 +831,15 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: written ("" where it writes none).
     imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
     own_place: dict[tuple[str, int], str] = {}
+    #: T621 under A' (decision 56): the `[[apart]]` blocks, read for keying alone.
+    apart = [b for b in (ctx.config or {}).get("apart") or [] if isinstance(b, dict)]
     for rel, name, node, service, decl, how, line, followed, imaged in pending:
         frm, unfollowed, written, _own, context_brought, unread, bases = followed
         view = env_view(name, rel, decl[0], decl[1], how, placed_in.get(name, {}),
                         declaring.get(name, set()))
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
+        claim = claim._replace(view=apart_view(claim, name, repo.alias, apart))
         if frm and claim.mapped_by == "build":
             claim = claim._replace(build_from=frm)
         if unfollowed:

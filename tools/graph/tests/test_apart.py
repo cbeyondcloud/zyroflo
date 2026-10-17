@@ -12,9 +12,11 @@ against the live config:
   where its file put it, unjoined (`held`), and is never ranked canonical there (ruling 19);
 * anything else it matches is `kept` where it is.
 
-Every matched claim carries `apart`, and the block's `note` as `apart_note`. The refusal
-changes identity only (ruling 23, T621): the refused file's environment still resolves as
-the configuration of the component named like the service.
+Every matched claim carries `apart`, and the block's `note` as `apart_note`. Since batch 24
+(T621, A') the refusal reaches the configuration too: compose files the settings of a claim it
+matches that no build places - unless the claim is its component's own namesake service - under
+the claim's own node key, which no component's code reads; and a chart it matches publishes no
+address into its component's host map.
 
 These cells pin the PLACEMENTS and props; the contest clauses are `mark-canonical`'s and the
 accounting rows `mark-semantic`'s, pinned beside them. Everything here is synthetic.
@@ -30,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.core.model import Edge, Node  # noqa: E402
 from tools.graph.links.namejoin import NameJoinPass, apart_matches  # noqa: E402
-from tools.graph.tests._estate import build, compose, svc  # noqa: E402
+from tools.graph.tests._estate import build, compose, producer, svc  # noqa: E402
 
 JAVA = "public class C { }\n"
 REDIS_READER = 'import os\n\nURL = os.environ["REDIS_URL"]\n'
@@ -82,18 +84,18 @@ def test_the_false_redis_join_is_offered_the_block_then_refused(tmp_path):
     assert refused.kinds("name-joined-service") == []
 
 
-def test_the_refusal_changes_identity_only(tmp_path):
-    """Ruling 23 (T621): the offering row says the values the stock container sets are still
-    read as `redis`'s configuration; after the refusal the component's REDIS_URL is still
-    resolved from the container's file - `env-key-unset` stays absent, as on `main` - pinned
-    so that a later fix of T621 is seen here."""
+def test_the_refusal_refuses_the_configuration_too(tmp_path):
+    """T621 under A' (D24-77, D24-85): the offering row no longer says the stock container's
+    values stay `redis`'s configuration (`main`'s ruling-23 clause, filed as T621); after the
+    refusal the claim no build places is filed under its own node key, so `redis` reads
+    REDIS_URL unset - `main` kept resolving it from the container's file."""
     joined = build(tmp_path / "1", REDIS)
     (row,) = joined.kinds("name-joined-service")
-    assert ("the block refuses the join only; the values `deploy/docker-compose.yml` sets for "
-            "`redis` are still read as `redis`'s configuration (filed as T621)") in row["why"]
-    assert "host addresses" not in row["why"], "a compose file publishes no host map"
+    assert "still read as" not in row["why"] and "T621" not in row["why"], row["why"]
+    assert not [r for r in joined.kinds("env-key-unset") if r.get("component") == "redis"]
     refused = build(tmp_path / "2", {**REDIS, "__apart__": [apart("redis", "deploy")]})
-    assert not [r for r in refused.kinds("env-key-unset") if r.get("component") == "redis"]
+    assert [r["component"] for r in refused.kinds("env-key-unset")] == ["redis"]
+    assert edge_props(refused, "deploy/docker-compose.yml")["view"] == "redis@deploy"
 
 
 def test_an_offer_reads_the_configuration_by_the_name_as_the_file_writes_it(tmp_path):
@@ -499,12 +501,12 @@ def test_a_held_chart_on_a_decided_node_gets_its_row_and_a_contested_one_does_no
     assert contested.kinds("apart-held") == []
 
 
-def test_an_offer_naming_a_chart_says_its_host_addresses_and_configures_by_compose(tmp_path):
-    """Review B15b-10: `deploy` holds a chart and a compose file naming `web`, which the
-    component `web` reads. The offer's ruling-23 clause named the chart's values file as
-    `web`'s configuration (helm files none) and left out the chart's host addresses (its
-    host map is live). Now the compose file's values configure `web`; the chart's host
-    addresses stay `deploy`'s; and the chart is held, as said - followed, it is so."""
+def test_an_offer_naming_a_chart_says_no_configuration_stays_behind(tmp_path):
+    """Review B15b-10, under A' (T621): `deploy` holds a chart and a compose file naming
+    `web`, which the component `web` reads. The block refuses the configuration too - the
+    compose claim no build places is filed where no code reads it, and the chart publishes no
+    address into `deploy`'s host map - so the offer's ruling-23 clause, which said both stayed
+    behind, is gone; the chart is held, as said - followed, it is so."""
     estate = {"deploy": {**chart("web"), "charts/web/templates/cm.yaml": (
                   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: h\n"
                   "data:\n  WEB_HOST: web:80\n"),
@@ -514,10 +516,8 @@ def test_an_offer_naming_a_chart_says_its_host_addresses_and_configures_by_compo
     row = contest(build(tmp_path / "1", estate), "svc:web@web")
     assert ("`deploy/charts/web/values.yaml` stays on `svc:web@web`, held: `svc:web@deploy` "
             "holds the claims of `deploy/docker-compose.yml`") in row["why"]
-    assert ("the block refuses the join only; the values `deploy/docker-compose.yml` sets for "
-            "`web` are still read as `web`'s configuration, and any host address the chart "
-            "of `deploy/charts/web/values.yaml` publishes is still `deploy`'s in the host-map "
-            "ranking (filed as T621)") in row["why"]
+    assert "the block refuses the join only" not in row["why"], row["why"]
+    assert "host-map ranking" not in row["why"] and "T621" not in row["why"]
     followed = build(tmp_path / "2", {**estate, "__apart__": [apart("web", "deploy")]})
     assert edge_props(followed, "deploy/charts/web/values.yaml")["apart"] == "held"
     assert followed.placed("deploy/docker-compose.yml")[0] == "svc:web@deploy"
@@ -533,27 +533,26 @@ TWINS = {"deploy": {"docker-compose.yml": "services:\n" + stock("my api", "org/x
 
 def test_the_offer_reads_the_components_names_as_written(tmp_path):
     """Review B15b-11: `join-by-name` read the components' names off a map keyed by their
-    service ids, so `my api` and `my-api` - one id - became one name and the clause was left
-    out, though compose files `my api`'s values under `my api`, which reads them."""
+    service ids, so `my api` and `my-api` - one id - became one name; compose files `my api`'s
+    values under `my api`, which reads them. Since batch 24 (T621, A') the block takes that
+    configuration with it - the claim places no build - so no clause says it stays behind."""
     built = build(tmp_path, TWINS)
     (row,) = built.kinds("name-joined-service")
     # Batch 23 (D23-7): the block names the claim as its file spells its service.
     assert "add [[apart]] service = \"my api\" component = \"deploy\"" in row["why"]
-    assert ("the values `deploy/docker-compose.yml` sets for `my api` are still read as "
-            "`my api`'s configuration") in row["why"]
+    assert "still read as" not in row["why"], row["why"]
     assert not [r for r in built.kinds("env-key-unset") if r["component"] == "my api"]
 
 
 def test_a_contest_reads_the_components_names_as_written(tmp_path):
     """B15b-11's other site: the same claim offered from a contest row - a chart in `x`
-    declaring `my-api` - names the component compose files the values under, never the
-    joined node's."""
+    declaring `my-api` - names the block as the claim's file spells its service, and, since
+    batch 24 (T621, A'), no configuration left behind."""
     estate = {**TWINS, "x": {"charts/my-api/values.yaml": "fullnameOverride: my-api\n"}}
     row = contest(build(tmp_path, estate), "svc:my-api@my-api")
     # Batch 23 (D23-7): the block names the claim as its file spells its service.
     assert "add [[apart]] service = \"my api\" component = \"deploy\"" in row["why"]
-    assert ("the values `deploy/docker-compose.yml` sets for `my api` are still read as "
-            "`my api`'s configuration") in row["why"]
+    assert "still read as" not in row["why"], row["why"]
 
 
 def test_one_block_keeps_a_components_compose_files_on_its_own_node(tmp_path):
@@ -1021,15 +1020,20 @@ def test_the_duplicates_are_reported_even_by_a_narrowed_run(tmp_path):
     assert narrowed.kinds("apart-unmatched") == []
 
 
-def test_a_load_over_shards_published_before_the_block_judges_it(tmp_path):
-    """`[[apart]]` is not stamped (ruling 17): the load stays current and judges, as a fresh
-    build does."""
+def test_an_apart_edit_stales_the_shards_and_a_load_withholds_its_row_until_republished(
+        tmp_path):
+    """D24-12, D24-50 (A'): compose and helm read `[[apart]]` while extracting, so a block
+    added after the publish stales every shard - the load is narrowed and judges no
+    `apart-unmatched`, the block's own feedback withheld - until a re-publish, after which a
+    load judges it. `main` did not stamp the blocks, and the load judged at once."""
     estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")}}
     assert build(tmp_path, estate, "--publish-snapshot").code == 0
     toml = tmp_path / "ws" / "workspace.toml"
     toml.write_text(toml.read_text(encoding="utf-8")
                     + '\n[[apart]]\nservice = "rediss"\ncomponent = "deploy"\n',
                     encoding="utf-8")
+    assert build(tmp_path, None, "--from-snapshot").kinds("apart-unmatched") == []
+    assert build(tmp_path, None, "--publish-snapshot").code == 0
     assert build(tmp_path, None, "--from-snapshot").kinds("apart-unmatched")
 
 
@@ -1121,3 +1125,135 @@ def test_two_contested_nodes_of_one_name_are_counted_as_two(tmp_path):
     draft = (tmp_path / "out" / DRAFT).read_text(encoding="utf-8")
     assert "# 2 service(s) are each declared by more than one deployment package" in draft
     assert "could not be drafted" not in draft and draft.count("[[canonical]]") == 2
+
+
+# ── batch 24: the configuration a refusal refuses (T621, A'; design pass 24, section 5) ──
+
+#: S6: `deploy` builds code of its own and runs a stock `payments`, which `payments` reads.
+S6 = {"deploy": {"docker-compose.yml": compose(svc("api", ".", None)) + stock(
+                     "payments", "org/stock:1", {"TOPIC": "stock-value"}),
+                 "app.py": producer("TOPIC")},
+      "payments": {"app/pub.py": producer("TOPIC")}}
+
+
+def unset(built) -> list[str]:
+    return sorted(r["component"] for r in built.kinds("env-key-unset"))
+
+
+def test_a_stock_container_declared_apart_feeds_no_code_its_settings(tmp_path):
+    """S6, D24-16, D24-8: `main` - and this tree without the block - give `payments` the stock
+    container's value; declared apart, the claim no build places is filed under its own node key,
+    `payments@deploy`, so it feeds neither `payments` nor `deploy`, whose own code would otherwise
+    take it with ruling 4's warning suppressed."""
+    assert build(tmp_path / "1", S6).topics == ["topic:stock-value"]
+    refused = build(tmp_path / "2", {**S6, "__apart__": [apart("payments", "deploy")]})
+    assert refused.topics == []
+    assert unset(refused) == ["deploy", "payments"]
+    assert edge_props(refused, "deploy/docker-compose.yml", "payments")["view"] == \
+        "payments@deploy"
+
+
+def test_an_unplaced_builder_declared_apart_feeds_no_code_its_settings(tmp_path):
+    """D24-77: a build nothing could place places nothing - declared apart, its settings leave the
+    view `payments` reads, as a stock image's do."""
+    estate = {"deploy": {"docker-compose.yml": compose(svc("payments", "../nope", "x-value"))},
+              "payments": {"app/pub.py": producer("TOPIC")}}
+    assert build(tmp_path / "1", estate).topics == ["topic:x-value"]
+    refused = build(tmp_path / "2", {**estate, "__apart__": [apart("payments", "deploy")]})
+    assert refused.topics == [] and unset(refused) == ["payments"]
+
+
+def test_a_block_refuses_no_build_and_no_layer_its_component_builds(tmp_path):
+    """D24-7, D24-43: a declaration a build places keeps its view - a block refuses no build - and
+    a `-f` layer keyed with its component's building file keeps it too: the block denies a build
+    its own component declares, a workspace contradicting itself."""
+    estate = {"deploy": {"docker-compose.yml": compose(svc("payments", "../payments", None)),
+                         "docker-compose.prod.yml": compose(svc("payments", None, "prod-value"))},
+              "payments": {"app/pub.py": producer("TOPIC")},
+              "__apart__": [apart("payments", "deploy")]}
+    built = build(tmp_path, estate)
+    assert built.topics == ["topic:prod-value"]
+    assert edge_props(built, "deploy/docker-compose.yml")["view"] == "payments"
+
+
+def test_a_components_own_namesake_service_declared_apart_keeps_its_settings(tmp_path):
+    """D24-71, D24-89: `redis`'s own `redis` service has no join to refuse - placed by no build, it
+    is its component's own node - so its settings keep configuring `redis`' code; re-keyed, a block
+    that is a no-op on `main` would blank the component's own configuration."""
+    estate = {"redis": {"docker-compose.yml": "services:\n" + stock(
+                  "redis", "redis:7", {"REDIS_URL": "redis://own:6379"}),
+                  "app.py": REDIS_READER},
+              "__apart__": [apart("redis", "redis")]}
+    built = build(tmp_path, estate)
+    assert unset(built) == []
+    assert edge_props(built, "redis/docker-compose.yml")["view"] == "redis"
+
+
+def test_an_apart_blocks_note_and_the_lines_above_it_stale_no_shard(tmp_path):
+    """D24-25, D24-42: the blocks are stamped without `file`, `line` and `note` - a reworded note
+    and a comment above the block leave every shard current, so the load judges the block."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")},
+              "__apart__": [apart("rediss", "deploy", note="first words")]}
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    toml = tmp_path / "ws" / "workspace.toml"
+    toml.write_bytes(toml.read_bytes().replace(b"first words", b"other words").replace(
+        b"[[apart]]", b"# a comment above the block\n[[apart]]"))
+    assert build(tmp_path, None, "--from-snapshot").kinds("apart-unmatched")
+
+
+CM = ("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: h\ndata:\n  WEB_HOST: {}\n")
+
+
+def charts(*names_hosts: tuple[str, str, str]) -> dict:
+    """Charts in one component - (directory, service, host) each."""
+    out = {}
+    for directory, service, host in names_hosts:
+        out[f"charts/{directory}/values.yaml"] = f"fullnameOverride: {service}\n"
+        out[f"charts/{directory}/Chart.yaml"] = (f"apiVersion: v2\nname: {directory}\n"
+                                                 "version: 0.1.0\n")
+        out[f"charts/{directory}/templates/cm.yaml"] = CM.format(host)
+    return out
+
+
+def test_a_chart_declared_apart_publishes_no_address(tmp_path):
+    """D24-35: a chart a block declares apart publishes no address into its component's host map -
+    its addresses stay on its own `DG_CONFIGURES` edges - alone or beside another chart."""
+    from tools.graph.core.spi import ExtractContext, RepoRef
+    from tools.graph.extractors import helm
+    files = charts(("new", "web", "new:80"), ("old", "legacy", "old:80"))
+    root = tmp_path / "a"
+    for rel, body in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(body, encoding="utf-8")
+    paths = sorted(root / rel for rel in files)
+
+    def host_map(config: dict) -> tuple[dict, int]:
+        ctx = ExtractContext(repos=[RepoRef(alias="a", path=root)], run_id="r",
+                             files={"a": paths}, config=config)
+        res = helm.ConfigMapsExtractor().extract(ctx)
+        return ({k: v["file"] for k, v in ctx.cache[helm.CACHE_KEY]["a"].items()},
+                len([e for e in res.edges if e.type == "DG_CONFIGURES"]))
+    assert host_map({}) == ({"web.host": "charts/old/templates/cm.yaml"}, 2)
+    assert host_map({"apart": [apart("legacy", "a")]}) == (
+        {"web.host": "charts/new/templates/cm.yaml"}, 2)
+    assert host_map({"apart": [apart("legacy", "a"), apart("web", "a")]}) == ({}, 2)
+
+
+def test_a_chart_declared_apart_is_never_its_addresses_owner(tmp_path):
+    """D24-9, D24-23, D24-34: a block naming only the chart declared apart ranks nothing - the
+    live charts resolve as with no block, last-wins and no row, where `main` ranked the apart
+    chart the owner and rowed both live charts - and a block naming a live chart too selects
+    it, its sibling rowed against it."""
+    estate = {"a": charts(("legacy", "legacy", "old:80"), ("live1", "web", "live1:80"),
+                          ("live2", "web", "live2:80")),
+              "__apart__": [apart("legacy", "a")]}
+    legacy = {"service": "legacy", "owner": "a", "path": "charts/legacy/values.yaml"}
+    alone = build(tmp_path / "1", {**estate, "__canonical__": [legacy]})
+    assert [r for r in alone.kinds("superseded-declaration")
+            if r["extractor"] == "helm-configmaps"] == []
+    both = build(tmp_path / "2", {**estate, "__canonical__": [
+        legacy, {"service": "web", "owner": "a", "path": "charts/live1/values.yaml"}]})
+    (row,) = [r for r in both.kinds("superseded-declaration")
+              if r["extractor"] == "helm-configmaps"]
+    assert (row["source_file"], row["value"]) == ("charts/live2/templates/cm.yaml", "live2:80")
+    assert "in charts/live1/templates/cm.yaml" in row["why"], row["why"]

@@ -302,10 +302,11 @@ def test_the_declared_join_is_attributable_over_the_serving_layer(built):
 
 def test_a_declaration_change_invalidates_the_config_digest(si):
     """Reversed on purpose by batch 15b (ruling 17): the stamp digests only what a
-    READER reads. `[[alias]]` (like `[[entrypoint]]`, `[[apart]]` and `[[generated]]`)
-    is read by link passes alone, which run on every build and every load, so an edit
-    to one marks no shard stale; a `[[canonical]]` edit still does, because compose's
-    env ranking and helm's host-map ranking read those blocks while extracting."""
+    READER reads. `[[alias]]` (like `[[entrypoint]]` and `[[generated]]`) is read by link
+    passes alone, which run on every build and every load, so an edit to one marks no shard
+    stale; a `[[canonical]]` edit still does, because compose's env ranking and helm's
+    host-map ranking read those blocks while extracting - and since batch 24 (T621, A') an
+    `[[apart]]` edit does too, compose and helm reading it for keying and the host map."""
     ws = si.read_workspace(FIXTURE / "workspace.toml")
     base = {"workspace_name": "", "canonical": [], "generated": [],
             "entrypoint": [], "alias": [], "apart": [],

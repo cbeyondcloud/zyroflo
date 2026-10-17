@@ -71,9 +71,11 @@ D15b-76):
 4. a node left with no edge is dropped, after the re-targets and the name moves alike.
 
 Every matched claim carries `apart` and, where the block has one, its note as `apart_note`.
-The refusal changes IDENTITY only (ruling 23, T621): the refused file's environment still
-resolves, during extraction, as the configuration of the component named like the service,
-and every row offering the block says so.
+Since batch 24 (T621, A', decision 56) the refusal reaches the configuration too: compose,
+reading the blocks while extracting, files the settings of a claim a block names that no build
+places - unless it is its component's own namesake service - under the claim's own node key,
+which no component's code reads; and a chart a block names publishes no address into its
+component's host map. A claim a build places keeps its view: a block refuses no build.
 
 ## `[[deploys]]`: a join declared (batch 23, T589)
 
@@ -126,6 +128,7 @@ from tools.graph.core.lib import ids
 from tools.graph.core.model import (Edge, ExtractResult, Node, Provenance, norm_id,
                                     unresolved_row)
 from tools.graph.core.lib.rows import capped
+from tools.graph.extractors import _canonical
 from tools.graph.extractors._image import as_written, image_key, literal_tail, tail_of
 from tools.graph.links import canonical
 from tools.graph.links.canonical import accounting
@@ -155,9 +158,6 @@ UNRESOLVED_FIELDS = {
 }
 
 
-#: The backlog row naming what a refusal does not do (ruling 23): every row that offers
-#: `[[apart]]` names it, so nobody is told the refusal fixed the value.
-APART_GAP_ROW = "T621"
 
 
 def _logical(service_id: str) -> str:
@@ -170,10 +170,8 @@ def apart_matches(block: dict, edge: Edge, nodes_by_id: dict[str, Node]) -> bool
     `service`, normalised (`norm_id`, which keeps case), is the block's (D15b-5). The ONE
     reading of the block: this pass applies it, and `mark-semantic` judges `apart-unmatched`
     by it (D15b-89), as `_canonical` reads a block's path once."""
-    return (edge.type == CLAIM_TYPE
-            and canonical.component_of(edge, nodes_by_id) == str(block.get("component", ""))
-            and norm_id(str(edge.props.get("service", "")))
-            == norm_id(str(block.get("service", ""))))
+    return edge.type == CLAIM_TYPE and _canonical.apart_pair(
+        block, canonical.component_of(edge, nodes_by_id), str(edge.props.get("service", "")))
 
 
 def extracted_at(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
@@ -294,7 +292,8 @@ def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dic
                 layout: dict[str, str]) -> str:
     """What a row offering `[[apart]]` for one deploying component says (T594 decisions 3
     and 5): the block; where its claims then sit - every claim the block refuses where there
-    are several (D15b-88); and what the block does not do (ruling 23).
+    are several (D15b-88); and what the block leaves behind - since batch 24 (T621, A') only
+    the settings of a claim a build places, which a block never refuses.
 
     The block refuses every claim the component makes on the service, its charts too. A
     compose claim is never re-targeted, so it sits on the component's own node; a chart
@@ -303,13 +302,13 @@ def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dic
     decision 3) - judged exactly as `_refuse` will judge it (review B15b-9: the row said
     "then sits on" of a chart that stayed).
 
-    What it does not do is said per reader: compose files a service's values, during
-    extraction, under the component NAMED exactly as the file writes the service
-    (`env_view`) - where no component carries that name, none reads them, before the
-    refusal or after it, and nothing is said of them (review B15b-2) - and a chart's host
-    addresses stay its own component's in the host-map ranking (review B15b-10: a chart
-    files no values as any component's configuration). `layout` keys are the components'
-    names as written - the one reading of them (review B15b-11)."""
+    What it leaves behind is read off what compose published: a claim a build places keeps
+    the view its settings are filed under (`view`, decision 55), so where a component carries
+    that name its code still reads them; every other compose claim the block names is filed
+    where no code reads it, and a chart the block names publishes no address into its
+    component's host map (T621, A' - before batch 24 the row named both as gaps, reviews
+    B15b-2, B15b-10). `layout` keys are the components' names as written - the one reading of
+    them (review B15b-11)."""
     mine = [e for e in edges if e.type == CLAIM_TYPE and canonical.component_of(
         e, nodes_by_id) == deployer and norm_id(str(e.props.get("service", ""))) == norm_id(
         service)]
@@ -332,30 +331,21 @@ def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dic
                       f"`{own}` holds the claims of {_ticked(holding)}, and a refusal never "
                       f"joins it there")
     read_as: dict[str, set[str]] = {}
-    charts: set[str] = set()
     for e in mine:
         node = nodes_by_id.get(e.src)
-        if node is not None and node.props.get("kind") == "compose":
-            written = str(e.props.get("service", ""))
-            if written in layout:
-                read_as.setdefault(written, set()).add(canonical.where_of(e, nodes_by_id))
-        else:
-            charts.add(canonical.where_of(e, nodes_by_id))
+        view = str(e.props.get("view", ""))
+        if (node is not None and node.props.get("kind") == "compose"
+                and e.props.get("mapped_by") == "build" and view in layout):
+            read_as.setdefault(view, set()).add(canonical.where_of(e, nodes_by_id))
     gaps = [f"the values {_ticked(sorted(held))} set{'s' if len(held) == 1 else ''} for "
             f"`{service}` are still read as `{name}`'s configuration"
             for name, held in sorted(read_as.items())]
-    if charts:
-        one = len(charts) == 1
-        gaps.append(f"any host address the chart{'' if one else 's'} of "
-                    f"{_ticked(sorted(charts))} publish{'es' if one else ''} is still "
-                    f"`{deployer}`'s in the host-map ranking")
     return (f"if `{deployer}`'s is not that service, add [[apart]] service = \"{service}\" "
             f"component = \"{deployer}\" - its claim then sits on `{own}`, its own node"
             + stays
             + (f"; this block refuses every claim `{deployer}` makes on `{service}`: "
                f"{', '.join(files)}" if len(files) > 1 else "")
-            + (f"; the block refuses the join only; {', and '.join(gaps)} (filed as "
-               f"{APART_GAP_ROW})" if gaps else ""))
+            + (f"; a block refuses no build: {', and '.join(gaps)}" if gaps else ""))
 
 
 class NameJoinPass:

@@ -651,6 +651,26 @@ class DeploymentsExtractor:
                                         and registry.strip() else {})}))
 
 
+def apart_charts(repo: RepoRef, inputs: Iterable[Path], config: dict) -> frozenset[str]:
+    """The chart roots of this component an `[[apart]]` block names (T621, A'; design pass 24,
+    section 5): each whose own values file - one of this reader's inputs - names, by the rule
+    `helm-deployments` claims by (`logical_service`), a service a block declares apart from this
+    component (`_canonical.apart_pair`). A values file that cannot be read or parsed names none."""
+    blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
+    if not blocks:
+        return frozenset()
+    out = set()
+    for path in inputs:
+        rel = _rel(repo, path)
+        if posixpath.basename(rel) not in VALUES_GLOBS:
+            continue
+        doc, error = _load_values(path)
+        name = logical_service(_flat(doc))[0] if not error and doc is not None else ""
+        if name and any(_canonical.apart_pair(b, repo.alias, name) for b in blocks):
+            out.add(posixpath.dirname(rel))
+    return frozenset(out)
+
+
 class ConfigMapsExtractor:
     """The host map a deployment publishes — where service names become addresses."""
 
@@ -704,6 +724,9 @@ class ConfigMapsExtractor:
                                 f"exist; spell the claim, and the file, as the reader does")})
             entries = host_map.setdefault(repo.alias, {})
             packages = package_dirs(repo, ctx.inputs(repo))
+            # T621 under A' (decision 56): the charts an `[[apart]]` block names publish no
+            # address into this component's host map.
+            apart = apart_charts(repo, ctx.inputs(repo), ctx.config or {})
             # A file's role is decided by which pattern matches it (D15b-110): a template is
             # read as a host map, `templates/values.yaml` included; a values or `Chart` file
             # in a chart's root is read only for `package_dirs`.
@@ -711,7 +734,7 @@ class ConfigMapsExtractor:
                 if _matches(_rel(repo, path), TEMPLATE_GLOBS):
                     self._file(res, ctx, repo, path, entries,
                                owned.setdefault(repo.alias, set()),
-                               spelled.setdefault(repo.alias, {}), packages)
+                               spelled.setdefault(repo.alias, {}), packages, apart)
         return res
 
     def _unreadable(self, res: ExtractResult, repo: RepoRef, rel: str, text: str,
@@ -749,7 +772,8 @@ class ConfigMapsExtractor:
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
               entries: dict, owned: set[str], spelled: dict[str, tuple[str, ...]],
-              packages: frozenset[str] = frozenset()) -> None:
+              packages: frozenset[str] = frozenset(),
+              apart: frozenset[str] = frozenset()) -> None:
         rel = _rel(repo, path)
         # Whether this chart tree is the one the workspace named as the owner. A claim names
         # `values.yaml` or the chart's directory, and the host map lives in `templates/`, so
@@ -762,6 +786,9 @@ class ConfigMapsExtractor:
         # publishing to a topic one version number off.
         roots = chart_roots(rel, packages)
         canonical = _canonical.owns_package(ctx.config, repo.alias, rel, roots, claimed_chart)
+        # A chart an `[[apart]]` block names publishes no address into the map, and so is
+        # never its owner - its addresses stay on its own edges (T621, A'; D24-9, D24-35).
+        withheld = bool(roots) and roots[0] in apart
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
             res.unresolved.append({
@@ -866,6 +893,8 @@ class ConfigMapsExtractor:
                         "readings": list(readings), "source_file": rel, "line": line,
                         "why": _yaml.typed_value_why(key, value, readings)})
                 relaxed = ids.relaxed_key(key)
+                if withheld:
+                    continue
                 entry = {"value": value, "file": rel, "line": line, "declared_as": key}
                 held = entries.get(relaxed)
                 if held is not None and relaxed in owned and not canonical:

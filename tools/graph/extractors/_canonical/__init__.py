@@ -355,6 +355,15 @@ def is_root_path(block: dict) -> bool:
     return claimed_path(block, str(block.get("owner", ""))) == ""
 
 
+def apart_pair(block: Mapping[str, Any], component: str, service: str) -> bool:
+    """Whether an `[[apart]]` block names this pair: its component is the claim's DECLARING one,
+    and its service, normalised (`norm_id`, which keeps case), is the claim's (D15b-5). The ONE
+    reading of a block: the name join refuses the claims it names by it, and - since batch 24
+    (T621, A') - compose and helm read it while extracting, for keying and the host map alone."""
+    return (component == str(block.get("component", ""))
+            and ids.norm_id(service) == ids.norm_id(str(block.get("service", ""))))
+
+
 # ── batch 24 (T590): the one decision, over plain claims (design pass 24, section 2) ─────────
 
 #: A claim as the decision reads it - plain data, so extraction and a link pass apply one rule:

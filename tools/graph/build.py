@@ -1657,11 +1657,13 @@ def config_digest(config: dict, component: str) -> str:
     records it (the location, normalised by the installer since T615),
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
-    refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
-    `[[entrypoint]]`, `[[apart]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
-    component fields, the
-    workspace's name and every run-scoped key leave it: link passes run on every build and
-    every load, so nothing they read needs a shard to go stale.
+    refinement, 2026-10-07). Since batch 24 (T621, A') the shared part holds the `[[apart]]`
+    blocks too, without their citations and their `note`: compose and helm read them while
+    extracting, for keying and the host map, so an edit stales every shard, as a
+    `[[canonical]]` edit does (D24-12, D24-25, D24-42). Declarations only link passes read
+    (`[[alias]]`, `[[entrypoint]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
+    component fields, the workspace's name and every run-scoped key leave it: link passes run
+    on every build and every load, so nothing they read needs a shard to go stale.
 
     `<shared>:<own>`, in the one `config_sha` a shard records: a change to the shared part
     may change what ANY component's extractors leave in the shared cache, while an own field
@@ -1670,8 +1672,12 @@ def config_digest(config: dict, component: str) -> str:
     """
     canonical = [{k: v for k, v in block.items() if k not in ("file", "line")}
                  for block in config.get("canonical") or []]
+    apart = [{k: v for k, v in block.items() if k not in ("file", "line", "note")}
+             for block in config.get("apart") or [] if isinstance(block, dict)]
     shared = {"canonical": canonical, "layout": workspace_layout(config),
-              "profile": _name_of(config.get("profile"))}
+              "profile": _name_of(config.get("profile")),
+              # Only where a block exists, so a workspace with none keeps its stamps (D24-12).
+              **({"apart": apart} if apart else {})}
     mine = next((c for c in config.get("components") or [] if c.get("name") == component),
                 {})
     own = {"path": mine.get("path", ""), "role": mine.get("role", ""),
@@ -2166,9 +2172,9 @@ NARROWED_TAIL = ("so it judged none of the five rows what it could not see could
                  "node was not read")
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
-CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
-                 "layout, the profile's name, and each component's own path as recorded, "
-                 "role, stack and shallow flag)")
+CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` and `[[apart]]` "
+                 "blocks, the layout, the profile's name, and each component's own path as "
+                 "recorded, role, stack and shallow flag)")
 
 
 def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
