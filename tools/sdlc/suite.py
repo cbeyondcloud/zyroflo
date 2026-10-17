@@ -919,7 +919,13 @@ def _inside_a_run_tree(target: Path, top: str, run_trees, notes: list[str] | Non
     root = Path(guardrails.component_dir(target, ".")).resolve()
     if not trees.is_repo(root):
         return None
-    mine, _why = trees.repo_key(root)
+    mine, why = trees.repo_key(root)
+    if not mine:
+        # Said, as for the tree's side - a git failure is never the bound's own rule (B25-2).
+        if notes is not None:
+            notes.append(f"git could not say which repository the workspace root is in ({why}), "
+                         f"so the bound was taken as `main` takes it")
+        return None
     theirs, why = trees.repo_key(Path(top))
     if not theirs:
         if notes is not None:

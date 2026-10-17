@@ -1039,3 +1039,51 @@ def test_a_legacy_two_repository_record_reads_as_before(tmp_path):
     rows = W.load_record(ws, rid)["components"]
     assert "rebased_at" not in rows["one"] and rows["two"]["rebased_at"], rows
     assert W.remove(ws, rid) == [f"one: removed {homes['one']}", f"two: removed {homes['two']}"]
+
+
+# ── review round 1 (B25-1 to B25-3) ─────────────────────────────────────────────────────
+
+
+def test_an_entry_nobody_can_read_is_never_read_as_sharing_the_tree(tmp_path):
+    """B25-1, D25-14: with no component, `{worktree}` is the one tree the run's components ALL
+    share; an entry nobody can read is not read as agreeing - the workspace root, as `main` and as
+    `release.branch_of` and `deploy._worktree_for` answer the same record."""
+    root = mono(tmp_path / "ws")
+    rid = run_in(root)
+    W.create(root, rid)
+    record = json.loads(W.record_path(root, rid).read_text(encoding="utf-8"))
+    record["components"]["c"] = "oops"
+    W.record_path(root, rid).write_text(json.dumps(record), encoding="utf-8")
+    assert same(ST._worktree_for(root, rid, ""), root)
+    assert R.branch_of(root, rid) == "" and same(D._worktree_for(root, rid, ""), root)
+
+
+def test_git_failing_for_the_workspace_root_is_noted_too(tmp_path, monkeypatch):
+    """B25-2, D25-109: where git cannot say which repository the workspace root is in, the bound
+    is taken as `main` takes it and a note says so - as for the tree's side."""
+    root = mono(tmp_path / "ws", paths=("services/a/app.py", "services/b/app.py",
+                                        "gradle/libs.versions.toml"))
+    rid = run_in(root)
+    W.create(root, rid)
+    commit_in(entry(root, rid, "a")[0], "gradle/libs.versions.toml", "v = 2\n")
+    real = W.repo_key
+    monkeypatch.setattr(W, "repo_key",
+                        lambda where: ("", "boom") if same(where, root) else real(where))
+    _diffs, notes, unknown = S.changed_files(root, rid)
+    assert unknown == [], notes
+    assert any("git could not say which repository the workspace root is in (boom), so the "
+               "bound was taken as `main` takes it" in n for n in notes), notes
+
+
+def test_a_shared_tree_is_removed_through_any_of_its_components_checkouts(tmp_path):
+    """B25-3: the tree is removed once, from the first of its components' checkouts that git can
+    run in - `a`'s directory gone from the developer's checkout (a merged change removed it) no
+    longer blocks the removal of the tree `b` shares."""
+    root = mono(tmp_path / "ws")
+    rid = run_in(root)
+    W.create(root, rid)
+    tree, _home = entry(root, rid, "a")
+    shutil.rmtree(root / "services" / "a")
+    assert W.remove(root, rid) == [f"a, b: removed {tree}"]
+    rows = W.load_record(root, rid)["components"]
+    assert not tree.exists() and rows["a"]["removed_at"] and rows["b"]["removed_at"]

@@ -799,7 +799,8 @@ def test_a_join_whose_directory_the_trees_base_predates_is_refused_then_rebased_
     said = str(refused.value)
     assert "`services/b` is not a directory in" in said and "the tree is at `" in said, said
     assert (f"rebase the tree onto a later commit that holds it, if one does "
-            f"(`tools/sdlc/worktree.py --run {rid} --component a --rebase <ref>`), "
+            f"(`tools/sdlc/worktree.py --target <repo> --run {rid} --component a "
+            f"--rebase <ref>`), "
             f"then add `b`") in said, said
     assert W.rebase(root, rid, "a", "main")["rebased"]
     assert W.create(root, rid, ["b"])["made"] == ["b"]

@@ -1913,8 +1913,9 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     if entry is None and len(homes) == 1:
         entry = next(iter(homes.values()))
     if entry is None and not component and homes:
-        shared = [trees.tree_of(e) for e in homes.values() if isinstance(e, dict)]
-        if shared and shared[0] and all(trees._same(shared[0], t) for t in shared):
+        # Over EVERY entry: one nobody can read is never read as agreeing (B25-1).
+        shared = [trees.tree_of(e) if isinstance(e, dict) else "" for e in homes.values()]
+        if all(shared) and all(trees._same(shared[0], t) for t in shared):
             return shared[0]
     if entry is None and component and homes:
         # **Item 131.** The two legitimate root answers - `deny_raw_git`, and a

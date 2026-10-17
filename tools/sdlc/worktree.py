@@ -500,7 +500,8 @@ def _join_problem(run_id: str, name: str, place: str, tree: Path, head: str, bas
     held = git(tree, "log", "-1", "--format=%H", base, "--", place, check=False) if base else ""
     if in_base in ("none", "file", "symlink") and not held:
         said += (f"; the tree's base lacks it, so rebase the tree onto a later commit that holds "
-                 f"it, if one does (`tools/sdlc/worktree.py --run {run_id} --component {mate} "
+                 f"it, if one does (`tools/sdlc/worktree.py --target <repo> --run {run_id} "
+                 f"--component {mate} "
                  f"--rebase <ref>`), then add `{name}`")
     return said + f"; or run `{name}` as a run of its own"
 
@@ -1061,8 +1062,12 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
         raise WorktreeError("; ".join(holding))
     for name, rows, spot in removable:
         args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
+        # From the first of the tree's components' checkouts that exists: a tree-mate's checkout
+        # gone from the developer's tree must not block the removal of the tree (B25-3).
+        homes = [guardrails.component_dir(target, entry["path"]) for entry in rows]
+        here = next((Path(h) for h in homes if Path(h).is_dir()), Path(homes[0]))
         try:
-            git(guardrails.component_dir(target, rows[0]["path"]), *args)
+            git(here, *args)
         except WorktreeError as exc:
             save_record(target, run_id, record)
             raise WorktreeError(
