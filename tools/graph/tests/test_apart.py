@@ -1257,3 +1257,25 @@ def test_a_chart_declared_apart_is_never_its_addresses_owner(tmp_path):
               if r["extractor"] == "helm-configmaps"]
     assert (row["source_file"], row["value"]) == ("charts/live2/templates/cm.yaml", "live2:80")
     assert "in charts/live1/templates/cm.yaml" in row["why"], row["why"]
+
+
+@pytest.mark.parametrize("shape", ["library", "refused"])
+def test_a_chart_that_claims_nothing_is_not_withheld(tmp_path, shape):
+    """Review B24-1: a library chart, and one helm refuses (a `Chart.yml` and no `Chart.yaml`),
+    claim nothing - so a block naming the service its values file names matches nothing
+    (`apart-unmatched`), and must change nothing: the chart keeps its addresses in the host map
+    and its rank as the block's owner, so the live chart's row stays, as on `main`."""
+    lib = charts(("lib", "legacy", "old:80"))
+    if shape == "library":
+        lib["charts/lib/Chart.yaml"] += "type: library\n"
+    else:
+        lib["charts/lib/Chart.yml"] = lib.pop("charts/lib/Chart.yaml")
+    estate = {"a": {**lib, **charts(("live", "web", "live:80"))},
+              "__canonical__": [{"service": "legacy", "owner": "a",
+                                 "path": "charts/lib/values.yaml"}],
+              "__apart__": [apart("legacy", "a")]}
+    built = build(tmp_path, estate)
+    assert built.kinds("apart-unmatched")
+    (row,) = [r for r in built.kinds("superseded-declaration")
+              if r["extractor"] == "helm-configmaps"]
+    assert (row["source_file"], row["value"]) == ("charts/live/templates/cm.yaml", "live:80")

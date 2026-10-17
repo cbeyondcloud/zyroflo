@@ -592,3 +592,17 @@ def test_an_incremental_build_decides_over_every_components_candidate(tmp_path):
         assert again.topics == ["topic:a2-value"], component
         assert [(r["component"], r["value"]) for r in ranking_rows(again)] == [
             ("deploy-b", loser)], component
+
+
+def test_a_file_an_include_names_that_another_component_reads_is_never_called_unread(tmp_path):
+    """Review B24-2: `deploy-c`'s `include:` names `other`'s compose file, which `other` reads as
+    its own - its value is one of the candidates - so no row says it "was not read", nor spells it
+    from the including component's root."""
+    built = build(tmp_path, {
+        **s1("deploy-a"),
+        "other": {"docker-compose.yml": compose(image("payments", "other-value"))},
+        "deploy-c": {"docker-compose.yml": "include:\n  - ../other/docker-compose.yml\n"
+                                           "services: {}\n"}})
+    rows = ranking_rows(built)
+    assert sorted(r["component"] for r in rows) == ["deploy-b", "other"]
+    assert all("which was not read" not in r["why"] for r in rows), [r["why"] for r in rows]

@@ -654,15 +654,24 @@ class DeploymentsExtractor:
 def apart_charts(repo: RepoRef, inputs: Iterable[Path], config: dict) -> frozenset[str]:
     """The chart roots of this component an `[[apart]]` block names (T621, A'; design pass 24,
     section 5): each whose own values file - one of this reader's inputs - names, by the rule
-    `helm-deployments` claims by (`logical_service`), a service a block declares apart from this
-    component (`_canonical.apart_pair`). A values file that cannot be read or parsed names none."""
+    `helm-deployments` claims by, a service a block declares apart from this component
+    (`_canonical.apart_pair`). That rule is `logical_service` over a chart that claims at all: a
+    library chart, and one helm refuses or cannot parse the metadata of, claim nothing, so no block
+    names them, and a block naming their service changes nothing here - as `apart-unmatched`
+    says it matches nothing (review B24-1). A values file that cannot be read or parsed names
+    none."""
     blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
     if not blocks:
         return frozenset()
+    inputs = list(inputs)
+    verdicts = chart_verdicts(repo, inputs)
     out = set()
     for path in inputs:
         rel = _rel(repo, path)
         if posixpath.basename(rel) not in VALUES_GLOBS:
+            continue
+        if verdicts.get(posixpath.dirname(rel), ("", "", ""))[0] in (
+                "library", "refused", "unparsable"):
             continue
         doc, error = _load_values(path)
         name = logical_service(_flat(doc))[0] if not error and doc is not None else ""

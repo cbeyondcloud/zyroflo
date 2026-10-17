@@ -69,10 +69,9 @@ def short_name(path: Path) -> str | None:
     return name if name.lower() != path.name.lower() else None
 
 
-def respell(cell: str, parent: Path, name: str) -> tuple[str, bool]:
-    """(the context naming `parent/name` in `cell`'s spelling, whether main's `resolve()`
-    reaches that directory on this machine), from a file one level below `parent` (so
-    `../name` is the plain spelling).
+def respell(cell: str, parent: Path, name: str) -> str:
+    """The context naming `parent/name` in `cell`'s spelling, from a file one level below
+    `parent` (so `../name` is the plain spelling).
 
     Letter case and a trailing dot resolve only on Windows. Where Windows gives no 8.3 name
     - on POSIX, or with 8.3 names off - the literal `~1` spelling names nothing, which is
@@ -81,52 +80,50 @@ def respell(cell: str, parent: Path, name: str) -> tuple[str, bool]:
     the root where the component IS the root, and inside the root's tree beside a root
     component."""
     if cell == "letter case":
-        return f"../{name.upper()}", WINDOWS
+        return f"../{name.upper()}"
     if cell == "trailing dot":
-        return f"../{name}.", WINDOWS
+        return f"../{name}."
     if cell == "8.3 short name":
         short = short_name(parent / name)
-        return (f"../{short}", True) if short else (f"../{name[:6].upper()}~1", False)
+        return f"../{short}" if short else f"../{name[:6].upper()}~1"
     if cell == "junction":
         link_dir(parent / "link", parent / name)
-        return "../link", True
+        return "../link"
     if cell == "absolute":
-        return str(parent / name), True
-    return f"../../{parent.name}/{name}", True          # leaves the root and comes back
+        return str(parent / name)
+    return f"../../{parent.name}/{name}"          # leaves the root and comes back
 
 
-def matrix_estate(layout: str, cell: str,
-                  where: Path) -> tuple[dict, str, str, str, bool]:
-    """(estate, workspace dir name, declaring file's deploy source, main's node id, whether
-    main's env reaches the declaring component)."""
+def matrix_estate(layout: str, cell: str, where: Path) -> tuple[dict, str, str, str]:
+    """(estate, workspace dir name, declaring file's deploy source, main's node id)."""
     long = cell == "8.3 short name"
     if layout in ("flat", "single"):
         comp = "orders-service" if long else "orders"
         ws = where / "ws"
         (ws / comp).mkdir(parents=True)
-        context, resolves = respell(cell, ws, comp)
+        context = respell(cell, ws, comp)
         estate = {comp: {"docker-compose.yml": compose(svc("web", context)),
                          "app/pub.py": producer("TOPIC")}}
         if layout == "flat":
             estate["other"] = {"README.md": "x\n"}
-        return estate, "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}", resolves
+        return estate, "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}"
     if layout == "root":
         ws_name = "workspace-root" if long else "ws"
         (where / ws_name).mkdir(parents=True)
-        context, resolves = respell(cell, where, ws_name)
+        context = respell(cell, where, ws_name)
         if cell == "leaves the root and comes back":
             context = f"../{ws_name}"
         return ({".": {"docker-compose.yml": compose(svc("web", context)),
                        "app/pub.py": producer("TOPIC")}, "__names__": {".": "mono"}},
-                ws_name, "mono/docker-compose.yml", "svc:web@mono", resolves)
+                ws_name, "mono/docker-compose.yml", "svc:web@mono")
     comp = "deploy-service" if long else "deploy"
     ws = where / "ws"
     (ws / comp).mkdir(parents=True)
-    context, resolves = respell(cell, ws, comp)
+    context = respell(cell, ws, comp)
     return ({".": {}, comp: {"docker-compose.yml": compose(svc("web", context)),
                              "app/pub.py": producer("TOPIC")},
              "orders": {"README.md": "x\n"}, "__names__": {".": "mono"}},
-            "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}", resolves)
+            "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}")
 
 
 @pytest.mark.parametrize("cell", CELLS)
@@ -142,7 +139,7 @@ def test_each_class_cell_gets_the_matrix_row_keeps_mains_id_and_keys_its_env_by_
         # pin the pure-Python one (D534-107); on POSIX both skip a symlinked directory and
         # the pin changes nothing (C534-11).
         monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
-    estate, ws_name, source, node, _resolves = matrix_estate(layout, cell, tmp_path)
+    estate, ws_name, source, node = matrix_estate(layout, cell, tmp_path)
     built = build(tmp_path, estate, ws_name=ws_name)
     assert built.code == 0
     assert built.placed(source) == (node, "", ""), "main's id; the edge loses its labels"
@@ -201,7 +198,7 @@ def test_a_childs_own_file_respelling_its_directory_moves_the_node_to_the_parent
         link_dir(ws / "platform" / "link", ws / "platform" / child)
         context = "../link"
     else:
-        context, _ = respell(cell, ws / "platform", child)
+        context = respell(cell, ws / "platform", child)
     built = build(tmp_path, {
         "platform": {}, f"platform/{child}": {
             "docker-compose.yml": compose(svc("web", context)),
@@ -230,7 +227,7 @@ def test_a_childs_own_spelling_decided_before_the_holders_keeps_mains_id(tmp_pat
 
 @pytest.mark.parametrize("layout", sorted(MATRIX))
 def test_rewriting_the_context_as_the_components_directory_maps_it(tmp_path, layout):
-    estate, ws_name, source, node, _ = matrix_estate(layout, "trailing dot", tmp_path)
+    estate, ws_name, source, node = matrix_estate(layout, "trailing dot", tmp_path)
     assert build(tmp_path / "respelt", estate, ws_name=ws_name).kinds(
         "compose-build-unresolved"), "the row fires first"
     comp = next(k for k in estate if not k.startswith("__") and "docker-compose.yml"

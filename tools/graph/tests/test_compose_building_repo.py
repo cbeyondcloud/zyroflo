@@ -11,7 +11,6 @@ Everything here is synthetic and none of it names a real workspace.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -22,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools.graph.tests._estate import (  # noqa: E402
     build, compose, lay_down, producer, read, spawn, svc)
 
-WINDOWS = os.name == "nt"
 READER = 'import os\nQ = os.environ["QUEUE"]\n'
 
 

@@ -15,7 +15,6 @@ Everything here is synthetic and none of it names a real workspace.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from tools.graph.tests._estate import (  # noqa: E402
     build, compose, lay_down, producer, read, spawn, svc)
 import tools.graph.build as B  # noqa: E402
 
-WINDOWS = os.name == "nt"
 ENV_ROWS = ("env-key-unset", "superseded-declaration", "entrypoint-unmatched",
             "env-key-from-building-repo")
 

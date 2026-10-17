@@ -314,6 +314,10 @@ def test_a_declaration_change_invalidates_the_config_digest(si):
     with_alias = {**base, "alias": ws["alias"]}
     assert B.config_digest(base, "orders-api") == B.config_digest(with_alias, "orders-api"), \
         "an [[alias]] edit must leave every stamp current - no reader reads it"
+    # Batch 24 (T621, A'): an `[[apart]]` edit moves the digest, as a `[[canonical]]` one does.
+    with_apart = {**base, "apart": [{"service": "x", "component": "orders-api"}]}
+    assert B.config_digest(base, "orders-api") != B.config_digest(with_apart, "orders-api"), \
+        "an [[apart]] edit must stale every stamp - compose and helm read it while extracting"
     with_canonical = {**base, "canonical": ws["canonical"]}
     assert B.config_digest(base, "orders-api") != B.config_digest(with_canonical,
                                                                  "orders-api"), \

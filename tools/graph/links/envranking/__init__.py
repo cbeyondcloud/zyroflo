@@ -25,7 +25,7 @@ block selected another package, (2) no block selected one, (3) the selected pack
 (4) the group holds two services - each naming the view and whether a component's code reads it,
 and what compose did not read that could set the key too (D24-5, D24-70, D24-90).
 
-In a WHOLE run alone (`config["narrowed"]` false): a narrowed run's row would state the
+In a WHOLE run alone (`config["narrowed"]` explicitly false): a narrowed run's row would state the
 workspace's answer over facts the narrowing left out or stale, so a narrowed run judges none, and
 the run's line says so (`NARROWED_TAIL`, D24-78 reversed). A compose edge with no `view` comes from
 a shard published before this batch: no row is judged on what it could change, and one row names
@@ -74,9 +74,11 @@ def _cite(block: dict) -> str:
 def _unless(config: dict, nodes: list[Node]) -> str:
     """What compose did not read that could set the key too, said on every row (D24-5, D24-36,
     D24-70, D24-90): a compose file marked `unread`, a file lost to its case that compose's globs
-    miss only by case (its node's `readers`), a file an `include:` names that compose does not
-    read (batch 23, D23-131) - and a directory the walk could not list (`config["unlisted"]`),
-    where a compose file could sit unread."""
+    miss only by case (its node's `readers`), and a directory the walk could not list
+    (`config["unlisted"]`), where a compose file could sit unread. A file an `include:` names that
+    the including component's reading does not follow is none of these: its
+    `compose-include-unresolved` row is its record, and the commonest such file is another
+    component's, which reads it as its own, its value among the candidates (review B24-2)."""
     files: set[str] = set()
     for node in nodes:
         if node.type != "deploy":
@@ -85,10 +87,6 @@ def _unless(config: dict, nodes: list[Node]) -> str:
         compose = node.props.get("kind") == "compose"
         if node.props.get("unread") and (compose or READER in (node.props.get("readers") or ())):
             files.add(f"{component}/{path}")
-        if compose:
-            for entry in node.props.get("include_unread") or ():
-                if isinstance(entry, dict) and entry.get("file"):
-                    files.add(f"{component}/{entry['file']}")
     dirs = sorted(f"{component}/{directory}"
                   for component, listed in (config.get("unlisted") or {}).items()
                   for directory in listed)

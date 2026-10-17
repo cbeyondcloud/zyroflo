@@ -1392,24 +1392,16 @@ class ComposeExtractor:
                 service=name, components=list(placed.ambiguous)))
 
         entries = environment_entries(_yaml.mapping_get(node, "environment"))
-        # Decision 57: what its `extends:` chain brings - each base's environment, nearest
-        # first, where neither the service nor a nearer base writes the key, as compose merges
-        # a base's `environment:` under the service's own (design pass 24, section 4). Cited
-        # where its base writes it; its rows are the base's own declaration's, never repeated.
-        known = {ids.relaxed_key(e["key"]) for e in entries}
-        inherited: list[dict] = []
-        for base_rel, _base_name, base_node in bases:
-            for e in environment_entries(_yaml.mapping_get(base_node, "environment")):
-                if ids.relaxed_key(e["key"]) not in known:
-                    known.add(ids.relaxed_key(e["key"]))
-                    inherited.append({**e, "file": base_rel})
+        # Decision 57: what its `extends:` chain brings, cited where its base writes it
+        # (design pass 24, section 4).
+        inherited = brought_by(bases, {ids.relaxed_key(e["key"]) for e in entries})
         if not entries and not inherited:
             return
         declarations = [{"key": e["key"], "value": e["value"], "file": rel,
                          "line": e["line"]} for e in entries] + [
             {"key": e["key"], "value": e["value"], "file": e["file"], "line": e["line"],
              "inherited": True} for e in inherited]
-        brought = {ids.relaxed_key(e["key"]) for e in inherited}
+        brought = {ids.relaxed_key(e["key"]): e["base"] for e in inherited}
         view = _resolve(declarations)
         view_key = placed.view
         views.setdefault(view_key, {"values": {}, "unresolved": {}})
@@ -1529,13 +1521,56 @@ class ComposeExtractor:
                           if entry.get("inherited") else {})}))
         for key, miss in view["unresolved"].items():
             if key in brought:
-                continue        # the base's own declaration rows it
+                # Its immediate base's own declaration resolves the whole chain beyond it, and
+                # rows - or defers - by this same rule where that chain leaves the value
+                # unresolved; where only this service's own environment does, overriding what
+                # the value names, it is rowed here, where its base writes it (review B24-3).
+                if key in _resolve(base_declarations(bases, 0))["unresolved"]:
+                    continue
+                res.unresolved.append({
+                    "extractor": self.name,
+                    "kind": "compose-env-unresolved", "component": repo.alias, "key": key,
+                    "source_file": miss["file"], "line": miss["line"],
+                    "why": (f"`{miss['raw']}`, which `{name}` takes from "
+                            f"`{bases[brought[key]][1]}` through `extends:`, names "
+                            f"{', '.join(miss['missing'])}, which `{name}`'s own environment "
+                            f"leaves without a value and which carries no default")})
+                continue
             res.unresolved.append({
                 "extractor": self.name,
                 "kind": "compose-env-unresolved", "component": repo.alias, "key": key,
                 "source_file": rel, "line": miss["line"],
                 "why": (f"`{miss['raw']}` names {', '.join(miss['missing'])}, which nothing "
                         f"in this file sets and which carries no default")})
+
+
+def brought_by(bases: tuple, known: set[str]) -> list[dict]:
+    """What an `extends:` chain brings (decision 57; design pass 24, section 4): each base's
+    `environment:`, nearest first, where neither the service - `known`, its own keys, relaxed -
+    nor a nearer base writes the key, as compose merges a base's `environment:` under the
+    service's own. Each entry is cited where its base writes it (`file`), with the index of the
+    base that brings it (`base`)."""
+    seen = set(known)
+    out: list[dict] = []
+    for index, (base_rel, _name, base_node) in enumerate(bases):
+        for e in environment_entries(_yaml.mapping_get(base_node, "environment")):
+            relaxed = ids.relaxed_key(e["key"])
+            if relaxed not in seen:
+                seen.add(relaxed)
+                out.append({**e, "file": base_rel, "base": index})
+    return out
+
+
+def base_declarations(bases: tuple, index: int) -> list[dict]:
+    """The declarations base `index` of a chain runs with on its own - its own `environment:`, then
+    what the chain beyond it brings - which its own declaration's `_service` resolves: whether a
+    value it brings is unresolved there decides which declaration rows it (review B24-3)."""
+    base_rel, _name, node = bases[index]
+    own = [{"key": e["key"], "value": e["value"], "file": base_rel, "line": e["line"]}
+           for e in environment_entries(_yaml.mapping_get(node, "environment"))]
+    rest = brought_by(bases[index + 1:], {ids.relaxed_key(d["key"]) for d in own})
+    return own + [{"key": e["key"], "value": e["value"], "file": e["file"], "line": e["line"]}
+                  for e in rest]
 
 
 def _resolve(declarations: list[dict]) -> dict:

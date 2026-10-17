@@ -543,3 +543,41 @@ def test_an_inherited_values_readings_ride_on_its_edge(tmp_path):
                and e["props"].get("service") == "web"]
     assert edge["props"]["inherited_from"] == "docker-compose.yml:8"
     assert edge["props"]["readings"], edge["props"]
+
+
+def test_an_inherited_value_the_service_leaves_unresolvable_is_rowed_where_its_base_writes_it(
+        tmp_path):
+    """Review B24-3: the base resolves `TOPIC: ${OTHER}` with its own `OTHER`, so it rows nothing;
+    `web` overrides `OTHER` with `${MISSING}`, which leaves the `TOPIC` it brings unresolvable - a
+    row says so, at the place its base writes it, naming `web`, where nothing did and
+    `env-key-unset` told `orders` that nothing sets the key."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": "services:\n  web:\n    build: ../orders\n"
+                                         "    extends:\n      file: compose.base.yml\n"
+                                         "      service: base\n"
+                                         "    environment:\n      OTHER: ${MISSING}\n",
+                   "compose.base.yml": "services:\n  base:\n    image: org/x:1\n"
+                                       "    environment:\n      OTHER: base-other\n"
+                                       "      TOPIC: ${OTHER}\n"},
+        "orders": {"app/pub.py": producer("TOPIC")}})
+    rows = sorted(built.kinds("compose-env-unresolved"),
+                  key=lambda r: (r["source_file"], r["line"]))
+    assert [(r["source_file"], r["line"], r["key"]) for r in rows] == [
+        ("compose.base.yml", 6, "topic"), ("docker-compose.yml", 8, "other")]
+    assert "`web` takes from `base` through `extends:`" in rows[0]["why"]
+
+
+def test_an_inherited_value_a_nearer_base_leaves_unresolvable_is_rowed_by_that_base(tmp_path):
+    """Review B24-3, up a chain: `base1` overrides the `OTHER` that `base2`'s `TOPIC` names, so
+    `base1`'s own declaration rows both - its `OTHER` and the `TOPIC` it brings - and `web`, which
+    extends `base1`, defers to it: one row per place, never one per service of the chain."""
+    built = build(tmp_path, s8(
+        "services:\n  web:\n    build: ../orders\n    extends: base1\n"
+        "  base1:\n    image: org/x:1\n    extends: base2\n    environment:\n"
+        "      OTHER: ${MISSING}\n"
+        "  base2:\n    image: org/x:1\n    environment:\n      OTHER: base2-other\n"
+        "      TOPIC: ${OTHER}\n"))
+    rows = sorted(built.kinds("compose-env-unresolved"), key=lambda r: r["line"])
+    assert [(r["source_file"], r["line"], r["key"]) for r in rows] == [
+        ("docker-compose.yml", 9, "other"), ("docker-compose.yml", 14, "topic")]
+    assert "`base1` takes from `base2` through `extends:`" in rows[1]["why"]
