@@ -317,7 +317,8 @@ def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
     run_id = at_p9(repo)
     committed_monorepo(repo, run_id)
     (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
-    assert S.changed_files(repo, run_id)[0] == {"api": [], "web": ["app.txt"]}
+    # Batch 25 (D25-28, D25-45a): spelled from the repository's root, as coverage matches it.
+    assert S.changed_files(repo, run_id)[0] == {"api": [], "web": ["web/app.txt"]}
     owed = D.obligations(repo, run_id)
     assert len(owed) == 1 and owed[0].startswith("web has no recorded deploy"), owed
 
@@ -382,7 +383,8 @@ def test_a_changed_file_is_named_as_it_is_spelled(repo, name):
     committed_monorepo(repo, run_id, "web/" + name)
     (repo / "web" / name).write_text("v2\n", encoding="utf-8")
     diffs, notes, unknown = S.changed_files(repo, run_id)
-    assert (diffs, unknown) == ({"api": [], "web": [name]}, []), (diffs, unknown, notes)
+    # Batch 25 (D25-28, D25-45a): spelled from the repository's root.
+    assert (diffs, unknown) == ({"api": [], "web": ["web/" + name]}, []), (diffs, unknown, notes)
     assert not [n for n in notes if "no component's directory" in n], notes
 
 
@@ -401,7 +403,9 @@ def test_a_component_whose_directory_begins_with_a_space_claims_its_change(repo)
     W.save_record(repo, run_id, record)
     (repo / " api" / "app.txt").write_text("v2\n", encoding="utf-8")
     diffs, notes, unknown = S.changed_files(repo, run_id)
-    assert (diffs, unknown) == ({"api": ["app.txt"], "web": []}, []), (diffs, unknown, notes)
+    # Batch 25 (D25-28, D25-45a): spelled from the repository's root.
+    assert (diffs, unknown) == ({"api": [" api/app.txt"], "web": []}, []), (diffs, unknown,
+                                                                          notes)
     assert not [n for n in notes if "no component's directory" in n], notes
 
 
@@ -534,7 +538,8 @@ def test_a_component_git_cannot_place_is_named_not_dropped(repo, monkeypatch):
     said = [n for n in notes if n.startswith("api: git could not say where it sits")]
     assert len(said) == 1, notes
     assert str(repo) not in said[0] and repo.as_posix() not in said[0], said
-    assert (diffs["api"], unknown) == (["app.txt"], ["web"]), (diffs, unknown)
+    # Batch 25 (D25-28, D25-45a): spelled from the repository's root.
+    assert (diffs["api"], unknown) == (["api/app.txt"], ["web"]), (diffs, unknown)
 
 
 def nested_workspace(tmp_path: Path, *extra: str) -> tuple[Path, str]:

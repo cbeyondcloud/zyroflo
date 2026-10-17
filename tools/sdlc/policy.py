@@ -41,7 +41,7 @@ import re
 import subprocess
 import sys
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -3195,6 +3195,46 @@ def pattern_problems(policy: dict, pattern: str, where: str = "branch_pattern") 
 def branch_for(pattern: str, run_id: str) -> str:
     """The branch this run publishes to under this pattern."""
     return pattern.replace(RUN_TOKEN, run_id)
+
+
+#: The names `git worktree add` refuses as a directory on Windows, matched case-insensitively on
+#: the stem before the FIRST dot - git's measured set: `lpt0`, `conin$` and `conout$` refused,
+#: `com0` made (design pass 25, D25-56, D25-71, D25-82). Its own set, never `export_okf._RESERVED`, which
+#: answers another question - the file names Windows cannot write (D25-95).
+TREE_RESERVED = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$",
+                           *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(10))})
+
+#: The characters Windows refuses in a path segment, each of which `git worktree add` refuses there
+#: at exit 128, leaving its branch behind (measured, D25-104).
+TREE_REFUSED = frozenset('<>:"|?*')
+
+
+def tree_name_problem(name: str) -> str:
+    """Why `name` cannot name a run's tree, or "" - read by Windows' rules on EVERY platform, since
+    a profile is shared (design pass 25, section 2; D25-25, D25-33, D25-40, D25-56, D25-94): a
+    separator (`/` and `\\` both), `.` or `..`, a drive or a root (`PureWindowsPath`, so `D:evil`
+    is refused on Linux too), a trailing dot or space, a control character, a character Windows
+    refuses in a path, or a reserved device name with or without an extension. `a b` and `cafe`
+    with an accent, whose trees `main` makes, stay accepted."""
+    if not name:
+        return "it is empty"
+    if "/" in name or "\\" in name:
+        return "it holds a path separator"
+    if name in (".", ".."):
+        return "it is `.` or `..`"
+    windows = PureWindowsPath(name)
+    if windows.drive or windows.root:
+        return "it names a drive or a root"
+    if name.endswith((".", " ")):
+        return "it ends in a dot or a space, which Windows drops"
+    if any(ord(c) < 32 for c in name):
+        return "it holds a control character"
+    if bad := sorted(set(name) & TREE_REFUSED):
+        return f"it holds {', '.join(f'`{c}`' for c in bad)}, which Windows refuses in a path"
+    stem = name.split(".", 1)[0].lower()
+    if stem in TREE_RESERVED:
+        return f"`{stem}` is a device name Windows reserves, with or without an extension"
+    return ""
 
 
 def run_of_branch(pattern: str, branch: str) -> str:

@@ -184,9 +184,17 @@ def walk(target: Path, components: list[str], approver: str,
     run_id = record["run_id"]
     say(f"P0 intake: run {run_id} opened, {stages.by_phase('P0').produces[0]} recorded")
 
-    made = trees.create(target, run_id, components or None)
+    try:
+        made = trees.create(target, run_id, components or None)
+    except trees.WorktreeError as exc:
+        # A refusal prints the plan's notes beside its problems (batch 25, D25-69, D25-81).
+        for note in exc.notes:
+            say(f"  note: {note}")
+        raise
     for name, entry in sorted(made["components"].items()):
         say(f"  {name}: {entry['mode']} on {entry['branch']}")
+    for note in made.get("notes") or []:
+        say(f"  note: {note}")
 
     stopped: list[dict] = []
     for i, phase in enumerate(active):

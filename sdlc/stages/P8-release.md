@@ -67,6 +67,11 @@ stranger's repository quietly gaining a `.venv`.
    computed against a tree that has since moved. A conflict is **aborted, not
    left in the tree**: resolving one is new code nobody has reviewed, so it
    re-enters at G3 rather than sliding into the merge. Exit 1 means conflicts.
+   **One rebase per tree:** components of one repository on one branch share a
+   tree, so one rebase moves it and records the new base on every component of
+   it - a tree-mate's own call answers "already on the latest upstream". A
+   component whose directory the rebase left out of the tree is named in a
+   note, with its way on.
 2. **Check the branch carries the run folder before publishing.** The merge
    gate reads the ledger out of the branch, so a branch with the code and
    without `.sdlc/runs/<run-id>/` opens a pull request CI must refuse — and
@@ -76,8 +81,16 @@ stranger's repository quietly gaining a `.venv`.
    this step is here and not only in the code.
 
    ```
-   git ls-tree <branch> -- .sdlc/runs/<run-id>
+   git ls-tree --full-tree <branch> -- <prefix>.sdlc/runs/<run-id>
    ```
+
+   `<prefix>` is the install target's own place in its repository - `git -C
+   <target> rev-parse --show-prefix`, the directory that holds `.sdlc/`, never
+   the workspace root below it - and empty where the target is in no repository.
+   Run it from any directory of the repository: from a component's own
+   directory the command without `--full-tree` answers nothing at exit 0, and
+   with it but without the prefix it answers nothing for a workspace in a
+   subdirectory - an empty answer that is not evidence of absence either way.
 
    Empty output means it is not there. Commit it, then publish.
 3. **Publish the branch** with `vcs.push_command` when it is set, otherwise

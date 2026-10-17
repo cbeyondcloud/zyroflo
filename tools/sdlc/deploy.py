@@ -266,9 +266,23 @@ def run(target: Path, run_id: str, component: str = "",
     # Asked first: which deploy this is comes before whether it may run (T503).
     if not component and (why := needs_component(target, run_id)):
         raise DeployError(why)
+    # **The RUN'S TREE, not the repository root.** Since item 37 a run's change
+    # never lives in the root: it is on the branch, in the worktree. Deploying
+    # from the root builds the BASE and reports it as the change - measured on
+    # the first real deploy, where a config change of 15000 to 30000 was
+    # deployed as 15000 and recorded `deployed: true`. Exactly the defect
+    # `6a00bfc` fixed for P6's review, one phase further on and costing more:
+    # a review of the wrong tree misreports, a DEPLOY of the wrong tree ships.
+    # Since batch 25, by the command's SOURCE, asked before `root_lacks` (D25-133).
+    where = _worktree_for(target, run_id, component)
     # And where one act runs: from the root only once the root holds the change
-    # its trees made (T551).
-    if not component and (why := root_lacks(target, run_id)):
+    # its trees made (T551) - asked only of a one act that runs AT the root, never
+    # of one that runs in a tree or at a component's `home` (D25-133).
+    if not component and _same_place(Path(where), target) and \
+            (why := root_lacks(target, run_id)):
+        raise DeployError(why)
+    # A cwd that does not exist is refused before anything starts there (D25-149).
+    if why := cwd_problem(target, run_id, component, where):
         raise DeployError(why)
     if blocked := gate_problems(target, run_id):
         raise DeployError("; ".join(blocked))
@@ -285,14 +299,6 @@ def run(target: Path, run_id: str, component: str = "",
     before = recorded(target, run_id)
     kept = (before or {}).get("components")
     carried = dict(kept) if isinstance(kept, dict) else {}
-    # **The RUN'S TREE, not the repository root.** Since item 37 a run's change
-    # never lives in the root: it is on the branch, in the worktree. Deploying
-    # from the root builds the BASE and reports it as the change - measured on
-    # the first real deploy, where a config change of 15000 to 30000 was
-    # deployed as 15000 and recorded `deployed: true`. Exactly the defect
-    # `6a00bfc` fixed for P6's review, one phase further on and costing more:
-    # a review of the wrong tree misreports, a DEPLOY of the wrong tree ships.
-    where = _worktree_for(target, run_id, component)
     started = _now()
     t0 = time.perf_counter()
     # **What a hung deploy printed is kept.** `run_bounded` hands back the
@@ -367,13 +373,17 @@ def root_lacks(target: Path, run_id: str) -> str:
     "" when it can - or when the question does not arise (T551; the owner's
     ruling, 2026-09-28).
 
-    One act is one command, run once. With one component in the run's worktree
-    record it runs in that component's tree, and with none at the root, where a
-    tree-less run's change is (`_worktree_for`). With more than one it runs at
-    the root - which is where the change is NOT until it has been merged and
-    pulled: item 37's hazard, the base deployed and recorded as the change. So
-    the root must hold the change first, for every component with a tree of its
-    own.
+    One act is one command, run once. With one tree in the run's worktree record
+    - one component's, or one several components share (batch 25, D25-19) - it
+    runs in that tree, and with none at the root, where a tree-less run's change
+    is (`_worktree_for`). With more than one it runs at the root - which is where
+    the change is NOT until it has been merged and pulled: item 37's hazard, the
+    base deployed and recorded as the change. So the root must hold the change
+    first, for every tree. The threshold is distinct trees (`tree_of`), never
+    record entries: counted by entries, one shared tree with two components was
+    deployed from the root, which lacked the change (item 37's failure). Each
+    tree's change is read once, and compared once with each distinct checkout of
+    its components, as each component's own checkout is asked (D25-35).
 
     **The run's change is the branch's commits**, which is what P8 merges (review
     B4-11): every path committed on the run's branch since its base - all of
@@ -405,18 +415,31 @@ def root_lacks(target: Path, run_id: str) -> str:
     except (trees.WorktreeError, OSError) as exc:
         raise DeployError(f"this run's worktree record could not be read ({exc}), so "
                           f"which tree holds its change is unknown") from None
-    if len(homes) < 2:
+    groups: list[tuple[Path, list[tuple[str, dict]]]] = []
+    for name, entry in sorted(homes.items()):
+        if not isinstance(entry, dict) or not trees.tree_of(entry).strip():
+            continue
+        tree = Path(trees.tree_of(entry).strip())
+        group = next((g for g in groups if _same_place(g[0], tree)), None)
+        if group is None:
+            groups.append((tree, [(name, entry)]))
+        else:
+            group[1].append((name, entry))
+    if len(groups) < 2:
         return ""
     lacking, loose, unread, apart = [], [], [], []
-    for name, entry in sorted(homes.items()):
-        if not isinstance(entry, dict) or not str(entry.get("home") or "").strip():
-            continue
-        tree = Path(str(entry["home"]).strip())
-        checkout = Path(guardrails.component_dir(target, entry.get("path")))
-        if _same_place(tree, checkout):
+    for tree, rows in groups:
+        names = [name for name, _entry in rows]
+        name = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        checkouts: list[Path] = []
+        for _name, entry in rows:
+            checkout = Path(guardrails.component_dir(target, entry.get("path")))
+            if not any(_same_place(checkout, held) for held in checkouts):
+                checkouts.append(checkout)
+        if all(_same_place(tree, checkout) for checkout in checkouts):
             continue            # changed in place: its checkout IS where it changed
         try:
-            head, touched, left = _committed(tree, str(entry.get("base") or "").strip())
+            head, touched, left = _committed(tree, str(rows[0][1].get("base") or "").strip())
         except trees.WorktreeError:
             unread.append(name)
             continue
@@ -428,17 +451,27 @@ def root_lacks(target: Path, run_id: str) -> str:
                          f"cleaned or committed inside its checkout)")
         if not touched:
             continue            # nothing committed there, so nothing to hold
-        try:
-            top = trees.git(checkout, "rev-parse", "--show-toplevel")
-            differ = _differ(Path(top), head, touched)
-        except trees.WorktreeError:
-            apart.append(name)
-            continue
-        if differ:
-            where = record_where(target, top)
-            named = "the workspace checkout" if where == "." else f"the checkout at {where}"
-            lacking.append(f"{named} lacks {len(differ)} of {name}'s changed file(s): "
-                           f"{', '.join(differ[:5])}")
+        tops: list[Path] = []
+        for checkout in checkouts:
+            try:
+                top = Path(trees.git(checkout, "rev-parse", "--show-toplevel"))
+            except trees.WorktreeError:
+                apart.append(name)
+                break
+            if any(_same_place(top, held) for held in tops):
+                continue
+            tops.append(top)
+            try:
+                differ = _differ(top, head, touched)
+            except trees.WorktreeError:
+                apart.append(name)
+                break
+            if differ:
+                where = record_where(target, top)
+                named = ("the workspace checkout" if where == "." else
+                         f"the checkout at {where}")
+                lacking.append(f"{named} lacks {len(differ)} of {name}'s changed file(s): "
+                               f"{', '.join(differ[:5])}")
     said = lacking + loose + (
         [f"what {', '.join(unread)} changed could not be read, so whether the root holds "
          f"it cannot be checked"] if unread else []) + (
@@ -515,6 +548,17 @@ def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
     this component's name, which is item 37's failure with a label on it. And a
     record that exists but cannot be read is refused rather than read as "no
     trees": the root is where the change is NOT, so deploying it ships the base.
+
+    **By the command's SOURCE** (batch 25, T550; design pass 25, section 3): a
+    deploy command the component DECLARES runs at its `home`, by name or as the
+    run's one act (D25-133); one it inherits from the workspace's top level runs
+    where it was written to run, at its tree's root (`tree_of`, D25-29). The one
+    act of an inherited command runs in the one tree the run's components all
+    share, where they share one, else at the root. The one act whose command the
+    profile's one component declares runs where `--component <it>` runs it
+    wherever the record holds any component - its `home`, or its own checkout
+    where the record holds others but not it (D25-140) - and at the root where
+    the record holds none (D25-143).
     """
     from tools.sdlc import worktree as trees
 
@@ -525,12 +569,75 @@ def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
                           f"which tree holds its change is unknown") from None
     if component:
         entry = homes.get(component)
-        home = str(entry.get("home") or "").strip() if isinstance(entry, dict) else ""
-        return home or _checkout_of(target, component)
-    entry = next(iter(homes.values())) if len(homes) == 1 else None
-    if not isinstance(entry, dict):
-        return str(target)
-    return str(entry.get("home") or "").strip() or str(target)
+        if not isinstance(entry, dict):
+            return _checkout_of(target, component)
+        _command, source = command_of(target, component)
+        spot = trees.tree_of(entry) if source == "top-level" else str(entry.get("home") or "")
+        return spot.strip() or _checkout_of(target, component)
+    if homes and (own := _one_act_component(target)):
+        return _worktree_for(target, run_id, own)
+    found = [trees.tree_of(e).strip() if isinstance(e, dict) else "" for e in homes.values()]
+    if found and all(found) and all(_same_place(Path(found[0]), Path(t)) for t in found):
+        return found[0]
+    return str(target)
+
+
+def _one_act_component(target: Path) -> str:
+    """The component whose OWN command is the run's one act, or "": a profile of
+    one component that declares its own `deploy_command` makes THAT command the
+    one act (design pass 25, D25-133: measured `('', 'exit 0', 'component')`)."""
+    _command, source = command_of(target, "")
+    if source != "component":
+        return ""
+    try:
+        every = guardrails.components(Path(target))
+    except (guardrails.PolicyError, OSError, ValueError) as exc:
+        raise DeployError(f"the profile could not be read: {exc}") from None
+    return str(every[0].get("name") or "") if every else ""
+
+
+def cwd_problem(target: Path, run_id: str, component: str = "", where: str = "") -> str:
+    """Why this deploy cannot START where it would run, or "" (batch 25; design
+    pass 25, D25-105, D25-113, D25-123, D25-149).
+
+    A cwd that does not exist - a `home` the run's own work removed from its
+    tree, a component's checkout directory gone - is refused before anything
+    starts, named with its way on: started there, the runner's exit `None` held
+    P9 owed for ever. Asked in the door beside `needs_component` and
+    `root_lacks`, but whether or not `--component` is named, so the preview
+    lists it and the deploy door exits 2, never 3. A command the component
+    inherits runs at its tree's root, which exists, and is not refused.
+    """
+    from tools.sdlc import worktree as trees
+
+    target = Path(target)
+    spot = Path(where or _worktree_for(target, run_id, component))
+    if spot.is_dir():
+        return ""
+    name = component or _one_act_component(target)
+    try:
+        homes = trees.load_record(target, run_id).get("components") or {}
+    except (trees.WorktreeError, OSError) as exc:
+        raise DeployError(f"this run's worktree record could not be read ({exc}), so "
+                          f"which tree holds its change is unknown") from None
+    entry = homes.get(name) if name else None
+    home = str(entry.get("home") or "").strip() if isinstance(entry, dict) else ""
+    if home and _same_place(spot, Path(home)) and \
+            (gone := trees.home_gone(target, name, entry)):
+        return f"{gone}; {trees.home_way(name, entry)}"
+    if name:
+        try:
+            every = guardrails.components(target)
+        except (guardrails.PolicyError, OSError, ValueError):
+            every = []
+        for c in every:
+            if c.get("name") == name and _same_place(
+                    spot, Path(guardrails.component_dir(target, c.get("path")))):
+                return (f"`{name}`'s directory `{c.get('path') or '.'}` is not in the "
+                        f"workspace checkout; restore it, or drop `{name}` from the "
+                        f"profile for this run")
+    return (f"this deploy would run in {record_where(target, spot)}, which does not "
+            f"exist, so it is not started")
 
 
 def _checkout_of(target: Path, component: str) -> str:
@@ -640,16 +747,21 @@ def _main(argv: list[str] | None = None) -> int:
     unnamed = "" if args.component else needs_component(target, args.run,
                                                         (by_name, units))
     # T551: one act over several trees runs at the root once the root holds the
-    # change, which the preview says before anybody runs the deploy.
-    stale = "" if (args.component or unnamed) else root_lacks(target, args.run)
+    # change, which the preview says before anybody runs the deploy - asked only
+    # of a one act that runs AT the root (batch 25, D25-133).
+    stale = "" if (args.component or unnamed or not _same_place(
+        Path(_worktree_for(target, args.run, "")), target)) else root_lacks(target, args.run)
     command, source = ("", "") if unnamed else command_of(target, args.component)
+    # Batch 25 (D25-123, D25-149): a cwd that does not exist, named or not.
+    missing = "" if (unnamed or stale or not command) else cwd_problem(
+        target, args.run, args.component)
     blocked = gate_problems(target, args.run)
 
     if not args.deploy:
         found = {"command": command, "command_source": source, "gate": GATE,
                  "by_name": [{"component": name, "command": cmd, "source": src}
                              for name, cmd, src in units] if by_name else [],
-                 "refused": [why for why in (unnamed, stale) if why] + blocked,
+                 "refused": [why for why in (unnamed, stale, missing) if why] + blocked,
                  "recorded": recorded(target, args.run)}
         if args.json:
             print(json.dumps(found, indent=2, sort_keys=True, default=str))
@@ -664,17 +776,20 @@ def _main(argv: list[str] | None = None) -> int:
                       + (f"  [{source}]" if source else ""))
             if stale:
                 print(f"  !! {stale}")
+            if missing:
+                print(f"  !! {missing}")
             print(f"{GATE}: " + ("stands" if not blocked else "REFUSED"))
             for line in blocked:
                 print(f"  !! {line}")
             print("  --deploy runs it; nothing was executed")
-        return 1 if (blocked or unnamed or stale or not command) else 0
+        return 1 if (blocked or unnamed or stale or missing or not command) else 0
 
-    if unnamed or stale:
-        # A missing --component, or a root that does not hold the change yet, is
-        # the caller's to fix, like any other refused argument - not `3`, which
-        # says the deploy could not look.
-        print(f"refused: {unnamed or stale}", file=sys.stderr)
+    if unnamed or stale or missing:
+        # A missing --component, a root that does not hold the change yet, or a
+        # directory the deploy would run in that is not there, is the caller's to
+        # fix, like any other refused argument - not `3`, which says the deploy
+        # could not look.
+        print(f"refused: {unnamed or stale or missing}", file=sys.stderr)
         return 2
     row = run(target, args.run, args.component)
     if args.json:

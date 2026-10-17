@@ -37,8 +37,11 @@ never wrote.
 **`worktree` is the tree the change under review actually lives in, and every
 step below that reads code must be pointed at it, not at `<repo>`.** Since the
 parallel-run model a run's change is never in the repository root: it is in
-`<worktrees_root>/<run-id>/<component>/`, and the root is still at the base
-commit. This SOP said `<repo>` for both, and the cost was measured — the
+its tree, `<worktrees_root>/<run-id>/<name>/` - `<name>` the first component of
+its repository on its branch, the tree that repository's components on that
+branch share, each in its own directory inside it - and the root is still at
+the base commit. `worktree` is the tree's root, where the run's patch is
+written and its paths resolve. This SOP said `<repo>` for both, and the cost was measured — the
 pre-pass reported a defect the change had just FIXED, and a defect a change
 INTRODUCES would not have been visible to it at all. The harness resolves the
 path from the run's own record, so it is not a thing anyone has to remember.

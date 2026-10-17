@@ -192,7 +192,12 @@ def repo_of(target: Path, remote: str = "origin") -> str:
 
 
 def branch_of(target: Path, run_id: str, component: str = "") -> str:
-    """This run's branch, from the record the worktree model already keeps."""
+    """This run's branch, from the record the worktree model already keeps.
+
+    With no component, the branch where every component shares one tree - one
+    component's, or one several share (batch 25, T550) - else "": two trees
+    recording one branch name are two branches, in two repositories, and the wall
+    would judge one against the other's (D25-31)."""
     from tools.sdlc import worktree as trees
 
     try:
@@ -200,8 +205,11 @@ def branch_of(target: Path, run_id: str, component: str = "") -> str:
     except (trees.WorktreeError, OSError):
         return ""
     entry = homes.get(component) if component else None
-    if entry is None and len(homes) == 1:
-        entry = next(iter(homes.values()))
+    if entry is None and not component and homes:
+        rows = list(homes.values())
+        found = [trees.tree_of(e) if isinstance(e, dict) else "" for e in rows]
+        if all(found) and all(trees._same(found[0], t) for t in found):
+            entry = rows[0]
     return str((entry or {}).get("branch") or "")
 
 
@@ -230,12 +238,23 @@ def unpublished_run(target: Path, run_id: str, branch: str,
     Silent when it cannot tell rather than refusing on a guess: a repository
     that is not a git checkout, or a branch git does not know, is somebody
     else's error and blocking a push on it would be this check inventing one.
+
+    **The run folder by its path from the REPOSITORY's root** (batch 25, design
+    pass 25): `--full-tree`, so it is read alike from a tree's root and from a
+    component's directory below it, where the bare question answers nothing at
+    exit 0 (D25-51); and prefixed by the install TARGET's own place in its
+    repository, `git -C <target> rev-parse --show-prefix` - the directory that
+    holds `.sdlc/`, never the workspace root, which an install above it puts
+    below it (D25-76, D25-89). Where the target answers no prefix - it is in no
+    repository, as a multi-repository workspace's root is - the question is
+    asked with none, never skipped (D25-90).
     """
-    rel = ledger.RUNS_REL.as_posix() + "/" + run_id
+    rel = _run_prefix(Path(target)) + ledger.RUNS_REL.as_posix() + "/" + run_id
     cwd = Path(where or target)
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), "ls-tree", "--name-only", branch, "--", rel],
+            ["git", "-C", str(cwd), "ls-tree", "--full-tree", "--name-only", branch, "--",
+             rel],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError):
@@ -248,6 +267,23 @@ def unpublished_run(target: Path, run_id: str, branch: str,
             f"it describes, and the merge gate reads the ledger out of the "
             f"branch - so this push would open a pull request CI must refuse. "
             f"Commit the run folder onto this branch first"]
+
+
+def _run_prefix(target: Path) -> str:
+    """The install target's place in its repository (`--show-prefix`, "a/b/" or
+    ""), or "" where it is in no repository or git cannot say - the question is
+    then asked as `main` asks it, never skipped and never raised (D25-90)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--show-prefix"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    prefix = (proc.stdout or "").strip().strip("/")
+    return prefix + "/" if prefix else ""
 
 
 def push_problems(target: Path, run_id: str, branch: str,
@@ -899,7 +935,11 @@ def worktree_for(target: Path, run_id: str) -> str:
     """The tree this run's change lives in, or the root when it has none.
 
     Item 46's defect, not repeated: a release cut run from the repository root
-    would version and tag the BASE.
+    would version and tag the BASE. Since batch 25, `tree_of` the record's first
+    component - the tree's root, as before, never a component's directory inside
+    a shared tree (D25-23); that component's own directory where it works in
+    place (D25-85). "First" is the record's first key, which `save_record` sorts
+    by name.
     """
     from tools.sdlc import worktree as trees
 
@@ -908,8 +948,8 @@ def worktree_for(target: Path, run_id: str) -> str:
     except (trees.WorktreeError, OSError, ValueError):
         return str(target)
     for entry in homes.values():
-        if isinstance(entry, dict) and str(entry.get("home") or "").strip():
-            return str(entry["home"])
+        if isinstance(entry, dict) and trees.tree_of(entry).strip():
+            return trees.tree_of(entry).strip()
     return str(target)
 
 

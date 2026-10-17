@@ -53,7 +53,9 @@ def cli_sources() -> list[Path]:
     return [p for p in sorted((ROOT / "tools").rglob("*.py"))
             if "tests" not in p.parts and "__pycache__" not in p.parts
             and "argparse.ArgumentParser" in p.read_text(encoding="utf-8")]
-PREFIX_FLAGS = {"--project", "--porcelain"}
+# Flags of git itself, which an SOP may cite: P8's step 2 asks `git ls-tree --full-tree` and
+# `git rev-parse --show-prefix` (batch 25, D25-51, D25-76, D25-89).
+PREFIX_FLAGS = {"--project", "--porcelain", "--full-tree", "--show-prefix"}
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:

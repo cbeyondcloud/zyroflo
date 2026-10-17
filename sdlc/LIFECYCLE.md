@@ -17,10 +17,10 @@ changes.** Extending the table that already governs provider differences:
 | Capability | If present | If not |
 |---|---|---|
 | **Graph substrate** | `scoping` computes an impact pack — impacted services, endpoints, topics, tables, configs, tests, each with `source_file:line` provenance; review receives the blast radius before reading code | `scoping` is inactive. The agent explores the repo directly and maps what the task touches |
-| **Estate config** (`components > 1`) | per-component worktrees, cross-component dependent build closure, un-scoped breakage raised as a scope-add | one component. No closure to compute; worktrees optional |
+| **Estate config** (`components > 1`) | a worktree per repository and branch, each component in its own directory - isolated where the components are on different branches or in different repositories - cross-component dependent build closure, un-scoped breakage raised as a scope-add | one component. No closure to compute; worktrees optional |
 | **Clarify / choose** | native question UI | ask in chat and wait |
 | **Approval gates** | native plan-approval UI | post the artifact, say "reply `approved` to continue", STOP |
-| **Parallel work** | ≤3 subagents, one per independent workstream, each in its own worktree | sequential in dependency order |
+| **Parallel work** | ≤3 subagents, one per independent workstream, each in its own worktree where the components are on different branches or in different repositories (components of one repository on one branch share one) | sequential in dependency order |
 | **Finding generation** | `review.local_review_command` + `review.security_review_command` | review the diff against the rubric yourself |
 | **Reviewer subagents** | delegate review to `sdlc-reviewer` / `sdlc-security` (isolated context = more independent findings) | adopt the reviewer personas yourself |
 | **Issue tracker / chat (MCP)** | offer to pull the task from an issue and post the tracker back | take the task from the user's message |
@@ -37,7 +37,7 @@ makes a run resumable across sessions, tools, and providers.
 | 1 | `requirements` | always | clarify sweep (scope, data shape, errors, performance, tenancy, config) · **2–4 options, ≥1 free/OSS**, each with SPDX license + perf impact, one recommended · **EARS criteria** → `10-requirements.md` | → G1 |
 | 2 | `scoping` | graph substrate | impact map with provenance · cross-run overlap check → `20-scope.md` | **G1** |
 | 3 | `design` | always | per-component change-set · test plan · **ADR when a dependency, service boundary, or data model changes** · consistency check → `30-design.md`, `30-adr-*.md` | **G2** |
-| 4 | `implementation` | always | one agent per component, worktree-isolated · test-first where practical · commit per tracker row · diffs only, never pushes → `40-impl/` | **G3** |
+| 4 | `implementation` | always | one agent per component, worktree-isolated where the components are on different branches or in different repositories · test-first where practical · commit per tracker row · diffs only, never pushes → `40-impl/` | **G3** |
 | 5 | `test` | always | **baseline-relative** (no NEW failures) · changed-file coverage, **fail loud when unmeasurable** · SCA · dependent build-check *(estate)* → `50-tests.md` | → G4 |
 | 6 | `review` | always | deterministic pre-pass → agent review · ≤`max_iterations` · **exit when `block_on` is clear** → `60-review.md` | — |
 | 7 | `triage` | always | open findings become top-priority tracker rows; loop 3→6 until no pending bug rows → `70-triage.md` | **G4** |

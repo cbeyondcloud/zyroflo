@@ -93,7 +93,7 @@ flowchart LR
 | **P1 · requirements** | clarify sweep, 2–4 options (≥1 free/OSS), **EARS** acceptance criteria | — | ✓ |
 | **P2 · scoping** | graph impact pack with `file:line` provenance — needs the graph substrate | **G1** | |
 | **P3 · design** | per-component change set, test plan, an ADR when a boundary or data model changes | **G2** | ✓ |
-| **P4 · implementation** 🔒 | worktree-isolated, test-first, a commit per tracker row | **G3** | ✓ |
+| **P4 · implementation** 🔒 | worktree-isolated where the components are on different branches or in different repositories, test-first, a commit per tracker row | **G3** | ✓ |
 | **P5 · test** | **no NEW failures** against the baseline; changed-file coverage, loud when unmeasurable | — | ✓ |
 | **P6 · review** 🔒 | deterministic pre-pass, then review until no `block_on` severity is open (default `[critical, high]`); the rubric score is reported, never the gate | — | ✓ |
 | **P7 · triage** | open findings become top-priority tracker rows; loop back until none are pending | **G4 — merge** | ✓ |

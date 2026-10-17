@@ -1,6 +1,6 @@
 ---
 name: sdlc
-description: Run the complete software development lifecycle for one bug fix, feature, or deploy change — intake and baseline, requirements with free/OSS options and EARS criteria, scoping, design with ADRs, worktree-isolated implementation, tests against the recorded baseline, a review loop whose exit is categorical, triage, release, deploy, verify, and close-out. Human gates G1–G5 halt the run; which of them are hard is set by the profile's gate_profile. Use when the user types /sdlc, or asks to implement a feature or fix a bug end-to-end following the standard process. Provider-agnostic and tool-agnostic; driven entirely by .sdlc/profile.yml.
+description: Run the complete software development lifecycle for one bug fix, feature, or deploy change — intake and baseline, requirements with free/OSS options and EARS criteria, scoping, design with ADRs, worktree-isolated implementation (where the components are on different branches or in different repositories), tests against the recorded baseline, a review loop whose exit is categorical, triage, release, deploy, verify, and close-out. Human gates G1–G5 halt the run; which of them are hard is set by the profile's gate_profile. Use when the user types /sdlc, or asks to implement a feature or fix a bug end-to-end following the standard process. Provider-agnostic and tool-agnostic; driven entirely by .sdlc/profile.yml.
 ---
 
 # SDLC Harness
@@ -101,7 +101,7 @@ gracefully — **the process is identical; only the mechanism changes.**
 | **Graph substrate** | `scoping` builds an impact pack with `source_file:line` provenance | the phase is inactive; explore the repository directly and say the map is unprovenanced |
 | **Clarify / choose** | the native question UI | ask in plain chat and wait |
 | **Approval gates** | the native plan-approval UI | post the artifact, say "reply `approved` to continue", and STOP |
-| **Parallel work** | ≤3 subagents, one per independent workstream, each in its own worktree | sequential in dependency order |
+| **Parallel work** | ≤3 subagents, one per independent workstream, each in its own worktree where the components are on different branches or in different repositories (components of one repository on one branch share one) | sequential in dependency order |
 | **Finding generation** | `review.local_review_command` + `review.security_review_command` | review the diff yourself against the rubric |
 | **Reviewer subagents** | delegate review to `sdlc-reviewer` / `sdlc-security` — isolated context finds more | adopt the reviewer personas yourself |
 | **Issue tracker / chat (MCP)** | offer to pull the task from an issue and post the tracker back | take the task from the user's message |

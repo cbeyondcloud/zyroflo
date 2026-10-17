@@ -333,7 +333,9 @@ def test_a_component_that_is_not_a_repository_is_named(estate):
     (estate / "web").mkdir()
     profile(estate, TWO + '  - name: "web"\n    path: "web"\n    role: authoritative\n')
     rid = run_in(estate)
-    with pytest.raises(W.WorktreeError, match="not a git repository"):
+    # Batch 25 (T550): the plan names it in the note's words (design pass 25, section 1).
+    with pytest.raises(W.WorktreeError, match="is not in a git repository, so it cannot have a "
+                                              "worktree"):
         W.create(estate, rid)
 
 
@@ -877,7 +879,7 @@ def test_an_occupied_destination_refuses_before_any_tree_is_made(estate):
     """
     run_in(estate)
     policy = P.load(estate)
-    busy = W.home(policy, estate, "r1", "lib")
+    busy = W.tree_at(policy, estate, "r1", "lib")
     busy.mkdir(parents=True)
     (busy / "leftover.txt").write_text("stale\n", encoding="utf-8")
 
@@ -885,7 +887,7 @@ def test_an_occupied_destination_refuses_before_any_tree_is_made(estate):
         W.create(estate, "r1")
     assert "lib" in str(exc.value) and "not empty" in str(exc.value), exc.value
 
-    first = W.home(policy, estate, "r1", "api")
+    first = W.tree_at(policy, estate, "r1", "api")
     assert not first.exists(), f"the first component's tree was left at {first}"
     assert W.git(estate / "api", "rev-parse", "--verify", "--quiet",
                  "sdlc/r1", check=False) == ""
@@ -917,7 +919,7 @@ def test_a_failure_part_way_unwinds_the_trees_it_already_made(estate, monkeypatc
     said = str(exc.value)
     assert "removed" in said and "api" in said, said
 
-    first = W.home(policy, estate, "r1", "api")
+    first = W.tree_at(policy, estate, "r1", "api")
     assert not first.exists(), f"the first component's tree was left at {first}"
     assert real(estate / "api", "rev-parse", "--verify", "--quiet",
                 "sdlc/r1", check=False) == ""
@@ -977,7 +979,7 @@ def test_a_base_git_cannot_find_refuses_rather_than_reporting_caught_up(estate):
     """
     run_in(estate)
     W.create(estate, "r1")
-    spot = W.home(P.load(estate), estate, "r1", "api")
+    spot = W.tree_at(P.load(estate), estate, "r1", "api")
     (spot / "mine.py").write_text("mine = 1\n", encoding="utf-8")
     commit(spot, "run work")
     (estate / "api" / "up.py").write_text("up = 1\n", encoding="utf-8")
@@ -1049,7 +1051,7 @@ def test_a_failure_after_the_trees_exist_unwinds_them_too(estate):
     assert "no run folder" in said, said
 
     for name in ("api", "lib"):
-        spot = W.home(policy, estate, "r1", name)
+        spot = W.tree_at(policy, estate, "r1", name)
         assert not spot.exists(), f"{name}'s tree was left at {spot}: {said}"
         assert W.git(estate / name, "rev-parse", "--verify", "--quiet",
                      "sdlc/r1", check=False) == "", name
@@ -1081,7 +1083,7 @@ def test_an_unwind_that_could_not_finish_says_what_is_still_there(estate, monkey
         W.create(estate, "r1")
     said = str(exc.value)
 
-    stuck = W.home(policy, estate, "r1", "api")
+    stuck = W.tree_at(policy, estate, "r1", "api")
     assert stuck.is_dir(), "the tree the message is about is not on disk"
     assert "this run has no trees" not in said, said
     assert "could NOT be removed" in said, said
