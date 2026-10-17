@@ -5,8 +5,9 @@ bases, resolved from the directory of the file declaring it, as compose resolves
 placed by it. `include:` - an included compose file this component reads is read on its own,
 as before. Either is followed only into the compose files the reader is handed in the
 component: a shard's stamp digests those alone, and batch 15a's guard refuses a read outside
-them. What cannot be followed is a row naming why; the claim stays the component's, and the
-env view does not move (ruling 10).
+them. What cannot be followed is a row naming why; the claim stays the component's. The env
+view follows the placement where the chain's build places the service on a component's own
+directory (decision 55, design pass 24 - ruling 10 revised).
 
 Everything here is synthetic and none of it names a real workspace.
 """
@@ -180,17 +181,17 @@ def test_an_included_compose_file_the_component_reads_is_read_on_its_own(tmp_pat
                                                                   "build")
 
 
-def test_the_env_view_does_not_move_with_the_placement(tmp_path):
-    """Ruling 10: placement by an inherited build moves the node, never which code sees the
-    service's settings - the extending service's values stay under the view `main` files
-    them under, so `orders`' code does not start reading them."""
+def test_the_env_view_moves_with_a_chain_builds_placement(tmp_path):
+    """Decision 55: the build a T620 chain brings counts as the service's own, so a chain build
+    placed on `orders`' own directory (`exact`) keys the extending service's values to `orders`,
+    whose code reads them - `main` kept them under the service's name (its view `api`)."""
     estate = deploy("services:\n  api:\n    extends:\n      file: docker-compose.base.yml\n"
                     "      service: apibase\n    environment:\n      TOPIC: api-value\n",
                     **{"docker-compose.base.yml": BASE})
     estate["orders"] = {"app.py": producer("TOPIC")}
     built = build(tmp_path, estate)
     assert built.deploy("deploy/compose.yaml", "api")["dst"] == "svc:api@orders"
-    assert "topic:api-value" not in built.topics
+    assert "topic:api-value" in built.topics
 
 
 def test_an_extending_services_unplaced_build_is_said_where_the_path_is(tmp_path):

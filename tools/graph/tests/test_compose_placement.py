@@ -138,7 +138,8 @@ def test_a_build_mapping_with_no_context_builds_the_files_own_directory(
         tmp_path, build_yaml, where, within):
     """D534-71, D534-89: the Compose Specification defaults `context` to the project
     directory, which the extractor takes as the file's own, like main. So `exact` from the
-    component's root, `own` with `built_within` below it; the env stays main's."""
+    component's root, `own` with `built_within` below it; its settings follow the placement
+    from the root, and key by the name rule below it (decision 55, D24-147)."""
     built = build(tmp_path, {"orders": {where: (
         "services:\n  web:\n" + build_yaml + "    environment:\n      TOPIC: web-value\n")},
         "other": {"README.md": "x\n"}})
@@ -151,9 +152,10 @@ def test_a_build_mapping_with_no_context_builds_the_files_own_directory(
 
 
 def test_two_declarations_one_file_types_apart_keep_their_own_claims(tmp_path):
-    """D534-76: `on:` (a YAML boolean) and `"on":` (a string) are two declarations, and
-    each keeps its own placement and env view: the first builds `.` and so files its
-    setting under the component, as main does."""
+    """D534-76, D24-142, D24-150: `on:` (a YAML boolean) and `"on":` (a string) are two
+    declarations, and each keeps its own placement and env view: the first builds `.` and so
+    files its setting under the component; the second, in the building file itself, is no
+    `-f` layer - it keys by the name rule, as on `main`, never with the build."""
     built = build(tmp_path, {"orders": {
         "docker-compose.yml": ("services:\n  on:\n    build: .\n    environment:\n"
                                "      TOPIC: a\n  \"on\":\n    environment:\n      TOPIC: b\n"),
@@ -161,6 +163,22 @@ def test_two_declarations_one_file_types_apart_keep_their_own_claims(tmp_path):
     assert built.topics == ["topic:a"]
     assert sorted((e["dst"], e["props"]["mapped_by"]) for e in built.deploys) == [
         ("svc:on@orders", "build"), ("svc:on@orders", "build")]
+
+
+@pytest.mark.parametrize("own_build, topics", [(".", ["topic:a"]), ("../nope", [])],
+                         ids=["placed", "unplaced"])
+def test_a_twin_in_the_building_file_keys_by_name_whatever_other_files_build(tmp_path, own_build,
+                                                                            topics):
+    """D24-150: a declaration whose own file builds the name - placed or not - is no `-f` layer,
+    though another file of its component builds the name elsewhere: keyed with that build,
+    `other`'s code would read the twin's `b`."""
+    built = build(tmp_path, {"orders": {
+        "docker-compose.yml": (f"services:\n  on:\n    build: {own_build}\n    environment:\n"
+                               "      TOPIC: a\n  \"on\":\n    environment:\n      TOPIC: b\n"),
+        "docker-compose.other.yml": "services:\n  \"on\":\n    build: ../other\n",
+        "app/pub.py": producer("TOPIC")},
+        "other": {"app/pub.py": producer("TOPIC")}})
+    assert built.topics == topics
 
 
 # ── V2: a layer inherits, in all four cells (D534-41, D534-51) ───────────────────────────

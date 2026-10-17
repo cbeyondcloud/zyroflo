@@ -196,7 +196,7 @@ class Claim(NamedTuple):
     scope: str              # the component that id is scoped to - the node's `component`
     component: str          # the edge's `component`: whose code the service is, or ""
     mapped_by: str          # "build", "name", or ""
-    view: str               # the env-view key its environment is published under: main's
+    view: str               # the env-view key its environment is published under (env_view)
     join: bool = False      # a deployment-only claim, for `join-by-name` to decide
     unplaced: str = ""      # why its own `build:` could not be placed - a row
     ambiguous: tuple[str, ...] | list[str] = ()   # the components a layer could mean - a row
@@ -232,7 +232,7 @@ def _context_of(service: Any) -> tuple[bool, str | None]:
 
     A `build:` mapping with no `context:`, or a null one, builds the project directory: the
     Compose Specification's `build.context` "defaults to project directory (`.`)" when not
-    set (D534-71). Its env view is still main's, from `env_view`.
+    set (D534-71).
     """
     if not isinstance(service, dict) or "build" not in service:
         return False, None
@@ -462,32 +462,33 @@ def _body(node: Any) -> dict | None:
     return None
 
 
-def env_view(compose_file: Path, service: dict, repos: list[RepoRef], name: str) -> str:
-    """The env view a declaration's values are published under: main's, by main's own rule
-    (ruling 10). That is the component whose directory the build context RESOLVES to on this
-    filesystem, else the component named like the service, else the service's name.
+def env_view(name: str, rel: str, declares: bool, comp: str, how: str,
+             placed_in: dict[str, list[tuple[str, str]]], declaring: set[str]) -> str:
+    """The env view a declaration's values are published under (decision 55, design pass 24 -
+    ruling 10 revised): the component its OWN build places its claim on, where that build's
+    context is a component's own directory (`exact` - path arithmetic, `built_by`'s answer,
+    never the filesystem, so a value keys alike on every machine; the build a T620 chain brings
+    counts as the service's own). A context inside a component - the declaring one's (`own`)
+    or another's (`within`, an inference, which never carries settings to code) - and a build
+    nothing could place key by the name rule, as on `main` (D24-137: keyed to the declaring
+    component, a sidecar's settings configured its component's whole code with no row).
 
-    Kept apart from placement on purpose. `built_by` places a claim by path arithmetic, so
-    ids are the same on every machine; this reads the filesystem exactly as main did, so
-    every value resolves as on main, including the cells where the two answers differ: a
-    `build:` mapping with no `context:`, a context differing only in letter case, a symlink
-    and an absolute path (D534-71, D534-72). Its platform and filesystem dependence is
-    main's, and remainder V-e's row inherits it.
-    """
-    build = service.get("build")
-    context = build.get("context") if isinstance(build, dict) else build
-    if isinstance(context, str) and context.strip():
-        try:
-            resolved = (compose_file.parent / context.strip()).resolve()
-        except OSError:                       # pragma: no cover - platform-dependent
-            resolved = None
-        if resolved is not None:
-            for repo in repos:
-                if repo.path.resolve() == resolved:
-                    return repo.alias
-    for repo in repos:
-        if repo.alias == name:
-            return repo.alias
+    A declaration with no `build:` of its own is a `-f` layer where its component builds the
+    name in OTHER files: it keys with those builds where every one places it in one component,
+    exactly, and by the name rule where they do not (D24-20, D24-47, D24-57, D24-68). A
+    declaration whose own file builds the name is no layer - it keys by the name rule, whatever
+    other files build (D24-142, D24-150). The name rule is the service's own name: the view the
+    component named like it reads (D24-6: `main`'s filesystem branch, gone, decided little).
+
+    `placed_in` holds, per file of the component, the placements of this name's builds there;
+    `declaring` the files declaring a build of it, placed or not."""
+    if declares:
+        return comp if how == "exact" else name
+    if rel in declaring:
+        return name
+    others = [(c, h) for r, placed in placed_in.items() if r != rel for c, h in placed]
+    if others and all(h == "exact" for _, h in others) and len({c for c, _ in others}) == 1:
+        return others[0][0]
     return name
 
 
@@ -648,8 +649,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     for the same name (T588; `layers` maps each override to its base): nine of `Claim`'s
     seventeen fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
     `inferred`, `local` and `build_from` - and its `extends_unread` where it carries none of
-    its own, a fact no row is emitted from (D23-118). `view` stays the override's own, main's
-    rule (ruling 10); `unplaced` and `ambiguous` are the reasons for the base's own rows,
+    its own, a fact no row is emitted from (D23-118) - and `view` (decision 55: compose merges
+    the pair itself); `unplaced` and `ambiguous` are the reasons for the base's own rows,
     which stay the base's (design review D15a-15); `unfollowed` and `extends` are its own
     chain's, whose row is its own (D23-134); and `image` and `image_from` are its package's,
     computed once and set on both claims (D23-158).
@@ -663,6 +664,11 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: - (`built_within`, inferred) - so a layer inherits the placement too (D534-41).
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
+    #: Per service name, per file, how each of its builds there is placed - (component, how) -
+    #: and the files declaring a build of it, placed or not: what a declaration's env view is
+    #: keyed by (decision 55, `env_view`).
+    placed_in: dict[str, dict[str, list[tuple[str, str]]]] = {}
+    declaring: dict[str, set[str]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
                        int, tuple[str, str, str, bool, bool, str], tuple[Any, str]]] = []
     building = False
@@ -731,15 +737,17 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             within = (posixpath.normpath(posixpath.join(context_dir,
                                                         context.replace("\\", "/")))
                       if how in ("within", "own") and context else "")
-            # The env view is MAIN's, by main's own rule, whatever the placement (ruling
-            # 10): T579 moves a built service's node, never which code sees its settings.
-            view = env_view(repo.path / rel, service or {}, ctx.repos, name)
+            # The env view is keyed after every file's builds are known (decision 55): a layer
+            # keys with the builds its component's other files place.
             pending.append((rel, name, node, service,
-                            (declares, comp, why, within, how == "within"), view,
+                            (declares, comp, why, within, how == "within"), how,
                             _yaml.line_of(key_node), followed, imaged))
             if comp:
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
+                placed_in.setdefault(name, {}).setdefault(rel, []).append((comp, how))
+            if declares:
+                declaring.setdefault(name, set()).add(rel)
     decls: dict[str, list[Decl]] = {}
     #: The declarations a context a base wrote places - `(file, its index in that file's
     #: declarations)`, never its line, which flow style shares between services (review
@@ -751,8 +759,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: written ("" where it writes none).
     imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
     own_place: dict[tuple[str, int], str] = {}
-    for rel, name, node, service, decl, view, line, followed, imaged in pending:
+    for rel, name, node, service, decl, how, line, followed, imaged in pending:
         frm, unfollowed, written, _own, context_brought, unread = followed
+        view = env_view(name, rel, decl[0], decl[1], how, placed_in.get(name, {}),
+                        declaring.get(name, set()))
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
         if frm and claim.mapped_by == "build":
@@ -775,7 +785,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             inherited.setdefault(decl.name, decl.claim)
         decls[override] = [
             decl._replace(claim=inherited[decl.name]._replace(
-                view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
+                unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
                 extends=decl.claim.extends,
                 extends_unread=decl.claim.extends_unread or inherited[decl.name].extends_unread))
             if decl.name in inherited and not _context_of(decl.service)[0]
@@ -838,7 +848,7 @@ def _claim(name: str, declares: bool, comp: str, why: str, within: str, inferred
     """Where one declaration lands. A node's `component` is the component its id is scoped
     to (D534-13): the built component, or the declaring one.
 
-    Environment is filed as on main, under `view` (ruling 10), and a service a building
+    Environment is filed under `view` (`env_view`, decision 55), and a service a building
     component does not build is marked `local` so a reader of that name is told where the
     value came from (ruling 4)."""
     if comp:                          # this file builds it: one node per (name, component)

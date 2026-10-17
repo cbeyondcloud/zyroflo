@@ -131,23 +131,25 @@ def matrix_estate(layout: str, cell: str,
 
 @pytest.mark.parametrize("cell", CELLS)
 @pytest.mark.parametrize("layout", sorted(MATRIX))
-def test_each_class_cell_gets_the_matrix_row_and_keeps_mains_id_and_env(
+def test_each_class_cell_gets_the_matrix_row_keeps_mains_id_and_keys_its_env_by_name(
         tmp_path, monkeypatch, layout, cell):
-    """D534-77, D534-90, D534-96, D534-104, D534-105, D534-111, D534-113."""
+    """D534-77, D534-90, D534-96, D534-104, D534-105, D534-111, D534-113; decision 55 (D24-146):
+    an unplaced build keys by the name rule, never the filesystem, so the declaring component's
+    code reads none of its values in any cell, on any platform."""
     if layout == "root beside others" and cell == "junction":
         # Every link here lies inside the root component's tree. On Windows, where a junction
         # is not `os.path.islink`, the two traversal backends disagree about it (T592), so
         # pin the pure-Python one (D534-107); on POSIX both skip a symlinked directory and
         # the pin changes nothing (C534-11).
         monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
-    estate, ws_name, source, node, resolves = matrix_estate(layout, cell, tmp_path)
+    estate, ws_name, source, node, _resolves = matrix_estate(layout, cell, tmp_path)
     built = build(tmp_path, estate, ws_name=ws_name)
     assert built.code == 0
     assert built.placed(source) == (node, "", ""), "main's id; the edge loses its labels"
     why = [r["why"] for r in built.kinds("compose-build-unresolved")
            if r["component"] == source.split("/")[0]]
     assert len(why) == 1 and MATRIX[layout][CELLS.index(cell)] in why[0], why
-    assert ("topic:web-value" in built.topics) == resolves, "env is main's"
+    assert "topic:web-value" not in built.topics, "keyed by the name rule, never the filesystem"
     if layout == "root beside others":
         # The root component read the declaring component's file too, and placed the
         # context as its own (D534-113's fourth layout). Since T591 it reads only what lies

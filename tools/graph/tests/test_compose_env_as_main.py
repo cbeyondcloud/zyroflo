@@ -1,12 +1,11 @@
-"""Ruling 10: every environment value resolves exactly as on main (T534, T579).
-
-T579 moves a built service's NODE onto the component it is built from; it never moves which
-component's code sees the service's settings. The env view is main's own rule
-(`compose.env_view`), kept apart from placement, so a value resolves as it did whatever the
-placement. Every expectation below is main's measured outcome, so most of these tests PIN
-main's behaviour (they pass on main too). Three do not: the read-order tests fail on the
-v5 to v9 prototypes, which sorted compose files as POSIX text, and the block-spelling test
-is T534's one intended change to a value (D534-4, D534-24).
+"""Keying (decision 55, design pass 24 - ruling 10 revised): a declaration's settings reach the code
+its own build places its claim on, where that build's context is a component's own directory
+(`exact`), by path arithmetic, never the filesystem; a context inside a component - the declaring
+one's (`own`) or another's (`within`) - an unplaced build, and a declaration with no build of its
+own key by the name rule, as on `main`; a T588 override takes its base's, and a `-f` layer keys
+with its component's placed builds in other files where they agree on one component, exactly.
+The cells below are `main`'s measured outcomes where the keying keeps them, and the design's where
+it moves them (each a recorded delta, `plans/b24-evidence/b24_ledger.md`).
 
 Ruling 9: compose ranks env values within one component, as on main; across components the
 value read last wins, which T590 carries.
@@ -42,7 +41,7 @@ def image(name: str, value: str) -> str:
     return svc(name, None, value, image="org/x:1")
 
 
-# ── ruling 10: the shapes the round-7 review measured (D534-62 to D534-64) ───────────────
+# ── keying A: the shapes the round-7 review measured (D534-62 to D534-64) ────────────────
 
 SHAPES = {
     "a subdirectory build files under the service's name": (
@@ -58,15 +57,15 @@ SHAPES = {
             svc("web", ".", None), svc("redis", "./redis-custom", "1gb", key="MAXMEMORY")),
             "app/cache.py": producer("MAXMEMORY")}},
         [], ["env-key-unset:platform/app/cache.py"]),
-    "a layer's value stays under the service's name": (
+    "a -f layer's value meets its building file's in the built component": (
         {"orders": {"docker-compose.yml": compose(svc("web", ".", "base-value")),
                     "docker-compose.zz.yml": compose(svc("web", None, "layer-value")),
                     "app/pub.py": producer("TOPIC")}},
-        ["topic:base-value"], []),
-    "a cross-component build under a differing name": (
+        ["topic:layer-value"], []),
+    "a cross-component build reaches the code it is built from (S7)": (
         {"deploy": {"docker-compose.yml": compose(svc("web", "../orders"))},
          "orders": {"app/pub.py": producer("TOPIC")}},
-        [], ["env-key-unset:orders/app/pub.py"]),
+        ["topic:web-value"], []),
     "a within placement does not join the holder's environment": (
         {"platform": {"svc-a/Dockerfile": "FROM scratch\n", "app/pub.py": producer("TOPIC")},
          "platform/svc-a": {},
@@ -92,7 +91,7 @@ SHAPES = {
          "zz-deploy": {"docker-compose.yml": compose(svc("worker", "../svc-a", "worker-value"))},
          "svc-a": {"app/pub.py": producer("TOPIC")},
          "__canonical__": [{"service": "worker", "owner": "zz-deploy"}]},
-        [], ["env-key-unset:svc-a/app/pub.py"]),
+        ["topic:worker-value"], ["superseded-declaration:aa-deploy/docker-compose.yml"]),
 }
 
 
@@ -102,6 +101,98 @@ def test_a_built_services_settings_resolve_as_on_main(tmp_path, shape):
     built = build(tmp_path, estate)
     assert built.code == 0
     assert env(built) == (topics, rows)
+
+
+# ── keying A's cells beyond the shapes (decision 55) ─────────────────────────────────────
+
+
+def test_an_overrides_settings_reach_the_component_its_base_builds(tmp_path):
+    """D534-62's layer shape: the override takes its base's claim, its view included, so its
+    values reach the code the base builds - `main` filed them under the service's name."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": compose(svc("web", "../orders", None)),
+                   "docker-compose.override.yml": compose(svc("web", None, "ov-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")}})
+    assert env(built) == (["topic:ov-value"], [])
+
+
+def test_a_f_layer_keys_with_its_components_build_in_another_file(tmp_path):
+    """D24-20, D24-47: `docker-compose.zz.yml` declares no build of `web`, which `deploy`'s other
+    file builds from `../orders` - the two files' values are ranked as one component's, the
+    layer's last in segment order."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": compose(svc("web", "../orders", "base-value")),
+                   "docker-compose.zz.yml": compose(svc("web", None, "zz-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")}})
+    assert env(built) == (["topic:zz-value"], [])
+
+
+def test_an_unplaced_builder_keys_by_name_and_the_layer_follows_the_placed_one(tmp_path):
+    """D24-68, D24-84: a build nothing could place is no placed build - its settings key by the
+    name rule, reaching `web`, the component named like the service, which is told where the
+    value came from (`env-key-from-building-repo`: a building repo's service whose build it does
+    not place) - while the `-f` layer keys with the placed build, reaching `orders`."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.a.yml": compose(svc("web", "../orders", None)),
+                   "docker-compose.b.yml": compose(svc("web", "../nope", "nope-value")),
+                   "docker-compose.zz.yml": compose(svc("web", None, "zz-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")},
+        "web": {"app/pub.py": producer("TOPIC")}})
+    assert env(built) == (["topic:nope-value", "topic:zz-value"],
+                          ["env-key-from-building-repo:web/app/pub.py"])
+
+
+def test_the_own_cell_beside_a_f_layer_keeps_mains_contest_under_a_block(tmp_path):
+    """D24-47, D24-137: a build from a directory inside `deploy` keys by the name rule, and so does
+    the layer beside it - both to `payments`, contesting in `deploy` as on `main`: the block's file
+    wins, the layer's value is its row, and `payments` reads the block's value."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.a.yml": compose(svc("payments", "./svc", "own-value")),
+                   "docker-compose.b.yml": compose(svc("payments", None, "b-value")),
+                   "svc/Dockerfile": "FROM scratch\n"},
+        "payments": {"app/pub.py": producer("TOPIC")},
+        "__canonical__": [{"service": "payments", "owner": "deploy",
+                           "path": "docker-compose.a.yml"}]})
+    assert env(built) == (["topic:own-value"],
+                          ["superseded-declaration:deploy/docker-compose.b.yml"])
+
+
+def test_a_layer_over_builds_in_two_components_keys_by_name(tmp_path):
+    """`_claim`'s ambiguous branch: the layer's builds place the service in two components, so it
+    keys by the name rule, as on `main` - neither component reads the layer's value."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.a.yml": compose(svc("web", "../orders", None)),
+                   "docker-compose.b.yml": compose(svc("web", "../billing", None)),
+                   "docker-compose.zz.yml": compose(svc("web", None, "zz-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")},
+        "billing": {"app/pub.py": producer("TOPIC")}})
+    assert built.topics == []
+    assert built.kinds("compose-build-ambiguous")
+
+
+def test_an_override_takes_its_bases_view_beside_a_third_building_file(tmp_path):
+    """T588 decides an override by its base, never by the component's other files: with `prod`
+    building `web` elsewhere, the override still configures what its base builds."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": compose(svc("web", "../orders", None)),
+                   "docker-compose.override.yml": compose(svc("web", None, "ov-value")),
+                   "docker-compose.prod.yml": compose(svc("web", "../billing", None))},
+        "orders": {"app/pub.py": producer("TOPIC")},
+        "billing": {"app/pub.py": producer("TOPIC")}})
+    assert built.topics == ["topic:ov-value"]
+    assert built.deploy("deploy/docker-compose.override.yml")["dst"] == "svc:web@orders"
+
+
+def test_an_exact_and_a_within_build_beside_a_layer_key_it_by_name(tmp_path):
+    """D24-57: the layer's builds do not all place it in one component exactly - a `within` is an
+    inference, which never carries settings to code - so it keys by the name rule."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.a.yml": compose(svc("web", "../orders", None)),
+                   "docker-compose.b.yml": compose(svc("web", "../platform/svc-x", None)),
+                   "docker-compose.zz.yml": compose(svc("web", None, "zz-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")},
+        "platform": {"svc-x/Dockerfile": "FROM scratch\n", "app/pub.py": producer("TOPIC")}})
+    assert "topic:zz-value" not in built.topics
 
 
 # ── files are read in main's order (fails on the v5 to v9 prototypes) ────────────────────
@@ -182,17 +273,18 @@ SPELLINGS = {
     "padded dot": ('    build: " . "\n', RESOLVES),
     "empty string": ('    build: ""\n', UNSET),
     "bare null": ("    build:\n", UNSET),
-    "map, no context": ("    build:\n      dockerfile: Dockerfile\n", UNSET),
-    "map, null context": ("    build:\n      context:\n      dockerfile: Dockerfile\n", UNSET),
-    "map, tilde context": ("    build: {context: ~}\n", UNSET),
-    "map, empty map": ("    build: {}\n", UNSET),
+    # a mapping with no context builds the project directory - here the component's root
+    "map, no context": ("    build:\n      dockerfile: Dockerfile\n", RESOLVES),
+    "map, null context": ("    build:\n      context:\n      dockerfile: Dockerfile\n", RESOLVES),
+    "map, tilde context": ("    build: {context: ~}\n", RESOLVES),
+    "map, empty map": ("    build: {}\n", RESOLVES),
     "map, context dot": ("    build:\n      context: .\n", RESOLVES),
     "map, context empty": ('    build:\n      context: ""\n', UNSET),
     "map, context ../orders": ("    build:\n      context: ../orders\n", RESOLVES),
     "../orders": ("    build: ../orders\n", RESOLVES),
-    # main resolves on the filesystem: case folds on Windows, not on POSIX.
-    "../ORDERS": ("    build: ../ORDERS\n", WINDOWS),
-    "../Orders": ("    build: ../Orders\n", WINDOWS),
+    # paths are matched exactly, never on the filesystem: a case twin keys by the name rule
+    "../ORDERS": ("    build: ../ORDERS\n", UNSET),
+    "../Orders": ("    build: ../Orders\n", UNSET),
     "./svc-a": ("    build: ./svc-a\n", UNSET),
     "./nope": ("    build: ./nope\n", UNSET),
     "..": ("    build: ..\n", UNSET),
@@ -201,16 +293,17 @@ SPELLINGS = {
     "url": ("    build: https://github.com/x/y.git\n", UNSET),
     "list": ("    build: [a, b]\n", UNSET),
     "int": ("    build: 5\n", UNSET),
-    # a backslash separates only on Windows; on POSIX it is part of a file name.
-    "backslash dot": ("    build: '.\\'\n", WINDOWS),
-    "absolute own root": (f"    build: '{ORDERS_ROOT}'\n", RESOLVES),
+    # path arithmetic reads a backslash as a separator on every platform (D24-145)
+    "backslash dot": ("    build: '.\\'\n", RESOLVES),
+    # an absolute path is placed nowhere, so it keys by the name rule (D24-154)
+    "absolute own root": (f"    build: '{ORDERS_ROOT}'\n", UNSET),
 }
 
 
 @pytest.mark.parametrize("spelling", sorted(SPELLINGS))
-def test_the_env_view_is_mains_for_every_build_spelling(tmp_path, spelling):
-    """Placement and the env view differ on purpose (V2): whatever the placement, a value
-    reaches the component's own code exactly when main's filesystem rule says so."""
+def test_the_env_view_follows_the_builds_placement_for_every_build_spelling(tmp_path, spelling):
+    """Decision 55: a value reaches the component's own code exactly where its build is placed
+    on the component's own directory, by path arithmetic - the same on every platform."""
     build_yaml, resolves = SPELLINGS[spelling]
     build_yaml = build_yaml.replace(ORDERS_ROOT, str(tmp_path / "ws" / "orders"))
     built = build(tmp_path, {
