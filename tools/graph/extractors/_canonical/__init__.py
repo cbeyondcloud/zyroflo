@@ -57,7 +57,9 @@ import fnmatch
 import posixpath
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
+
+from tools.graph.core.lib import ids
 
 
 def workspace_layout(config: dict) -> dict[str, str]:
@@ -351,3 +353,159 @@ def is_root_path(block: dict) -> bool:
     if not str(block.get("path") or "").strip():
         return False
     return claimed_path(block, str(block.get("owner", ""))) == ""
+
+
+# ── batch 24 (T590): the one decision, over plain claims (design pass 24, section 2) ─────────
+
+#: A claim as the decision reads it - plain data, so extraction and a link pass apply one rule:
+#: its declaring component, its deployment node's published facts (`kind`, `path`, `package`),
+#: its file and its line.
+PlainClaim = tuple[str, Mapping[str, Any], str, int]
+
+
+def declared_package(node: Mapping[str, Any]) -> str:
+    """The file whose package a deployment node says it is part of, "" for none - only a relative
+    path that does not climb out of its component (reviews B15a-4, B15a-11): `mark-canonical`'s
+    reading, here so the plain decision reads it too."""
+    package = node.get("package")
+    if not isinstance(package, str) or not package:
+        return ""
+    normal = posixpath.normpath(package)
+    return "" if normal == ".." or normal.startswith(("../", "/")) else normal
+
+
+def in_a_declared_child(path: str, component: str, layout: Mapping[str, str]) -> bool:
+    """Whether the workspace path `path` lies under a component declared inside `component` -
+    whose file it then is by T591's rule, not `component`'s (review B15a-11), by whole path
+    segments (`child_holding`, T616)."""
+    mine = layout[component]
+    if mine == ".":
+        rel = path
+    elif path.startswith(mine + "/"):
+        rel = path[len(mine) + 1:]
+    else:
+        return False
+    return child_holding(rel, declared_children(component, dict(layout))) is not None
+
+
+def package_key(component: str, layout: Mapping[str, str], source_file: str, declared: str,
+                fallback: str) -> str:
+    """The package a claim belongs to, keyed by its WORKSPACE path: one file is one package unless
+    its deployment node names the file whose package it is part of (T588), a file of its own
+    component, never one inside a component declared in it - so two components'
+    `docker-compose.yml` stay two packages (D24-31). With no layout for the component, the named
+    package's deploy node, else `fallback` (its own). `mark-canonical`'s `package_of` and
+    compose's env ranking both key by it."""
+    if component not in layout:
+        return ids.deployment_id(component, declared) if declared else fallback
+    if declared:
+        key = posixpath.normpath(posixpath.join(layout[component], declared))
+        if not in_a_declared_child(key, component, layout):
+            return key
+    return posixpath.normpath(posixpath.join(layout[component], source_file))
+
+
+def select_package_by_claims(packages: Mapping[str, Sequence[PlainClaim]],
+                             decl: dict | None) -> tuple[str | None, str]:
+    """Which package a block selects, and how - `mark-canonical`'s two steps over plain claims,
+    `None` where it decides nothing: a `path` selects the one package it designates, of two or
+    more the one whose own file it names, then whose own chart it names (ruling 14), else
+    nothing; an `owner` selects the one package it reads, and one reading several selects none
+    (D534-39). A path reading as the owner's root takes the owner branch (D15b-9, D15b-30).
+    Held packages (ruling 19) are the links-level caller's to drop: no compose claim is held."""
+    if decl is None:
+        return None, ""
+    path = (decl.get("path") or "").strip().strip("/")
+    if path and not is_root_path(decl):
+        def holds(key: str, test: Callable[[PlainClaim], bool]) -> bool:
+            return any(test(claim) for claim in packages[key])
+
+        designated = [key for key in packages
+                      if holds(key, lambda c: designates(decl, c[0], c[1], c[2]))]
+        if len(designated) <= 1:
+            return (designated[0], f"path={path}") if designated else (None, "")
+        for rank in (2, 1):
+            exact = [key for key in designated
+                     if holds(key, lambda c, r=rank: names_exactly(decl, c[0], c[1], c[2]) == r)]
+            if exact:
+                return (exact[0], f"path={path}") if len(exact) == 1 else (None, "")
+        return None, ""
+    owner = (decl.get("owner") or "").strip()
+    if owner:
+        matches = [key for key, claims in packages.items()
+                   if any(claim[0] == owner for claim in claims)]
+        if len(matches) == 1:
+            return matches[0], f"owner={owner}"
+    return None, ""
+
+
+def choices_by_claims(packages: Mapping[str, Sequence[PlainClaim]]) -> dict[str, dict]:
+    """For each package, the smallest `[[canonical]]` fields that select exactly it, by
+    `select_package_by_claims`' own rule (D534-39, ruling 7): an owner reading no other package -
+    the representative's first - else the representative's owner with its path. The
+    representative is a package's base claim where it has one, else the first by component,
+    file and line (D534-30, D534-42)."""
+    reads: dict[str, set[str]] = {}
+    for key, claims in packages.items():
+        for claim in claims:
+            reads.setdefault(claim[0], set()).add(key)
+    out: dict[str, dict] = {}
+    for key, claims in sorted(packages.items()):
+        rep = min(claims, key=lambda c: (bool(declared_package(c[1])), c[0], c[2], c[3]))
+        readers = sorted({c[0] for c in claims} - {""}, key=lambda c: (c != rep[0], c))
+        owner = next((c for c in readers if reads.get(c) == {key}), "")
+        out[key] = {"owner": owner} if owner else {"owner": rep[0], "path": rep[2]}
+    return out
+
+
+class EnvDecision(NamedTuple):
+    """How a (view, key) is decided across components (design pass 24, section 2), and how each
+    loser's row says so - its form: (1) a block selected another package; (2) no block selected
+    one - `block` the one that decides none, if any; (3) the selected package sets no value; (4)
+    a group holding two services, decided by no block - `block` one naming a service of it."""
+
+    winner: str                    # the winning component
+    form: int
+    block: dict | None
+    package: str                   # the package the block selects (forms 1 and 3)
+    choices: dict[str, dict]       # the decision set's packages and their choices (2 and 3)
+    services: tuple[str, ...]      # the services the candidates are for
+
+
+def env_winner(candidates: Mapping[str, Mapping[str, Any]],
+               claims: Mapping[str, Mapping[str, Sequence[PlainClaim]]],
+               config: Mapping[str, Any]) -> EnvDecision:
+    """The component whose candidate a view holds for one key - ONE function, applied by
+    extraction and by `env-ranking` alike (design pass 24, section 2). `candidates` maps each
+    component to its own winner for the key (`service` and `package` among its facts); `claims`
+    maps each service, normalised, to the compose packages claiming it in the view - a package
+    setting no key included (D24-32, D24-44) - each a list of `PlainClaim`s.
+
+    By the workspace's one decision: ONE `deciding_block` call over the decision set, that block
+    selecting a package by `select_package_by_claims`; the selected package's candidate wins, and
+    where it sets no value the key is decided as with no block (D24-45). Otherwise, and for a
+    group holding two services - which no block decides, a block ranking one service's packages
+    (D24-46, D24-60, D24-67) - the last component by NAME, never the config's order, which no
+    stamp covers (D24-38)."""
+    last = max(candidates)
+    services = tuple(sorted({ids.norm_id(str(c.get("service", ""))) for c in candidates.values()}))
+    blocks = [b for b in config.get("canonical") or [] if isinstance(b, dict)]
+    if len(services) > 1:
+        named = next((b for b in blocks
+                      if ids.norm_id(str(b.get("service", ""))) in services), None)
+        return EnvDecision(last, 4, named, "", {}, services)
+    (service,) = services
+    packages = claims.get(service, {})
+    mine = [b for b in blocks if ids.norm_id(str(b.get("service", ""))) == service]
+    block, _ = deciding_block(mine, [(c[0], c[1], c[2]) for group in packages.values()
+                                     for c in group])
+    choices = choices_by_claims(packages)
+    if block is None:
+        return EnvDecision(last, 2, None, "", choices, services)
+    selected, _how = select_package_by_claims(packages, block)
+    if selected is None:
+        return EnvDecision(last, 2, block, "", choices, services)
+    owners = sorted(comp for comp, cand in candidates.items() if cand.get("package") == selected)
+    if owners:
+        return EnvDecision(owners[0], 1, block, selected, choices, services)
+    return EnvDecision(last, 3, block, selected, choices, services)

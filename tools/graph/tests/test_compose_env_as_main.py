@@ -7,8 +7,9 @@ with its component's placed builds in other files where they agree on one compon
 The cells below are `main`'s measured outcomes where the keying keeps them, and the design's where
 it moves them (each a recorded delta, `plans/b24-evidence/b24_ledger.md`).
 
-Ruling 9: compose ranks env values within one component, as on main; across components the
-value read last wins, which T590 carries.
+Across components (T590, design pass 24, section 2): one decision - the workspace's block over the
+compose packages claiming the service, else the last component by name - and the losers' rows are
+`env-ranking`'s, judged in a whole run alone (`test_env_ranking.py`).
 
 Everything here is synthetic and none of it names a real workspace.
 """
@@ -430,7 +431,7 @@ def test_the_two_services_row_cites_a_kept_declaration_above_it(tmp_path):
     assert row["line"] == 9 and "at `docker-compose.yml:5` for `worker`" in row["why"], row["why"]
 
 
-# ── ruling 9: ranking within one component; across components the last read wins ────────
+# ── within one component as on main; across components, one decision (T590) ──────────────
 
 PANTRY = Path(__file__).resolve().parent / "fixtures" / "pantry"
 MAINS_PANTRY_WHY = (
@@ -459,54 +460,56 @@ def two_deploy_repos(owner: str) -> dict:
             "__canonical__": [{"service": "payments", "owner": owner}]}
 
 
-def test_across_components_the_row_cites_the_dropped_declaration_and_claims_no_ranking(
-        tmp_path):
-    """The owner's file is read second and replaces the other component's value. The row
-    names that value where it is written, qualifies the kept file, and does not claim the
-    owner's value is used: a component read later could still replace it (T590)."""
+def test_across_components_the_row_cites_the_dropped_declaration_and_the_block(tmp_path):
+    """D24-63, D24-138: the owner's value wins whatever the read order, and the other component's
+    row - the pass's form (1) - names its value where it is written and the block that decided;
+    `main`'s "not yet ranked against each other" is gone."""
     built = build(tmp_path, two_deploy_repos("deploy-b"))
     assert built.topics == ["topic:b-value"]
     row, = built.kinds("superseded-declaration")
     assert (row["component"], row["source_file"], row["line"], row["value"]) == (
         "deploy-a", "docker-compose.yml", 5, "a-value")
-    assert "in deploy-b/docker-compose.yml" in row["why"]
-    assert "not yet ranked against each other" in row["why"]
-    assert "is what the graph uses" not in row["why"]
+    assert "selects `deploy-b/docker-compose.yml`" in row["why"]
+    assert "not yet ranked against each other" not in row["why"]
 
 
-def test_with_the_owner_read_first_a_later_components_value_still_wins(tmp_path):
-    """Pinned as main's until T590: ranking does not cross components, so the value read
-    last wins, with no row."""
+def test_with_the_owner_read_first_the_owners_value_still_wins(tmp_path):
+    """D534-48, D534-67 (T590): the owner read first is no longer replaced by a component read
+    later - the block decides, and the later component's value is a row."""
     built = build(tmp_path, two_deploy_repos("deploy-a"))
-    assert built.topics == ["topic:b-value"]
-    assert not built.kinds("superseded-declaration")
+    assert built.topics == ["topic:a-value"]
+    row, = built.kinds("superseded-declaration")
+    assert (row["component"], row["value"]) == ("deploy-b", "b-value")
 
 
-@pytest.mark.parametrize("owner, rows", [("zz", 1), ("mm", 1), ("aa", 0)])
-def test_three_components_rank_as_on_main_in_every_arrival_order(tmp_path, owner, rows):
-    """Pinned as main's (D534-68): owner read last, middle and first give 1, 1 and 0 rows,
-    and the value read last wins every time. A shared ranking table would change this."""
+@pytest.mark.parametrize("owner", ["zz", "mm", "aa"])
+def test_three_components_the_owners_value_wins_in_every_arrival_order(tmp_path, owner):
+    """D534-53, D24-53a: the owner read last, middle or first wins every time, and every losing
+    component has its row - `main` rowed only the value read last against the owner."""
     built = build(tmp_path, {
         **{f"{c}-deploy": {"docker-compose.yml": compose(image("payments", f"{c}-value"))}
            for c in ("aa", "mm", "zz")},
         "payments": {"app/pub.py": producer("TOPIC")},
         "__canonical__": [{"service": "payments", "owner": f"{owner}-deploy"}]})
-    assert built.topics == ["topic:zz-value"]
-    assert len(built.kinds("superseded-declaration")) == rows
+    assert built.topics == [f"topic:{owner}-value"]
+    assert sorted(r["component"] for r in built.kinds("superseded-declaration")) == sorted(
+        f"{c}-deploy" for c in ("aa", "mm", "zz") if c != owner)
 
 
-def test_within_one_component_a_later_components_value_still_replaces_the_owners(tmp_path):
-    """Pinned as main's (D534-67): the row keeps main's text, whose "the owner's value is
-    what the graph uses" is false here, because another component set the key later."""
+def test_a_later_component_no_longer_replaces_the_owners_value(tmp_path):
+    """D534-67, D24-130: the block's `path` selects `aa/docker-compose.yml` across components too,
+    so `a1` is what the graph keeps - `main` let `zz-deploy`, read later, replace it - with the
+    within row for `a2` (compose's) and `zz-deploy`'s form (1) row (the pass's)."""
     built = build(tmp_path, {
         "aa": {"docker-compose.yml": compose(image("payments", "a1")),
                "docker-compose.zz.yml": compose(image("payments", "a2"))},
         "zz-deploy": {"docker-compose.yml": compose(image("payments", "z-value"))},
         "payments": {"app/pub.py": producer("TOPIC")},
         "__canonical__": [{"service": "payments", "owner": "aa", "path": "docker-compose.yml"}]})
-    assert built.topics == ["topic:z-value"]
-    row, = built.kinds("superseded-declaration")
-    assert (row["component"], row["source_file"], row["value"]) == (
-        "aa", "docker-compose.zz.yml", "a2")
-    assert "so this declaration is not kept" in row["why"]
-    assert "The owner's value is what the graph uses" not in row["why"]
+    assert built.topics == ["topic:a1"]
+    rows = sorted((r["extractor"], r["component"], r["source_file"], r["value"])
+                  for r in built.kinds("superseded-declaration"))
+    assert rows == [("compose-services", "aa", "docker-compose.zz.yml", "a2"),
+                    ("env-ranking", "zz-deploy", "docker-compose.yml", "z-value")]
+    within = next(r for r in built.kinds("superseded-declaration") if r["component"] == "aa")
+    assert "so this declaration is not kept" in within["why"]

@@ -116,11 +116,7 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     node = nodes_by_id.get(edge.src)
     if node is None or node.type != "deploy":
         return ""
-    package = node.props.get("package")
-    if not isinstance(package, str) or not package:
-        return ""
-    normal = posixpath.normpath(package)
-    return "" if normal == ".." or normal.startswith(("../", "/")) else normal
+    return _canonical.declared_package(node.props)
 
 
 def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> bool:
@@ -130,15 +126,7 @@ def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> b
     the build reads a file's reader by (`_canonical.child_holding`, T616): by whole path
     segments, `dep` holds `dep/x`, never `deploy/x` (T530's trap; review B15a-13), and two
     components over one directory hold neither."""
-    mine = layout[component]
-    if mine == ".":
-        rel = path
-    elif path.startswith(mine + "/"):
-        rel = path[len(mine) + 1:]
-    else:
-        return False
-    return _canonical.child_holding(
-        rel, _canonical.declared_children(component, layout)) is not None
+    return _canonical.in_a_declared_child(path, component, layout)
 
 
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
@@ -153,15 +141,8 @@ def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str])
     only a caller that gave none - and a named package is read first, so with no layout the
     pair still keys on its base's deploy node (D15a-32).
     """
-    component = component_of(edge, nodes_by_id)
-    named = declared_package(edge, nodes_by_id)
-    if component not in layout:
-        return ids.deployment_id(component, named) if named else edge.src
-    if named:
-        declared = posixpath.normpath(posixpath.join(layout[component], named))
-        if not _in_a_declared_child(declared, component, layout):
-            return declared
-    return posixpath.normpath(posixpath.join(layout[component], edge.source_file))
+    return _canonical.package_key(component_of(edge, nodes_by_id), layout, edge.source_file,
+                                  declared_package(edge, nodes_by_id), edge.src)
 
 
 def file_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
@@ -297,6 +278,17 @@ def by_path(decl: dict, packages: dict[str, list[tuple[int, Edge]]],
     return None
 
 
+def plain_claims(packages: dict[str, list[tuple[int, Edge]]], nodes_by_id: dict[str, Node]
+                 ) -> dict[str, list[_canonical.PlainClaim]]:
+    """The packages' claims as `_canonical`'s plain decision reads them (batch 24): each claim's
+    component, its deployment node's facts - the declared package read as `declared_package`
+    reads it, from a deployment node alone - its file and its line."""
+    return {key: [(component_of(e, nodes_by_id),
+                   {**_node_props(e, nodes_by_id), "package": declared_package(e, nodes_by_id)},
+                   e.source_file, e.line) for _, e in group]
+            for key, group in packages.items()}
+
+
 def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | None,
                    nodes_by_id: dict[str, Node]) -> tuple[str | None, str]:
     """Which PACKAGE the declaration selects, and how. `None` means it did not decide.
@@ -312,28 +304,13 @@ def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | Non
     A package held on this node after its component refused it (`apart: held`) is never
     selected, by either branch (ruling 19): declared apart from this service, it is no
     variant of it. A path that reads as the owner's root takes the owner branch, recorded
-    `owner=` (D15b-9, D15b-30)."""
+    `owner=` (D15b-9, D15b-30). The two steps are `_canonical.select_package_by_claims`, which
+    compose's env ranking applies too (batch 24, D24-32); the held filter stays here, which
+    every caller of the links' decision reaches (D24-54, D24-59)."""
     if decl is None:
         return None, ""
     packages = {key: group for key, group in packages.items() if not is_held(group)}
-
-    # `path` first: it is the narrower statement, and the only one that can separate two
-    # packages living in ONE component — which `owner` cannot, since both would name it.
-    # Matched by each reader's own rule (batch 15b): `covers` for a compose file, the
-    # chart rule for a chart's - so a block naming a chart's template, its values overlay
-    # or its `Chart.yaml` decides a contest exactly as it ranks the host map.
-    path = (decl.get("path") or "").strip().strip("/")
-    if path and not _canonical.is_root_path(decl):
-        winner = by_path(decl, packages, nodes_by_id)
-        return (winner, f"path={path}") if winner is not None else (None, "")
-
-    owner = (decl.get("owner") or "").strip()
-    if owner:
-        matches = [src for src, claims in packages.items()
-                   if any(component_of(e, nodes_by_id) == owner for _, e in claims)]
-        if len(matches) == 1:
-            return matches[0], f"owner={owner}"
-    return None, ""
+    return _canonical.select_package_by_claims(plain_claims(packages, nodes_by_id), decl)
 
 
 def choices_by_package(packages: dict[str, list[tuple[int, Edge]]],
@@ -346,20 +323,7 @@ def choices_by_package(packages: dict[str, list[tuple[int, Edge]]],
     packages offers only theirs (D534-49)."""
     # A held package is never offered here (ruling 19): no choice may name it.
     packages = {key: group for key, group in packages.items() if not is_held(group)}
-    reads: dict[str, set[str]] = {}
-    for key, group in packages.items():
-        for _, edge in group:
-            reads.setdefault(component_of(edge, nodes_by_id), set()).add(key)
-    out: dict[str, dict] = {}
-    for key, group in sorted(packages.items()):
-        rep = representative(group, nodes_by_id)
-        rep_owner = component_of(rep, nodes_by_id)
-        readers = sorted({component_of(e, nodes_by_id) for _, e in group} - {""},
-                         key=lambda c: (c != rep_owner, c))
-        owner = next((c for c in readers if reads.get(c) == {key}), "")
-        out[key] = ({"owner": owner} if owner else
-                    {"owner": rep_owner, "path": rep.source_file})
-    return out
+    return _canonical.choices_by_claims(plain_claims(packages, nodes_by_id))
 
 
 def choices(packages: dict[str, list[tuple[int, Edge]]],
@@ -510,9 +474,11 @@ class CanonicalPass:
         """T623: a block designating a node an earlier block designates too decides nothing
         about that node, and is named at its line, as `canonical-duplicate` names a respelt
         name: the first block designating a node decides it. Compose still ranks by it the
-        environment values of the files it designates - it ranks them one component at a time
-        (ruling 9), so its decision is over that component's files alone - and the row says so
-        rather than claim every reader takes the first (review B21-29). Each is said with the
+        environment values of the files it designates wherever the earlier block designates
+        none of what a decision of compose's ranks - within a component, that component's own
+        files; across components, the packages claiming the service under a view
+        (`_canonical.env_winner`, batch 24) - and the row says so rather than claim every
+        reader takes the first (review B21-29). Each is said with the
         packages it designates the node through, which need not be one (review B21-1), and the
         ways on are the two that end the row - remove this block, or the earlier one if this
         is the one meant. Narrowing this block cannot: the earlier still designates the
@@ -539,10 +505,10 @@ class CanonicalPass:
             f"[[canonical]] block #{mine}{where(later)} ({fields}) designates `{service}` "
             f"through {through(later)}, and block #{first}{where(decl)} designates it too, "
             f"through {through(decl)}; the first block designating a node decides it, so "
-            f"block #{mine} decides nothing about this node - though compose, which ranks "
-            f"environment values one component at a time, still ranks by it the values of the "
-            f"files it designates. Keep the one you mean: remove this block, or remove block "
-            f"#{first} if this is the one",
+            f"block #{mine} decides nothing about this node - though compose still ranks by "
+            f"it the environment values of the files it designates wherever block #{first} "
+            f"designates none of the files a decision of compose's ranks. Keep the one you "
+            f"mean: remove this block, or remove block #{first} if this is the one",
             service=str(later.get("service", "")), node=service))
 
     def _held(self, res: ExtractResult, config: dict, service: str,

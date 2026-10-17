@@ -332,9 +332,11 @@ def test_link_passes_are_ordered_by_their_requirements():
     # `mark-generated` and `spec-align` require nothing and sit where the alphabetical
     # tie-break puts them, so renaming either moves it here with no change in meaning
     # (C534-14); `join-by-name` leads them only because its name sorts first. What the
-    # declarations pin is that the last two follow it (C534-20).
+    # declarations pin is that the last two follow it (C534-20). Batch 24: `env-ranking` rows
+    # what `mark-canonical`'s decision decides, so it follows that pass - a layer later, after
+    # `mark-semantic` too, which shares `mark-canonical`'s layer.
     assert ordered == ["join-by-name", "mark-generated", "spec-align", "mark-canonical",
-                       "mark-semantic"]
+                       "mark-semantic", "env-ranking"]
 
 
 def test_the_canonical_pass_registers_generically():

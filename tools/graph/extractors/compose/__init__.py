@@ -45,8 +45,18 @@ one resolution rule rather than two that can disagree:
 
 It is a **separate cache key** rather than a merge into the properties view. Whether a
 deployment's value overrides what a component declares for itself is the layering question,
-and layering across components is a link pass; silently merging here would answer it by
-accident and in whichever order the extractors happened to run.
+which merging the two here would answer by accident and in whichever order the extractors
+happened to run. Compose's own values are ranked across components by one decision - the
+workspace's block over the compose packages claiming the service, else the last component by
+name (`_canonical.env_winner`, batch 24) - never by read order, and the rows saying which
+value lost are a link pass's (`env-ranking`), since a component's rows are written before the
+later components are read.
+
+Two namespaces beside the view, compose's alone (`CACHE_KEYS`): `composeenv.candidates` -
+per view, per relaxed key, per component, that component's own winner, the value the ranking
+takes - and `composeenv.claims` - per view, per normalised service, per package, the claims
+compose made on the service, a package setting no key included: the set the block decides
+over.
 
 ## `extends:` and `include:` (T620, the owner's decision 40)
 
@@ -113,6 +123,15 @@ def view_for(cache: dict, alias: str) -> dict | None:
 #: is a shape other publishers share; a field only this one understands would be the
 #: divergence its contract exists to stop.
 ORIGIN_KEY = "composeenv.origin"
+
+#: Batch 24 (T590): per view, per relaxed key, per component, the component's own winner - its
+#: candidate - which `_canonical.env_winner` ranks across components (design pass 24, section 2).
+CANDIDATES_KEY = "composeenv.candidates"
+
+#: Batch 24 (T590): per view, per normalised service, per package (its workspace key), the claims
+#: compose made on the service - a package setting no key included (D24-32, D24-44) - each a
+#: `_canonical.PlainClaim`: the decision set `env_winner` takes the block over.
+CLAIMS_KEY = "composeenv.claims"
 
 
 def origin_for(cache: dict, alias: str, relaxed: str) -> dict | None:
@@ -977,7 +996,7 @@ class ComposeExtractor:
     name = "compose-services"
     #: The namespaces it writes (batch 22): shared - it writes views under the names of the
     #: services and components its files declare, other components' included.
-    CACHE_KEYS = (CACHE_KEY, ORIGIN_KEY)
+    CACHE_KEYS = (CACHE_KEY, ORIGIN_KEY, CANDIDATES_KEY, CLAIMS_KEY)
     #: The one spelling, which `reach` refuses a file by too (review B21-10).
     INPUT_GLOBS = COMPOSE_GLOBS
     #: Batch 15b: its facts are deployment facts the accounting rows judge, and every file
@@ -996,18 +1015,16 @@ class ComposeExtractor:
                 res.unresolved.append(_no_yaml(self.name, repo, len(ctx.inputs(repo))))
             return res
         views: dict[str, dict] = ctx.cache.setdefault(CACHE_KEY, {})
-        #: Per component, the keys the canonical source has already claimed. Local to this
-        #: run rather than stored in the view, which is a shape other publishers share. The
-        #: pipeline calls `extract` once per component, so a `[[canonical]]` block ranks env
-        #: values within one component only - across components they are not yet ranked
-        #: against each other (ruling 9: its own backlog row, with its own design).
-        owned: dict[str, set[str]] = {}
-        #: Per component, what each value the view now holds may be read as (T536), so two
-        #: files spelling one value differently are not reported as disagreeing outright
-        #: (review B10-4). Local for the same reason as `owned`.
-        held: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
             first_node = len(res.nodes)
+            #: The component's own state, as on `main` within it (design pass 24, section 2):
+            #: its views - `_merge` folds its files' values there, never into another
+            #: component's - the keys its canonical source has claimed (`owned`), what each
+            #: value it holds may be read as (`held`, T536, review B10-4), where each came from,
+            #: and its DG_CONFIGURES edges, marked `wins` once its files are all read.
+            env = {"views": {}, "owned": {}, "held": {}, "origins": {}, "configures": [],
+                   "claimed": set()}
+            owned, held = env["owned"], env["held"]
             # In segment order, each override right after its base (`read_order`). Nothing
             # placed depends on it, since each file places its own `build:` (D534-7), but which
             # env value is read last does. Each file is read and parsed once (remainder E).
@@ -1033,8 +1050,10 @@ class ComposeExtractor:
                                                   lost)
                               for rel in sorted(includes)}
             for rel, _services_node in parsed:
-                self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held, layers.get(rel, ""), on_node, include_unread.get(rel, []))
+                self._file(res, ctx, repo, rel, decls.get(rel, []), env["views"], owned,
+                           held, layers.get(rel, ""), on_node, include_unread.get(rel, []),
+                           env=env)
+            self._publish(res, ctx, repo, env, views)
             # A file declaring no service of its own whose `include:` names a file this reader
             # does not read: its node, carrying no claim, says so - else nothing in the graph
             # would, as an unreadable file's `unread` node says its own gap.
@@ -1051,6 +1070,49 @@ class ComposeExtractor:
                     if node.type == "deploy" and node.props.get("kind") == CONFIG_KIND:
                         node.props["deployment_only"] = only
         return res
+
+    def _publish(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, env: dict,
+                 views: dict[str, dict]) -> None:
+        """Once a component's files are all read (design pass 24, section 2): its own winner for
+        each (view, key) is its candidate - the value, raw text and spellings its entry
+        carries, its service, file, line, readings, package, and `local` and `unplaced` for
+        `env-key-from-building-repo` (D24-66, D24-73) - and every key of each view it set or
+        claimed in is decided again over the candidates the run holds, by
+        `_canonical.env_winner`: the shared view holds the winner's entry - its own spellings,
+        never a loser's (D24-26b) - and the origin table its origin (D24-13). Its
+        DG_CONFIGURES edges are marked `wins` where they are its own winner."""
+        candidates = ctx.cache.setdefault(CANDIDATES_KEY, {})
+        claims = ctx.cache.setdefault(CLAIMS_KEY, {})
+        origins = ctx.cache.setdefault(ORIGIN_KEY, {})
+        for view_key, mine in env["views"].items():
+            for key, entry in mine["values"].items():
+                origin = env["origins"].get(view_key, {}).get(key, {})
+                candidates.setdefault(view_key, {}).setdefault(key, {})[repo.alias] = {
+                    **entry, "component": repo.alias, "service": origin.get("service", ""),
+                    "readings": list(env["held"].get(view_key, {}).get(key, ())),
+                    "package": origin.get("package", ""), "local": origin.get("local", False),
+                    "unplaced": origin.get("unplaced", False)}
+            shared = views.setdefault(view_key, {"values": {}, "unresolved": {}})
+            for key, miss in mine["unresolved"].items():
+                shared["unresolved"].setdefault(key, miss)
+        for view_key in sorted(set(env["views"]) | env["claimed"]):
+            for key, cands in sorted(candidates.get(view_key, {}).items()):
+                decision = _canonical.env_winner(cands, claims.get(view_key, {}),
+                                                 ctx.config or {})
+                win = cands[decision.winner]
+                shared = views.setdefault(view_key, {"values": {}, "unresolved": {}})
+                shared["values"][key] = {field: win[field] for field in
+                                         ("value", "file", "line", "raw", "spellings")}
+                origins.setdefault(view_key, {})[key] = {
+                    "component": win["component"], "file": win["file"],
+                    "service": win["service"], "local": win["local"],
+                    "unplaced": win["unplaced"]}
+        for index, view_key, key, rel, line, name in env["configures"]:
+            entry = env["views"].get(view_key, {}).get("values", {}).get(key)
+            origin = env["origins"].get(view_key, {}).get(key, {})
+            res.edges[index].props["wins"] = bool(
+                entry and entry["file"] == rel and entry["line"] == line
+                and origin.get("service") == name)
 
     def _includes(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                   node: Any, inputs: set[str], lost: set[str]) -> list[dict]:
@@ -1190,8 +1252,13 @@ class ComposeExtractor:
               owned: dict[str, set[str]],
               held: dict[str, dict[str, tuple[str, ...]]], package: str,
               on_node: dict[str, list[str]] | None = None,
-              include_unread: list[dict] | None = None) -> None:
+              include_unread: list[dict] | None = None, *, env: dict) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
+        # Batch 24: the file's package by its WORKSPACE key - `mark-canonical`'s `package_of`
+        # rule (`_canonical.package_key`), so the env decision and the node decision read one
+        # package set (D24-31).
+        declared = _canonical.declared_package({"package": package})
+        pkg = _canonical.package_key(repo.alias, _layout(ctx), rel, declared, deploy)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
         # to - and it names a file this same component reads (D15a-22).
@@ -1209,20 +1276,32 @@ class ComposeExtractor:
                 continue
             self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
                           owned, held, decl.line, placed=decl.claim,
-                          files=(on_node or {}).get(decl.claim.target, [rel]))
+                          files=(on_node or {}).get(decl.claim.target, [rel]), env=env,
+                          package=pkg, declared=declared)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, node: Any,
                  views: dict[str, dict], owned: dict[str, set[str]],
                  held: dict[str, dict[str, tuple[str, ...]]], line: int, *,
-                 placed: Claim, files: list[str] | None = None) -> None:
+                 placed: Claim, env: dict, files: list[str] | None = None,
+                 package: str = "", declared: str = "") -> None:
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
         # naming one service produce two of these, identically, and the workspace's own
         # [[canonical]] block decides — never this extractor, which cannot see intent.
         res.nodes.append(Node(id=placed.target, type="svc",
                               props={"component": placed.scope}))
         edge_props = {"service": name, "component": placed.component,
-                      "mapped_by": placed.mapped_by}
+                      "mapped_by": placed.mapped_by,
+                      # Batch 24: the view its settings are filed under, so `env-ranking` keys
+                      # the decision set per (view, service) as extraction does (D24-58).
+                      "view": placed.view}
+        # The claim, in the decision set of its (view, service) - a package setting no key
+        # among them (D24-32, D24-44).
+        ctx.cache.setdefault(CLAIMS_KEY, {}).setdefault(placed.view, {}).setdefault(
+            ids.norm_id(name), {}).setdefault(package or deploy, []).append(
+            (repo.alias, {"kind": CONFIG_KIND, "path": rel,
+                          **({"package": declared} if declared else {})}, rel, line))
+        env["claimed"].add(placed.view)
         if placed.join:
             edge_props[JOIN_PROP] = "name"
         if placed.within:
@@ -1284,47 +1363,44 @@ class ComposeExtractor:
         views.setdefault(view_key, {"values": {}, "unresolved": {}})
         claim = canonical_claim(ctx.config, name, repo.alias, files or [rel])
         written: set[str] = set()
+        readings_of = {ids.relaxed_key(e["key"]): e["readings"] for e in entries}
         superseded = _merge(views[view_key], view,
                             owned.setdefault(view_key, set()),
                             contested=claim is not None,
                             canonical=is_canonical_source(claim, repo.alias, rel),
                             held=held.setdefault(view_key, {}),
-                            readings={ids.relaxed_key(e["key"]): e["readings"]
-                                      for e in entries},
+                            readings=readings_of,
                             written=written)
         # Ruling 4: where each value the view now holds came from, in a compose-private
         # table beside the shared view, so a component reading a value a building repo set
         # for a service it does not build is told so (`origin_for`). Recorded for the keys
         # the merge says it wrote from this file, never inferred by comparing entries.
-        origins = ctx.cache.setdefault(ORIGIN_KEY, {}).setdefault(view_key, {})
-        # Where each superseded value was held from BEFORE this file's values land: the
-        # declaration a row names may be another component's (ruling 9).
+        origins = env["origins"].setdefault(view_key, {})
+        # Where each superseded value was held from BEFORE this file's values land - another
+        # of this component's files, the views being the component's own (batch 24).
         prior = {row["key"]: origins.get(row["key"]) for row in superseded}
         for relaxed in sorted(written):
             origins[relaxed] = {"component": repo.alias, "file": rel,
                                 "service": name, "local": placed.local,
                                 # A build this file declares and nothing could place is
                                 # not "a container it does not build" (D534-35).
-                                "unplaced": bool(placed.unplaced or placed.ambiguous)}
+                                "unplaced": bool(placed.unplaced or placed.ambiguous),
+                                # Batch 24: the package its candidate is ranked in.
+                                "package": package or deploy}
         for row in superseded:
             # The row names the DROPPED declaration where it is written. This file's value
             # was dropped exactly when the merge did not write it; otherwise the dropped one
-            # was held from an earlier file, perhaps another component's, which the origin
-            # table recorded before this file's values landed (ruling 9).
+            # was held from an earlier file, which the origin table recorded before this
+            # file's values landed.
             earlier = prior.get(row["key"]) or {}
             here_dropped = row["key"] not in written
-            dropped_in = repo.alias if here_dropped else str(earlier.get("component", ""))
-            kept_in = str(earlier.get("component", "")) if here_dropped else repo.alias
-            # An origin the table does not hold (either side empty) falls back to main's
-            # wording rather than a half-qualified citation. The branches of `_merge` never
-            # reach it - every write records an origin - so it is a guard, not a shape
-            # (D534-69).
-            # Whose each declaration is: this file's service, or the earlier one's, recorded
-            # in the origin table before this file's values landed.
+            # Whose each declaration is: this file's service, or the earlier one's. An origin
+            # the table does not hold falls to the one-service wording; the branches of
+            # `_merge` never reach it - every write records an origin - so it is a guard, not
+            # a shape (D534-69).
             kept_service = str(earlier.get("service", "")) if here_dropped else name
             dropped_service = name if here_dropped else str(earlier.get("service", ""))
-            if (dropped_in == kept_in and kept_service and dropped_service
-                    and kept_service != dropped_service):
+            if kept_service and dropped_service and kept_service != dropped_service:
                 # Two services filed under one view (D534-54): facts only - where the other
                 # declaration is, by file and line, whichever way it lies; never which value
                 # the component keeps, which a later file may decide, nor a block, which ranks
@@ -1343,29 +1419,18 @@ class ComposeExtractor:
                             f"in the graph, make it the only declaration of `{row['key']}` "
                             f"filed under `{view_key}`")})
                 continue
-            if not dropped_in or not kept_in or dropped_in == kept_in:
-                # One component, one service in two files: facts only - which declaration is
-                # not kept, and the owner as why; never the value the graph keeps, which
-                # another service of the view or another component can decide (D24-56,
-                # D24-123).
-                said = (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
-                        f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
-                        f"workspace names as the owner of service `{name}`, so this "
-                        f"declaration is not kept; it is reported because ")
-            else:
-                # Two components: the kept file qualified (D9-4), and no claim the graph
-                # cannot keep - a component read later can still replace the owner's
-                # value, since values from different components are not yet ranked against
-                # each other (ruling 9; the unit is the component, D534-66).
-                said = (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
-                        f"as {row['kept']['value']!r} in {kept_in}/{row['kept']['file']}, "
-                        f"which the workspace names as the owner of service `{name}` and "
-                        f"which replaced this value when it was read. Values from different "
-                        f"components are not yet ranked against each other, so one read "
-                        f"later can still replace the owner's; this one is reported because ")
+            # One component, one service in two files - the merge reads the component's own
+            # views since batch 24, so both declarations are this component's: facts only -
+            # which declaration is not kept, and the owner as why; never the value the graph
+            # keeps, which another service of the view or another component can decide
+            # (D24-56, D24-123). Across components the rows are `env-ranking`'s.
+            said = (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
+                    f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
+                    f"workspace names as the owner of service `{name}`, so this "
+                    f"declaration is not kept; it is reported because ")
             res.unresolved.append({
                 "extractor": self.name,
-                "kind": "superseded-declaration", "component": dropped_in or repo.alias,
+                "kind": "superseded-declaration", "component": repo.alias,
                 "key": row["key"], "source_file": row["dropped"]["file"],
                 "line": row["dropped"]["line"], "value": row["dropped"]["value"],
                 "why": said + ("the two are spelled differently and may be one value or two, "
@@ -1386,14 +1451,24 @@ class ComposeExtractor:
             envkey = ids.env_key_id(entry["key"])
             res.nodes.append(Node(id=envkey, type="envkey",
                                   props={"key": ids.relaxed_key(entry["key"])}))
-            resolved = view["values"].get(ids.relaxed_key(entry["key"]))
+            relaxed = ids.relaxed_key(entry["key"])
+            resolved = view["values"].get(relaxed)
+            # Batch 24: the facts `env-ranking` ranks by (design pass 24, section 3) - the view
+            # and package it is filed under, whether it resolved (an unresolved value was never
+            # a candidate), what it may be read as, and, once the component's files are all
+            # read, whether it is the component's own winner (`wins`, set in `_publish`).
+            env["configures"].append((len(res.edges), view_key, relaxed, rel, entry["line"],
+                                      name))
             res.edges.append(Edge(
                 src=cfg, type="DG_CONFIGURES", dst=envkey, source_file=rel,
                 line=entry["line"], extractor=self.name, confidence=1.0,
                 provenance=Provenance.EXTRACTED,
                 props={"declared_as": entry["key"], "service": name,
                        "value": resolved["value"] if resolved else "",
-                       "raw": entry["value"]}))
+                       "raw": entry["value"], "view": view_key,
+                       "resolved": resolved is not None,
+                       "readings": list(readings_of.get(relaxed, ())),
+                       "package": package or deploy, "wins": False}))
         for key, miss in view["unresolved"].items():
             res.unresolved.append({
                 "extractor": self.name,
@@ -1436,9 +1511,11 @@ def canonical_claim(config: dict, service: str, alias: str = "",
     Several blocks may name one service (T623, decision 41): the block deciding this
     component's `files` declaring it on one node is the first that designates one of them -
     `_canonical.deciding_block`, the rule `mark-canonical` decides the node by, over the files
-    this component reads, since env values are ranked within one component (ruling 9). Where
-    none does, or no files are given, the first block naming the service, as on `main`: the
-    files are then contested, and not the owner's.
+    this component reads: it ranks the component's own files' values, its winner the
+    component's candidate, which `_canonical.env_winner` ranks across components over every
+    compose package claiming the service (batch 24, design pass 24, section 2). Where none
+    does, or no files are given, the first block naming the service, as on `main`: the files
+    are then contested, and not the owner's.
 
     Read from `ctx.config`, which the pipeline already populates from the workspace's
     `[[canonical]]` blocks — so the decision reaches the extract layer through a seam the

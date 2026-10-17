@@ -1438,16 +1438,22 @@ def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str],
     """An `unread` deployment node for each case-lost file a deployment reader reads for a
     CLAIM (batch 15b, T573 decision 6): a fact about the component's file names, published
     as `repo:` nodes are, marked with the kind of the row that explains it. A case-lost
-    template loses addresses, not a deployment, and gets its row alone (D15b-103)."""
+    template loses addresses, not a deployment, and gets its row alone (D15b-103). Batch 24:
+    it names the readers whose claim globs the file misses only by case (`readers`, from its
+    `pairs`), since it carries no reader's `kind` - so `env-ranking` knows a compose file
+    it could not read from a chart's (D24-36)."""
     regs = {r.name: r for r in registry}
     nothing = nothing or {}
-    return [Node(id=ids.deployment_id(component, rel), type="deploy",
-                 props={"path": rel, "component": component,
-                        "unread": "off-case-input" if rel in named else "deployment-off-case",
-                        # T625: renamed, it would still claim nothing - its reader said why.
-                        **({"claims_nothing": nothing[rel]} if rel in nothing else {})})
-            for rel, pairs in lost
-            if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
+    out: list[Node] = []
+    for rel, pairs in lost:
+        readers = sorted({reader for reader, glob in pairs if glob in regs[reader].claim_globs})
+        if readers:
+            out.append(Node(id=ids.deployment_id(component, rel), type="deploy", props={
+                "path": rel, "component": component, "readers": readers,
+                "unread": "off-case-input" if rel in named else "deployment-off-case",
+                # T625: renamed, it would still claim nothing - its reader said why.
+                **({"claims_nothing": nothing[rel]} if rel in nothing else {})}))
+    return out
 
 
 def _dirs_above(name: str, layout: dict[str, str]) -> list[str]:
@@ -2143,11 +2149,16 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
 #: What a narrowed run does not judge, and the one exception it makes, said in every
 #: narrowed line (batch 15b; T573 decision 3, D15b-72): since batch 23 a counted list - the
 #: rows an absence or a contradiction judges, the image judgements, the declarations it does not
-#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140).
+#: follow (design pass 23, D23-13, D23-44, D23-63, D23-140) - and since batch 24 the env
+#: ranking's cross-component rows, in a clause of their own after the counted list, as rows and
+#: not as a kind: compose's within-component `superseded-declaration` is served in the same run
+#: (design pass 24, section 3; D24-82, D24-125).
 NARROWED_TAIL = ("so it judged none of the five rows what it could not see could change: "
                  "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
-                 "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
-                 "named no image unreadable and compared no held chart's image, since a build it "
+                 "`deploys-not-a-consumer` and `deploys-contradicted`, and none of the env "
+                 "ranking's cross-component `superseded-declaration` rows, judged in a whole run "
+                 "alone; it proposed no image join, named no image unreadable and compared no "
+                 "held chart's image, since a build it "
                  "did not read may produce the image; it followed no `[[deploys]]` block whose "
                  "`onto` it does not hold, or whose images it could not judge; and an `[[apart]]` "
                  "refusal, judged over fewer claims, may move a chart onto its component's own "

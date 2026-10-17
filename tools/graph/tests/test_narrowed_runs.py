@@ -38,8 +38,10 @@ from tools.graph.tests._estate import ROOT, build, compose, producer, svc  # noq
 #: judgements, the declarations it did not follow.
 JUDGED_NONE = ("so it judged none of the five rows what it could not see could change: "
                "`canonical-unmatched`, `apart-unmatched`, `deploys-unmatched`, "
-               "`deploys-not-a-consumer` and `deploys-contradicted`; it proposed no image join, "
-               "named no image unreadable and compared no held chart's image, since a build it "
+               "`deploys-not-a-consumer` and `deploys-contradicted`, and none of the env "
+               "ranking's cross-component `superseded-declaration` rows, judged in a whole run "
+               "alone; it proposed no image join, named no image unreadable and compared no "
+               "held chart's image, since a build it "
                "did not read may produce the image; it followed no `[[deploys]]` block whose "
                "`onto` it does not hold, or whose images it could not judge")
 APART_CLAUSE = ("an `[[apart]]` refusal, judged over fewer claims, may move a chart onto its "
