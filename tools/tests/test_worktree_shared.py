@@ -779,3 +779,57 @@ def test_a_record_written_on_another_machine_resolves(tmp_path):
     entry = W.load_record(moved, rid)["components"]["b"]
     assert same(entry["tree"], moved / ".sdlc-worktrees" / rid / "a")
     assert same(entry["home"], moved / ".sdlc-worktrees" / rid / "a" / "services" / "b")
+
+
+# ── a join's refusal offers the rebase only toward a later commit (D25-97, D25-106, D25-125) ──
+
+
+def test_a_join_whose_directory_the_trees_base_predates_is_refused_then_rebased_in(tmp_path):
+    """D25-97: `b`'s directory arrived on `main` after `a`'s tree was made; the join names the
+    directory and the base and offers the rebase, which followed lets `b` join."""
+    root = mono(tmp_path / "ws", files=("services/a/app.py",))
+    rid = run_in(root)
+    W.create(root, rid, ["a"])
+    (root / "services" / "b").mkdir(parents=True)
+    (root / "services" / "b" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git(root, "add", "--", "services/b")
+    git(root, "commit", "-qm", "b arrives")
+    with pytest.raises(W.WorktreeError) as refused:
+        W.create(root, rid, ["b"])
+    said = str(refused.value)
+    assert "`services/b` is not a directory in" in said and "the tree is at `" in said, said
+    assert (f"rebase the tree onto a later commit that holds it, if one does (`worktree.py --run "
+            f"{rid} --component a --rebase <ref>`), then add `b`") in said, said
+    assert W.rebase(root, rid, "a", "main")["rebased"]
+    assert W.create(root, rid, ["b"])["made"] == ["b"]
+
+
+def test_a_join_where_the_run_removed_the_directory_offers_no_rebase(tmp_path):
+    """D25-106: the run's own commit removed `services/b` from the tree; its base holds the
+    directory, so no later commit would bring it back - no rebase is offered."""
+    root = mono(tmp_path / "ws")
+    rid = run_in(root)
+    tree = Path(W.create(root, rid, ["a"])["components"]["a"]["tree"])
+    git(tree, "rm", "-rq", "--", "services/b")
+    git(tree, "commit", "-qm", "the run removes b")
+    with pytest.raises(W.WorktreeError) as refused:
+        W.create(root, rid, ["b"])
+    said = str(refused.value)
+    assert "`services/b` is not a directory in" in said and "rebase" not in said, said
+    assert "or run `b` as a run of its own" in said, said
+
+
+def test_a_join_of_a_directory_only_an_ancestor_of_the_base_holds_offers_no_rebase(tmp_path):
+    """D25-125: `services/b` was committed once and deleted before the base; the tree's base lacks
+    it, but its history holds it, so there is no later commit to rebase onto - no rebase offered."""
+    root = mono(tmp_path / "ws")
+    git(root, "rm", "-rq", "--", "services/b")
+    git(root, "commit", "-qm", "b deleted")
+    rid = run_in(root)
+    W.create(root, rid, ["a"])
+    (root / "services" / "b").mkdir(parents=True)
+    (root / "services" / "b" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(W.WorktreeError) as refused:
+        W.create(root, rid, ["b"])
+    said = str(refused.value)
+    assert "`services/b` is not a directory in" in said and "rebase" not in said, said

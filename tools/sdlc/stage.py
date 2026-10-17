@@ -1894,6 +1894,12 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     the copy into an adopter's CI and raise there. Declared in
     `validate.LAZY_OUTSIDE_THE_BUNDLE` with that reason, because nothing the
     ledger check can reach ever renders a prompt.
+
+    **The tree's root, never the component's directory in it** (batch 25, T550): P4's patch is
+    written from the tree's root (`git format-patch`) and P6's pre-pass resolves its paths
+    against its `--target`, which from a component's `home` inside a shared tree copied nothing
+    (D25-27, measured). With no component, the one tree the run's components all share, where
+    they share one (D25-14) - else the workspace root, as before.
     """
     from tools.sdlc import worktree as trees
 
@@ -1905,6 +1911,10 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     entry = homes.get(component) if component else None
     if entry is None and len(homes) == 1:
         entry = next(iter(homes.values()))
+    if entry is None and not component and homes:
+        shared = [trees.tree_of(e) for e in homes.values() if isinstance(e, dict)]
+        if shared and shared[0] and all(trees._same(shared[0], t) for t in shared):
+            return shared[0]
     if entry is None and component and homes:
         # **Item 131.** The two legitimate root answers - `deny_raw_git`, and a
         # phase before P4 - are both STATED in the record, and this is a third
@@ -1928,8 +1938,9 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     # `mode == "worktree"` and falling back to the repository root looked
     # safer and was less correct: for a component of an estate it would have
     # named the workspace root rather than the component. The mutation pass
-    # found that, against the first cut of this line.
-    return str(entry.get("home") or "").strip() or str(target)
+    # found that, against the first cut of this line. Since batch 25, `tree_of`: the recorded
+    # tree where one is, else that same `home`.
+    return trees.tree_of(entry).strip() or str(target)
 
 
 def _spec_for(target: Path, run_id: str) -> str:

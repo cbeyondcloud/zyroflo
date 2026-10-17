@@ -159,6 +159,34 @@ def _depth(before: dict | None, depth: int) -> int:
     return getattr(before, "depth", depth) if before is not None else depth
 
 
+def _roots(where) -> list[Path]:
+    """The directories a report walk reads: one, or - for a component inside a shared tree - its
+    own directory and the tree's root, so its own deep reports and a root report are both found
+    (batch 25, D25-17, D25-36c, D25-44)."""
+    return [Path(w) for w in where] if isinstance(where, (list, tuple)) else [Path(where)]
+
+
+def _walk(where, patterns, depth: int):
+    """Every report under `where`'s roots whose name matches one of `patterns`, to `depth`
+    measured from ITS OWN root, each yielded once - two walks summed counted one report twice
+    (D25-36c, D25-44): de-duplicated by resolved path."""
+    seen: set[Path] = set()
+    for root in _roots(where):
+        if not root.is_dir():
+            continue
+        for pattern in patterns:
+            for found in root.rglob(pattern):
+                try:
+                    if len(found.relative_to(root).parts) > depth:
+                        continue
+                    key = found.resolve()
+                except (OSError, ValueError):
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    yield found
+
+
 def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> ReportStamps:
     """Every report under `where` - JUnit-XML and coverage, by the names the
     readers look for, to `depth` - with what a rewrite changes about it.
@@ -176,18 +204,12 @@ def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> ReportStamps:
     Nothing is written into the tree to take this. It carries the depth it
     looked to, which is the depth a reader handed it reads to (`ReportStamps`).
     """
-    where = Path(where)
     seen = ReportStamps(depth)
-    if not where.is_dir():
-        return seen
-    for pattern in (*TEST_REPORT_NAMES, *REPORT_READERS):
-        for found in where.rglob(pattern):
-            try:
-                if len(found.relative_to(where).parts) > depth:
-                    continue
-                seen[found] = _stamp(found.stat())
-            except (OSError, ValueError):
-                continue
+    for found in _walk(where, (*TEST_REPORT_NAMES, *REPORT_READERS), depth):
+        try:
+            seen[found] = _stamp(found.stat())
+        except OSError:
+            continue
     return seen
 
 
@@ -225,29 +247,25 @@ def tests_reported(where: Path, before: dict[Path, tuple[int, int, int]] | None 
     that reports 59 tests and skips 59 of them ran nothing, and saying "59"
     there would reintroduce the defect wearing a number.
     """
-    where = Path(where)
-    if not where.is_dir():
+    if not any(root.is_dir() for root in _roots(where)):
         return None
     depth = _depth(before, depth)
     total: int | None = None
-    for pattern in TEST_REPORT_NAMES:
-        for found in where.rglob(pattern):
-            try:
-                if len(found.relative_to(where).parts) > depth:
-                    continue
-                if not _written(found, before):
-                    continue
-                root = ET.parse(found).getroot()
-            except (OSError, ValueError, ET.ParseError):
-                # An unreadable report is not a report. It leaves the answer
-                # None rather than 0, so it reads as "could not tell".
+    for found in _walk(where, TEST_REPORT_NAMES, depth):
+        try:
+            if not _written(found, before):
                 continue
-            suites = ([root] if root.tag == "testsuite"
-                      else root.iter("testsuite"))
-            for suite_el in suites:
-                ran = _int_of(suite_el.get("tests", "0"), 0)
-                skipped = _int_of(suite_el.get("skipped", "0"), 0)
-                total = (total or 0) + max(ran - skipped, 0)
+            root = ET.parse(found).getroot()
+        except (OSError, ValueError, ET.ParseError):
+            # An unreadable report is not a report. It leaves the answer
+            # None rather than 0, so it reads as "could not tell".
+            continue
+        suites = ([root] if root.tag == "testsuite"
+                  else root.iter("testsuite"))
+        for suite_el in suites:
+            ran = _int_of(suite_el.get("tests", "0"), 0)
+            skipped = _int_of(suite_el.get("skipped", "0"), 0)
+            total = (total or 0) + max(ran - skipped, 0)
     return total
 
 
@@ -303,33 +321,29 @@ def failing_reported(where: Path, before: dict[Path, tuple[int, int, int]] | Non
     quarantine that covered failures but not errors would let the same test
     through by changing how it broke.
     """
-    where = Path(where)
-    if not where.is_dir():
+    if not any(root.is_dir() for root in _roots(where)):
         return None
     depth = _depth(before, depth)
     found_any = False
     cases: dict[str, set[str]] = {}
-    for pattern in TEST_REPORT_NAMES:
-        for found in where.rglob(pattern):
-            try:
-                if len(found.relative_to(where).parts) > depth:
-                    continue
-                if not _written(found, before):
-                    continue
-                root = ET.parse(found).getroot()
-            except (OSError, ValueError, ET.ParseError):
-                # Unreadable is not empty, exactly as in `tests_reported`.
+    for found in _walk(where, TEST_REPORT_NAMES, depth):
+        try:
+            if not _written(found, before):
                 continue
-            found_any = True
-            for case in root.iter("testcase"):
-                if not any(child.tag in ("failure", "error") for child in case):
-                    continue
-                spellings = failure_names(case)
-                if not spellings:
-                    continue
-                name = (case.get("name") or "").strip()
-                holder = (case.get("classname") or "").strip()
-                cases[f"{holder}.{name}" if holder else name] = spellings
+            root = ET.parse(found).getroot()
+        except (OSError, ValueError, ET.ParseError):
+            # Unreadable is not empty, exactly as in `tests_reported`.
+            continue
+        found_any = True
+        for case in root.iter("testcase"):
+            if not any(child.tag in ("failure", "error") for child in case):
+                continue
+            spellings = failure_names(case)
+            if not spellings:
+                continue
+            name = (case.get("name") or "").strip()
+            holder = (case.get("classname") or "").strip()
+            cases[f"{holder}.{name}" if holder else name] = spellings
     return cases if found_any else None
 
 
@@ -724,6 +738,12 @@ def changed_files(target: Path, run_id: str
     out: dict[str, list[str]] = {}
     notes: list[str] = []
     unknown: list[str] = []
+    # This run's trees - each worktree-mode entry's recorded tree - which `_bound` alone answers
+    # for, never `tree_of` over every entry, which an in-place component's checkout answers
+    # (batch 25, D25-124).
+    run_trees = sorted({trees.tree_of(e) for e in record.values()
+                        if isinstance(e, dict) and e.get("mode") == "worktree"
+                        and trees.tree_of(e)})
     # Per checkout (git's top level): the components in it, the directories
     # they claim, and everything that changed there.
     sharers: dict[str, list[str]] = {}
@@ -739,6 +759,10 @@ def changed_files(target: Path, run_id: str
         # the coverage report beside them).
         if not base:
             why = f"no base commit was recorded ({entry.get('mode', '?')} mode)"
+        elif gone := trees.home_gone(target, name, entry):
+            # A `home` gone from its tree - the run's own work can remove a component's
+            # directory - is said so, never "its recorded tree is gone" (batch 25, D25-105).
+            why = gone
         elif not where.is_dir():
             why = "its recorded tree is gone"
         else:
@@ -779,7 +803,11 @@ def changed_files(target: Path, run_id: str
                 # quoted spelling matched no coverage entry and began with no
                 # component's directory; and stripping each line took a leading
                 # space off a name.
-                listing = trees.git(where, "diff", "--name-only", "-z", "--relative", base,
+                # Batch 25 (D25-28, D25-45a): no `--relative` - a no-op at a tree's root, it made
+                # a path from a component's own directory component-relative, which broke
+                # coverage matching against a root report both ways; spelled from the
+                # repository's root, as `main`'s worktree-mode cwd made them.
+                listing = trees.git(where, "diff", "--name-only", "-z", base,
                                     "--", ".", raw=True)
                 whole = (trees.git(where, "diff", "--name-only", "-z", base, raw=True)
                          if top and prefix else "")
@@ -806,7 +834,7 @@ def changed_files(target: Path, run_id: str
                       if not any(path.startswith(pre) for pre in claims))
         if not rest:
             continue
-        counts, outside = _bound(target, top, claims)
+        counts, outside = _bound(target, top, claims, run_trees, notes)
         if left := [path for path in rest if not counts(path)]:
             notes.append(f"{len(left)} changed file(s) are named and not counted: they "
                          f"lie in no component's directory, {outside} - "
@@ -832,8 +860,8 @@ def _in_words(exc: Exception, where: Path, name: str) -> str:
     return said
 
 
-def _bound(target: Path, top: str, claims: set[str]
-           ) -> tuple[Callable[[str], bool], str]:
+def _bound(target: Path, top: str, claims: set[str], run_trees: list[str] | tuple = (),
+           notes: list[str] | None = None) -> tuple[Callable[[str], bool], str]:
     """Whether a changed file in no component's directory counts as this
     workspace's change, and how to say why one does not (T552).
 
@@ -852,11 +880,13 @@ def _bound(target: Path, top: str, claims: set[str]
     parent build files are its own wherever it sits, so the directories above a
     component count in a checkout that holds the workspace too.
     """
-    try:
-        inside = Path(guardrails.component_dir(target, ".")).resolve().relative_to(
-            Path(top).resolve()).as_posix()
-    except ValueError:
-        inside = None           # this checkout does not hold the workspace
+    inside = _inside_a_run_tree(target, top, run_trees, notes)
+    if inside is None:
+        try:
+            inside = Path(guardrails.component_dir(target, ".")).resolve().relative_to(
+                Path(top).resolve()).as_posix()
+        except ValueError:
+            inside = None           # this checkout does not hold the workspace
     if inside == ".":
         return (lambda path: True), ""      # the workspace is the whole checkout
     above: set[str] = set()
@@ -873,6 +903,37 @@ def _bound(target: Path, top: str, claims: set[str]
                     "or above a component" if inside is not None else
                     "in a repository that does not hold this workspace, and not "
                     "directly in a directory above a component")
+
+
+def _inside_a_run_tree(target: Path, top: str, run_trees, notes: list[str] | None) -> str | None:
+    """Where the workspace lies in one of THIS RUN's trees, or None for `main`'s answer (batch
+    25, design pass 25, section 3): a checkout whose root, resolved, is one of the run's recorded
+    trees (D25-107: the stored and live spellings of one root differ), and is a worktree of the
+    workspace root's own repository - one common directory, the key `worktree.plan` groups by.
+    The live workspace root is not inside that tree - the tree holds a copy of it - so the answer
+    is the workspace root's own place in its repository, `--show-prefix` (D25-78, D25-88). Where
+    the workspace root answers no repository, no tree is (D25-99); where git cannot answer for
+    the tree, the bound is taken as `main` takes it and a note says so (D25-109)."""
+    if not any(trees._same(top, tree) for tree in run_trees):
+        return None
+    root = Path(guardrails.component_dir(target, ".")).resolve()
+    if not trees.is_repo(root):
+        return None
+    mine, _why = trees.repo_key(root)
+    theirs, why = trees.repo_key(Path(top))
+    if not theirs:
+        if notes is not None:
+            notes.append(f"git could not say whether {trees._stored_home(target, top)} is a "
+                         f"checkout of this workspace's repository ({why}), so the bound was "
+                         f"taken as `main` takes it")
+        return None
+    if not mine or mine != theirs:
+        return None
+    try:
+        prefix = trees.git(root, "rev-parse", "--show-prefix").strip().strip("/")
+    except trees.WorktreeError:
+        return None
+    return prefix or "."
 
 
 #: What the harness WRITES under `.sdlc/` as a record - run folders, metrics,
@@ -1129,35 +1190,29 @@ def find_report(where: Path, before: dict[Path, tuple[int, int, int]] | None = N
     nothing, and a stale coverage figure is the same failure with a percentage
     attached.
     """
-    where = Path(where)
-    if not where.is_dir():
-        return None, "", f"{where} is not a directory"
+    first = _roots(where)[0]
+    if not any(root.is_dir() for root in _roots(where)):
+        return None, "", f"{first} is not a directory"
     best: tuple[float, Path, str] | None = None
     stale = 0
-    for name, kind in REPORT_READERS.items():
-        for found in where.rglob(name):
-            try:
-                depth = len(found.relative_to(where).parts)
-            except ValueError:
-                continue
-            if depth > _depth(before, REPORT_DEPTH):
-                continue
-            try:
-                st = found.stat()
-            except OSError:
-                continue
-            if before is not None and before.get(found) == _stamp(st):
-                stale += 1
-                continue
-            if best is None or st.st_mtime > best[0]:
-                best = (st.st_mtime, found, kind)
+    for found in _walk(where, tuple(REPORT_READERS), _depth(before, REPORT_DEPTH)):
+        kind = next(k for n, k in REPORT_READERS.items() if found.match(n))
+        try:
+            st = found.stat()
+        except OSError:
+            continue
+        if before is not None and before.get(found) == _stamp(st):
+            stale += 1
+            continue
+        if best is None or st.st_mtime > best[0]:
+            best = (st.st_mtime, found, kind)
     if best:
         return best[1], best[2], ""
     if stale:
-        return None, "", (f"{stale} coverage report(s) under {where.name} were there "
+        return None, "", (f"{stale} coverage report(s) under {first.name} were there "
                           f"before the commands that should have written one, and none "
                           f"was rewritten by them, so none of them came from them")
-    return None, "", (f"no coverage report under {where.name} - looked for "
+    return None, "", (f"no coverage report under {first.name} - looked for "
                       + ", ".join(sorted(REPORT_READERS)))
 
 
@@ -1203,10 +1258,15 @@ def changed_coverage(where: Path, files: list[str],
     # RELATIVE to the component (T509): this row is written into 50-suite.json,
     # which is committed, and an absolute machine path means nothing in another
     # checkout - item 120's rule, which `deploy.record_where` already follows.
-    try:
-        shown = report.relative_to(where).as_posix()
-    except ValueError:
-        shown = report.name
+    # Relative to the component's own directory where the report lies under it, else to its
+    # tree's root (batch 25, D25-44).
+    shown = report.name
+    for root in _roots(where):
+        try:
+            shown = report.relative_to(root).as_posix()
+            break
+        except ValueError:
+            continue
     row = {"report": shown, "format": kind, "matched": matched,
            "of": len(files), "missing": missing[:10], "why": ""}
     if not matched:
@@ -1386,17 +1446,27 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         spec = declared(target, name)
         entry = trees.load_record(target, run_id)["components"].get(name, {})
         where = Path(entry.get("home") or guardrails.component_dir(target, spec["path"]))
+        # Batch 25 (design pass 25, section 3): a command the component declares runs at its
+        # `home`; one it inherits from the top level at its tree's root, where it was written to
+        # run (D25-29). Reports are read under both, each once (D25-17, D25-36c, D25-44).
+        tree = Path(trees.tree_of(entry)) if entry and trees.tree_of(entry) else where
+        roots = (where, tree) if not trees._same(where, tree) else where
+        gone = trees.home_gone(target, name, entry) if entry else ""
         base_exit = (base_rows.get(name) or {}).get("exit_code")
         base_tests = (base_rows.get(name) or {}).get("tests")
         # The BUILD's baseline is its own - reading the test baseline for it
         # would compare a build against a suite, which is how "the build broke"
         # and "a test broke" become one sentence.
         base_build = ((base_rows.get(name) or {}).get("build") or {}).get("exit_code")
-        blocked = False
+        blocked = bool(gone)
+        # A `home` gone from its tree starts nothing there: each step `blocked`, with no exit, so
+        # the phase stops (batch 25, D25-105, D25-115).
+        held = (f"{gone}, so nothing was started there - {trees.home_way(name, entry)}"
+                if gone else "")
         # A coverage report this component's own commands did not write did not
         # come from them (T508) - the floor when no coverage_command runs one
         # itself. Taken from the filesystem, not the clock (T595).
-        component_before = report_stamps(where)
+        component_before = report_stamps(roots)
         for step in steps:
             if step == "coverage":
                 continue
@@ -1409,24 +1479,25 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                 continue
             if blocked:
                 out["steps"].append(Step(name, step, command, source, None, 0.0,
-                                         "blocked", f"{name}'s build did not pass, "
+                                         "blocked", held or f"{name}'s build did not pass, "
                                          f"so its {step} result would mean nothing"
                                          )._asdict())
                 continue
             # T595: the reports as they were before THIS step, so the step
             # before it - a build that ran the tests - hands it none of its own.
-            before = report_stamps(where)
-            code, seconds, problem = run_command(where, command)
+            before = report_stamps(roots)
+            code, seconds, problem = run_command(tree if source == "top-level" else where,
+                                                 command)
             executed += 1
             # Counted the same way the baseline was, by the one counter this
             # package has - a baseline taken one way and compared another way
             # is not a baseline, which is this module's own rule.
-            counted = (tests_reported(where, before=before)
+            counted = (tests_reported(roots, before=before)
                        if step == "test" else None)
             # Read from the SAME reports, under the same freshness bound, in
             # the same walk the count came from - a declaration matched against
             # a different run's report would not be a comparison.
-            broke = (failing_reported(where, before=before)
+            broke = (failing_reported(roots, before=before)
                      if step == "test" else None)
             against = base_build if step == "build" else base_exit
             verdict, note = judge(step, code, against, spec["known_failures"],
@@ -1439,9 +1510,10 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
 
         if "coverage" in steps:
             command, source = spec["coverage"]
-            coverage_before = report_stamps(where)
+            coverage_before = report_stamps(roots)
             if command and not blocked:
-                code, seconds, problem = run_command(where, command)
+                code, seconds, problem = run_command(tree if source == "top-level" else where,
+                                                     command)
                 executed += 1
                 out["steps"].append(Step(name, "coverage", command, source, code,
                                          seconds, "green" if code == 0 else "red",
@@ -1458,11 +1530,11 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                 # bound, a stale report recorded coverage as met.
                 row = {"percent": None, "matched": 0,
                        "of": len(diffs.get(name, [])),
-                       "why": (f"{name}'s build did not pass, so nothing ran to "
-                               f"measure coverage - a report on disk is from an "
-                               f"earlier run")}
+                       "why": held or (f"{name}'s build did not pass, so nothing ran to "
+                                       f"measure coverage - a report on disk is from an "
+                                       f"earlier run")}
             else:
-                row = changed_coverage(where, diffs.get(name, []),
+                row = changed_coverage(roots, diffs.get(name, []),
                                        coverage_before if command else component_before)
             row["threshold"] = spec["coverage_threshold"]
             # A threshold that could not be read leaves `met` UNKNOWN, the same

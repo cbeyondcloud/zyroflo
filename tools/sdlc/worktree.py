@@ -183,6 +183,42 @@ def _same(a: str | Path, b: str | Path) -> bool:
         return str(a) == str(b)
 
 
+def place_of(entry: dict) -> str:
+    """A worktree-mode entry's place in its tree: its `home` relative to its tree's root, "" for
+    a component at its repository's root and for a record from before batch 25, whose `home` is
+    its tree (D25-7)."""
+    tree, home = tree_of(entry), str(entry.get("home") or "")
+    if not tree or not home or _same(tree, home):
+        return ""
+    try:
+        rel = Path(os.path.relpath(home, tree)).as_posix()
+    except ValueError:
+        return ""
+    return "" if rel == ".." or rel.startswith("../") else rel
+
+
+def home_gone(target: Path, name: str, entry: dict) -> str:
+    """What every reader says of a component whose `home` is absent while its tree is present -
+    the run's own work can remove a component's directory (`git rm -r services/b` committed in
+    the tree) - never "its recorded tree is gone" (design pass 25, D25-105): "`b`'s directory
+    `services/b` is not in <tree>", the tree spelled as the committed record spells it, since
+    `50-suite.json` carries the words. "" where `home` is there, or its tree is gone too."""
+    home, tree = str(entry.get("home") or ""), tree_of(entry)
+    if entry.get("mode") != "worktree" or not home or not tree:
+        return ""
+    if Path(home).is_dir() or not Path(tree).is_dir():
+        return ""
+    return (f"`{name}`'s directory `{place_of(entry) or entry.get('path') or '.'}` is not in "
+            f"{_stored_home(target, tree)}")
+
+
+def home_way(name: str, entry: dict) -> str:
+    """The way on from a `home` gone from its tree, in the words every reader gives it (design
+    pass 25, D25-105, D25-123)."""
+    return (f"restore `{place_of(entry) or entry.get('path') or '.'}` in the tree, or drop "
+            f"`{name}` from the profile for this run")
+
+
 #: Written into the worktrees root the first time one is made. A directory whose
 #: own `.gitignore` is `*` ignores everything in it INCLUDING that file, so git
 #: stops seeing the directory at all.
@@ -918,7 +954,10 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
 
 
 def _serving(target: Path, row: dict, spot: Path) -> str:
-    """`serving_from`'s answer for one recorded deploy."""
+    """`serving_from`'s answer for one recorded deploy - one whose `where` lies in `spot`, at its
+    root or in any directory inside it, never the reverse: a component's own deploy runs at its
+    `home` inside its tree, which asked by the tree's root alone was missed, and the tree removed
+    from under it (batch 25, D25-30)."""
     code = row.get("exit_code", 0)
     unknown = code is None
     if not row.get("deployed") and not unknown:
@@ -932,11 +971,13 @@ def _serving(target: Path, row: dict, spot: Path) -> str:
     # division keeps an absolute right-hand side.
     where = Path(target) / stored
     try:
-        same = where.resolve() == Path(spot).resolve()
+        ran, at = where.resolve(), Path(spot).resolve()
     except OSError:
-        same = str(where) == str(Path(spot))
-    if not same:
+        ran, at = where, Path(spot)
+    if ran != at and at not in ran.parents:
         return ""
+    # Named by where it ran: the tree's own root, or a component's directory inside it.
+    spot = spot if ran == at else ran
     command = row.get("command") or "the deploy command"
     if unknown:
         # Named separately, because the repair differs: a deploy that SUCCEEDED
@@ -978,11 +1019,25 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
     record = load_record(target, run_id)
     done: list[str] = []
     holding: list[str] = []
-    removable: list[tuple[str, dict, Path]] = []
+    # Each distinct tree checked once and removed once, its removal stamped on EVERY component of
+    # it - stamped on one, `--list` showed a live tree-mate whose tree was gone (batch 25, D25-39).
+    # A record from before batch 25 reads each `home` as its tree, so each stays its own.
+    groups: list[tuple[str, list[dict]]] = []
+    names_of: dict[int, list[str]] = {}
     for name, entry in sorted(record["components"].items()):
         if entry["mode"] != "worktree":
             continue
-        spot = Path(entry["home"])
+        tree = tree_of(entry)
+        group = next((g for g in groups if _same(g[0], tree)), None)
+        if group is None:
+            group = (tree, [])
+            groups.append(group)
+        group[1].append(entry)
+        names_of.setdefault(id(group[1]), []).append(name)
+    removable: list[tuple[str, list[dict], Path]] = []
+    for tree, rows in groups:
+        name = ", ".join(names_of[id(rows)])
+        spot = Path(tree)
         if not spot.is_dir():
             done.append(f"{name}: already gone")
             continue
@@ -994,16 +1049,16 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
         if not force and (why := serving_from(target, run_id, spot)):
             holding.append(f"{name}: {why}")
             continue
-        removable.append((name, entry, spot))
+        removable.append((name, rows, spot))
     # NOTHING has been deleted yet. Every refusal is known, so the run stops
     # here with all of its trees intact rather than part-way through.
     if holding:
         save_record(target, run_id, record)
         raise WorktreeError("; ".join(holding))
-    for name, entry, spot in removable:
+    for name, rows, spot in removable:
         args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
         try:
-            git(guardrails.component_dir(target, entry["path"]), *args)
+            git(guardrails.component_dir(target, rows[0]["path"]), *args)
         except WorktreeError as exc:
             save_record(target, run_id, record)
             raise WorktreeError(
@@ -1014,7 +1069,9 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
                 f"then remove it by hand. "
                 + (f"Removed before this: {', '.join(d for d in done)}."
                    if done else "Nothing was removed before this.")) from None
-        entry["removed_at"] = _now()
+        stamp = _now()
+        for entry in rows:
+            entry["removed_at"] = stamp
         done.append(f"{name}: removed {spot}")
     save_record(target, run_id, record)
     return done
@@ -1142,7 +1199,9 @@ def upstream_commits(target: Path, run_id: str, name: str, onto: str) -> list[st
     entry = load_record(target, run_id)["components"].get(name)
     if entry is None:
         raise WorktreeError(f"run {run_id} has no tree recorded for {name!r}")
-    where = Path(entry["home"]) if entry["mode"] == "worktree" else \
+    # The tree's root, which git answers alike from any directory of the tree, and which exists
+    # where a component's directory the run removed does not (batch 25, D25-26c, D25-112).
+    where = Path(tree_of(entry)) if entry["mode"] == "worktree" else \
         guardrails.component_dir(target, entry["path"])
     span = f"{entry['base']}..{onto}"
     try:
@@ -1166,6 +1225,15 @@ def rebase(target: Path, run_id: str, name: str, onto: str) -> dict:
     an agent that finds one will improvise. The conflicting paths are reported
     instead, with what they mean: resolving them is NEW code that nobody has
     reviewed, so it re-enters at G3 rather than sliding into the merge.
+
+    **Once per tree** (batch 25, T550). Every git act of it - `rebase`, `diff --diff-filter=U`,
+    `rebase --abort`, `rev-parse <onto>` - is asked at the tree's root, never at `home`, which
+    the run's own work may have removed (D25-112, D25-122); the new base is written on EVERY
+    component of the tree (D25-2), so a tree-mate's own call finds it rebased and says so. It
+    checks nothing before it moves - `onto` cannot say what the rebase produces (D25-111) - and,
+    after the record is written, reads each tree-mate's place in the tree's new `HEAD` through
+    the one place helper, naming in `notes` every one whose directory the rebase left out
+    (D25-105, D25-120, D25-121, D25-146).
     """
     entry = load_record(target, run_id)["components"].get(name)
     if entry is None:
@@ -1174,11 +1242,11 @@ def rebase(target: Path, run_id: str, name: str, onto: str) -> dict:
         why = entry.get("why") or "no reason recorded"
         raise WorktreeError(f"{name} works in place ({why}) - rebase it with the "
                             f"repository's own tooling")
-    spot = Path(entry["home"])
+    spot = Path(tree_of(entry))
     ahead = upstream_commits(target, run_id, name, onto)
     if not ahead:
         return {"name": name, "onto": onto, "upstream": [], "rebased": False,
-                "conflicts": [], "note": "already on the latest upstream"}
+                "conflicts": [], "note": "already on the latest upstream", "notes": []}
     try:
         git(spot, "rebase", onto)
     except WorktreeError:
@@ -1187,7 +1255,7 @@ def rebase(target: Path, run_id: str, name: str, onto: str) -> dict:
                          check=False).splitlines() if line.strip()]
         git(spot, "rebase", "--abort", check=False)
         return {"name": name, "onto": onto, "upstream": ahead, "rebased": False,
-                "conflicts": conflicts,
+                "conflicts": conflicts, "notes": [],
                 "note": ("the rebase was ABORTED and the tree left as it was. "
                          "Resolving these is new code nobody has reviewed, so it "
                          "re-enters at G3 - it does not slide into the merge")}
@@ -1198,14 +1266,36 @@ def rebase(target: Path, run_id: str, name: str, onto: str) -> dict:
     # re-scoped the same arrivals on every pass. The base still does not follow
     # upstream on its own; it follows a rebase, which is the act of catching up.
     record = load_record(target, run_id)
-    entry = record["components"][name]
-    entry["previous_base"] = entry["base"]
-    entry["base"] = git(spot, "rev-parse", onto, check=False) or entry["base"]
-    entry["rebased_at"] = _now()
-    entry["rebased_onto"] = onto
+    moved = git(spot, "rev-parse", onto, check=False)
+    stamp = _now()
+    mates = [(n, e) for n, e in sorted(record["components"].items())
+             if isinstance(e, dict) and e.get("mode") == "worktree" and _same(tree_of(e), spot)]
+    for _, e in mates:
+        e["previous_base"] = e["base"]
+        e["base"] = moved or e["base"]
+        e["rebased_at"] = stamp
+        e["rebased_onto"] = onto
     save_record(target, run_id, record)
+    # Read AFTER the record is written, and never raising: the rebase happened, and a raise on
+    # either side of the write misreports it or strands the tree with its old base (D25-146).
+    # Only THIS tree's components (D25-121); a root component's empty place is never asked
+    # (D25-135).
+    notes: list[str] = []
+    for n, e in mates:
+        if not (place := place_of(e)):
+            continue
+        kind, detail = place_entry(spot, "HEAD", place)
+        if kind in ("dir", "submodule"):
+            continue
+        notes.append(f"could not look whether `{n}`'s directory `{place}` is in "
+                     f"{_stored_home(target, str(spot))} after the rebase ({detail})"
+                     if kind == "error" else
+                     f"`{n}`'s directory `{place}` is not in {_stored_home(target, str(spot))} "
+                     f"after the rebase; restore it in the tree, or drop `{n}` from the "
+                     f"profile for this run")
+    entry = record["components"][name]
     return {"name": name, "onto": onto, "upstream": ahead, "rebased": True,
-            "conflicts": [], "base": entry["base"],
+            "conflicts": [], "base": entry["base"], "notes": notes,
             "note": (f"{len(ahead)} upstream commit(s) arrived - re-run the impact "
                      f"check over them before P8")}
 
@@ -1307,6 +1397,8 @@ def main(argv: list[str] | None = None) -> int:
                 for c in result["conflicts"]:
                     print(f"  !! conflict: {c}")
                 print(f"  {result['note']}")
+                for note in result.get("notes") or []:
+                    print(f"  note: {note}")
             return 1 if result["conflicts"] else 0
     except (WorktreeError, guardrails.PolicyError, RuntimeError, ValueError) as exc:
         print(f"!! {exc}")
