@@ -3,7 +3,7 @@ component's own winner for a (view, key) is its candidate; the view holds the wi
 function, `_canonical.env_winner` - the workspace's one decision over the compose packages
 claiming the service, `mark-canonical`'s two steps, else the last component by NAME, and a group
 holding two services decided by no block - and `env-ranking` rows every losing component whose
-value differs, in a whole run alone, in one of four forms.
+value differs, in a whole run alone, in one of four forms, each pinned word for word (D24-21).
 
 Everything here is synthetic and none of it names a real workspace.
 """
@@ -211,9 +211,10 @@ def test_two_building_components_contest_across_components_and_the_block_decides
 
 
 def test_a_group_of_two_services_is_decided_by_no_block(tmp_path):
-    """D24-46, D24-55, D24-67: two components build one directory for two services, a block names
-    one of them - a block ranks one service's packages, never two, so the last component by name
-    is kept, and the loser's row (form 4) says the block decides nothing here."""
+    """D24-46, D24-55, D24-67, D24-105: two components build one directory for two services, a
+    block names one of them - a block ranks one service's packages, never two, so the last
+    component by name is kept, and the loser's row (form 4), naming the winner's component and
+    line, says the block decides nothing here."""
     built = build(tmp_path, {
         "aa-deploy": {"docker-compose.yml": compose(svc("web", "../svc-a", "web-value"))},
         "zz-deploy": {"docker-compose.yml": compose(svc("worker", "../svc-a", "worker-value"))},
@@ -349,9 +350,9 @@ def test_s3_whole_the_blocks_path_wins_and_both_rows_stand(tmp_path):
 
 
 def test_s3_narrowed_serves_the_within_row_and_judges_no_cross_component_row(tmp_path):
-    """D24-33, D24-118, D24-125: built with `--components payments,deploy` - the within row
-    served, no cross-component row, the narrowed line's clause naming them; the view still ranked
-    over what the run holds."""
+    """D24-33, D24-88, D24-95, D24-118, D24-125: built with `--components payments,deploy` - the
+    within row served, no cross-component row, the narrowed line's clause naming them; the view
+    still ranked over what the run holds."""
     built = build(tmp_path, s3_estate(), "--components", "payments,deploy")
     assert built.topics == ["topic:a-value"]
     assert [r["source_file"] for r in within_rows(built)] == ["docker-compose.b.yml"]
@@ -364,8 +365,8 @@ def test_s3_narrowed_serves_the_within_row_and_judges_no_cross_component_row(tmp
 
 
 def test_a_load_missing_a_shard_judges_no_cross_component_row(tmp_path):
-    """D24-101, D24-118: a load takes no `--components`; one missing `deploy-c`'s shard is
-    narrowed - the within row served, no cross-component row."""
+    """D24-101, D24-107, D24-118: a load takes no `--components`; one missing `deploy-c`'s shard
+    is narrowed - the within row served, no cross-component row."""
     import shutil
     assert build(tmp_path, s3_estate(), "--publish-snapshot").code == 0
     shutil.rmtree(tmp_path / "ws" / "deploy-c" / ".sdlc")
@@ -540,9 +541,9 @@ def test_helms_configuration_edges_are_never_ranked(tmp_path):
 
 
 def test_a_failed_helm_reader_withholds_the_rows_and_fixing_it_judges_them(tmp_path, monkeypatch):
-    """D24-124: a whole-workspace build whose helm reader fails reads compose whole, yet is
-    narrowed - the rows are withheld, a named cost - and following the line's way on (the reader
-    fixed, the build rerun) judges the row."""
+    """D24-119, D24-124: a whole-workspace build whose helm reader fails reads compose whole, yet
+    is narrowed - the rows are withheld, a named cost - and following the line's way on (the
+    reader fixed, the build rerun) judges the row."""
     from tools.graph.extractors import helm
 
     def raising(self, ctx):
@@ -561,8 +562,9 @@ def test_a_failed_helm_reader_withholds_the_rows_and_fixing_it_judges_them(tmp_p
 
 
 def test_a_load_over_shards_a_block_edit_staled_judges_no_cross_component_row(tmp_path):
-    """D24-102, D24-113: a block edited after the publish stales every shard, so the load is
-    narrowed - no cross-component row, the line naming them - where the whole build judges it."""
+    """D24-102, D24-113, D24-120: a block edited after the publish stales every shard, so the
+    load is narrowed - no cross-component row, the line naming them - where the whole build judges
+    it."""
     import json
     assert build(tmp_path, s1("deploy-a"), "--publish-snapshot").code == 0
     toml = tmp_path / "ws" / "workspace.toml"

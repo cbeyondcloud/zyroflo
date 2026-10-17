@@ -205,7 +205,8 @@ def test_an_exact_and_a_within_build_beside_a_layer_key_it_by_name(tmp_path):
 ])
 def test_files_are_read_in_mains_order_so_the_same_value_is_read_last(tmp_path, files):
     """Main reads `sorted(ctx.inputs(repo))`, path by path, so `docker/compose.yml` comes
-    before `docker-compose.yml`; POSIX text puts it after, and a value changed with it."""
+    before `docker-compose.yml`; POSIX text puts it after, and a value changed with it. Segment
+    order keeps `main`'s answer for both nested pairs (D24-136)."""
     root_file, dir_file = files
     built = build(tmp_path, {
         "deploy": {root_file: compose(image("payments", "root-value")),
@@ -513,3 +514,97 @@ def test_a_later_component_no_longer_replaces_the_owners_value(tmp_path):
                     ("env-ranking", "zz-deploy", "docker-compose.yml", "z-value")]
     within = next(r for r in built.kinds("superseded-declaration") if r["component"] == "aa")
     assert "so this declaration is not kept" in within["why"]
+
+
+# ── the env-key cells a keying moves (D24-61) ───────────────────────────────────────────────
+
+
+def test_a_build_placed_on_another_components_directory_leaves_the_same_named_one_unset(
+        tmp_path):
+    """D24-61: `deploy` builds `payments` from `orders`' own directory, so its settings reach
+    `orders`' code - and `payments`, which `main` gave the value by the name rule, reads it unset;
+    a `-f` layer follows its building file there."""
+    for files in ({"docker-compose.yml": compose(svc("payments", "../orders", "x-value"))},
+                  {"docker-compose.yml": compose(svc("payments", "../orders", None)),
+                   "docker-compose.prod.yml": compose(svc("payments", None, "x-value"))}):
+        built = build(tmp_path / str(len(files)), {
+            "deploy": files, "orders": {"app/pub.py": producer("TOPIC")},
+            "payments": {"app/pub.py": producer("TOPIC")}})
+        assert built.topics == ["topic:x-value"]
+        assert [r["component"] for r in built.kinds("env-key-unset")] == ["payments"]
+
+
+def test_a_filesystem_only_context_gives_the_same_named_component_its_value_with_a_row(
+        tmp_path):
+    """D24-61: `../DEPLOY` reaches `deploy`'s own directory only through a filesystem that folds
+    case - `main` keyed the settings to `deploy` there on Windows, and gave `payments` nothing - so
+    nothing places the build and its settings key by name on every platform: `payments` reads
+    them, and `env-key-from-building-repo` says they come from a build that file does not
+    place."""
+    built = build(tmp_path, {
+        "deploy": {"docker-compose.yml": compose(svc("payments", "../DEPLOY", "x-value"))},
+        "orders": {"app/pub.py": producer("TOPIC")},
+        "payments": {"app/pub.py": producer("TOPIC")}})
+    assert built.topics == ["topic:x-value"]
+    (row,) = built.kinds("env-key-from-building-repo")
+    assert row["component"] == "payments" and row["origin"] == "deploy/docker-compose.yml"
+    assert "whose build that file does not place" in row["why"]
+
+
+# ── the two-services row, true whatever wins later (D24-103 to D24-116) ───────────────────
+
+TWO_SERVICES_WHY = (
+    "`topic` is filed under `orders` as `web-value` here for `web` and as `worker-value` at "
+    "`docker-compose.yml:9` for `worker`; one declaration of `topic` per view reaches the code, "
+    "and this one is not it. Both containers still run with their own value; to keep this one in "
+    "the graph, make it the only declaration of `topic` filed under `orders`")
+
+
+def two_services(**extra) -> dict:
+    return {"orders": {"docker-compose.yml": compose(svc("web", ".", "web-value"),
+                                                     svc("worker", ".", "worker-value")),
+                       "app/pub.py": producer("TOPIC"), **extra},
+            "__canonical__": [{"service": "worker", "owner": "orders"}]}
+
+
+def test_the_two_services_row_is_true_where_another_component_wins(tmp_path):
+    """D24-103, D24-104, D24-116: `orders` writes its row before `zz` is read, and `zz` wins the
+    view across components - the row says only what holds within `orders`: where the other
+    declaration is and that this one is not it, never a value kept nor a cross-component row."""
+    built = build(tmp_path, {**two_services(),
+                             "zz": {"docker-compose.yml": compose(svc("web", "../orders",
+                                                                      "zz-value"))}})
+    assert built.topics == ["topic:zz-value"]
+    (row,) = [r for r in built.kinds("superseded-declaration")
+              if r["extractor"] == "compose-services"]
+    assert row["why"] == TWO_SERVICES_WHY
+
+
+def test_the_two_services_row_is_true_where_a_third_services_later_file_wins(tmp_path):
+    """D24-115: `cron`, in a file read later, overwrites the key within `orders` - the row still
+    says only where `worker`'s declaration is, and that this one is not it."""
+    built = build(tmp_path, two_services(**{"docker-compose.zz.yml": compose(
+        svc("cron", ".", "cron-value"))}))
+    assert built.topics == ["topic:cron-value"]
+    (row,) = built.kinds("superseded-declaration")
+    assert row["why"] == TWO_SERVICES_WHY
+
+
+def test_three_services_in_one_view_follow_the_rows_way_on_in_one_step(tmp_path):
+    """D24-111, D24-128: three services in one view, a block for `cron` - each row's way on,
+    followed (this declaration made the only one), keeps its value in one step, no contest left."""
+    names = ("web", "worker", "cron")
+    estate = {"orders": {"docker-compose.yml": compose(*(svc(n, ".", f"{n}-value")
+                                                         for n in names)),
+                         "app/pub.py": producer("TOPIC")},
+              "__canonical__": [{"service": "cron", "owner": "orders"}]}
+    rows = build(tmp_path / "a", estate).kinds("superseded-declaration")
+    assert rows
+    for row in rows:
+        assert "make it the only declaration of `topic` filed under `orders`" in row["why"]
+        kept = next(n for n in names if row["value"] == f"{n}-value")
+        followed = {**estate, "orders": {**estate["orders"], "docker-compose.yml": compose(
+            *(svc(n, ".", f"{n}-value" if n == kept else None) for n in names))}}
+        after = build(tmp_path / f"followed-{kept}", followed)
+        assert after.topics == [f"topic:{kept}-value"]
+        assert not after.kinds("superseded-declaration")
