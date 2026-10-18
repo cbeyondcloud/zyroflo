@@ -593,6 +593,13 @@ class CanonicalPass:
         r = accounting.reading(config, owner, nodes, edges, nodes_by_id)
         path = _canonical.claimed_path(block, owner) or ""
         written = str(block.get("path") or "").strip()
+        # T645 (batch 27): a path in a directory the walk could not list is unknown, not absent
+        # - never "designates no file", whose remedy discards a block that may be right.
+        if path and not _canonical.is_root_path(block) and (
+                held := accounting.unlisted_holding(r, path)):
+            return (f"`{written}` lies in `{held}`, which could not be listed, so whether it "
+                    f"deploys `{service}` is unknown, not absent - allow listing it, then "
+                    f"rebuild")
         if path and not _canonical.is_root_path(block):
             for node in r.unread:
                 if str(node.props.get("path", "")).strip("/") == path:
