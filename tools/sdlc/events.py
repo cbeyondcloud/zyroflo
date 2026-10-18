@@ -23,6 +23,7 @@ driver; T446c aggregates and exports. This row is the record they write into.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,12 +81,101 @@ FIELD_TYPES = {
     "approver": "string", "ledger_hash": "string",
     "waited_ms": ["integer", "null"], "from": "string", "to": "string",
     "status": "string",
+    "ext": "object",
 }
 
 
 class EventError(RuntimeError):
     """An event that cannot be written as the schema says - refused, never
     written half-right into a record CI treats as append-only."""
+
+
+# ── Z1: declared extension fields, for frameworks built on the harness ───────
+#
+# A framework that drives the harness may need a few more ids on each event
+# (which team, agent and version, tier, policy version). They go in an optional
+# `ext` block, `{"<namespace>": {"<field>": value}}`, under the module's own
+# rules: a namespace and its fields are DECLARED first (`register_extension`),
+# anything undeclared is refused like an undeclared core field; values are ids,
+# names, versions or hashes - never free text; and the block is part of the
+# entry, so the chain hash covers it. An event written without `ext` is exactly
+# what it was before. The harness's own readers ignore the block.
+
+#: Registered namespaces -> {field: type}. Types: "string", "integer",
+#: "boolean", "number", or "string[]" (a list of id-like strings).
+EXTENSIONS: dict[str, dict[str, str]] = {}
+#: Optional on every event.
+OPTIONAL = ("ext",)
+EXT_TYPES = ("string", "integer", "boolean", "number", "string[]")
+_NAMESPACE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_FIELD = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+#: An id, name, version or hash: no spaces, no free text.
+_ID_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:/+=-]{0,199}$")
+_MAX_LIST = 100
+
+
+def register_extension(namespace: str, fields: dict[str, str]) -> None:
+    """Declare an extension namespace and its typed fields. Registering the
+    same declaration again is a no-op; a different one is refused - two
+    writers disagreeing about a field is the undocumented column this module
+    exists to prevent."""
+    if not _NAMESPACE.match(namespace or ""):
+        raise EventError(f"extension namespace {namespace!r} must be lowercase letters, "
+                         f"digits, '-' or '_' (max 32)")
+    for name, kind in fields.items():
+        if not _FIELD.match(name or ""):
+            raise EventError(f"extension field {namespace}.{name!r} must be lowercase "
+                             f"letters, digits or '_' (max 64)")
+        if kind not in EXT_TYPES:
+            raise EventError(f"extension field {namespace}.{name} has type {kind!r} - "
+                             f"one of {', '.join(EXT_TYPES)}")
+    if namespace in EXTENSIONS and EXTENSIONS[namespace] != dict(fields):
+        raise EventError(f"extension {namespace!r} is already registered with different "
+                         f"fields - one declaration per namespace")
+    EXTENSIONS[namespace] = dict(fields)
+
+
+def _check_ext(ext: object) -> dict:
+    """Validate an `ext` block against the registry; return it unchanged."""
+    if not isinstance(ext, dict):
+        raise EventError("ext must be a mapping of namespace -> fields")
+    for namespace, values in ext.items():
+        declared = EXTENSIONS.get(namespace)
+        if declared is None:
+            raise EventError(f"ext {namespace!r} is not a registered extension - "
+                             f"register_extension() it first")
+        if not isinstance(values, dict):
+            raise EventError(f"ext {namespace!r} must be a mapping of field -> value")
+        for name, value in values.items():
+            kind = declared.get(name)
+            if kind is None:
+                raise EventError(f"ext {namespace}.{name} is not declared - its fields "
+                                 f"are {', '.join(declared) or 'none'}")
+            _check_ext_value(f"{namespace}.{name}", kind, value)
+    return ext
+
+
+def _check_ext_value(where: str, kind: str, value: object) -> None:
+    def as_id(item: object) -> None:
+        if not isinstance(item, str) or not _ID_VALUE.match(item):
+            raise EventError(f"ext {where}: {item!r} is not an id (letters, digits and "
+                             f"._@:/+=- only, no spaces, max 200) - events carry no free text")
+
+    if kind == "string":
+        as_id(value)
+    elif kind == "string[]":
+        if not isinstance(value, list) or len(value) > _MAX_LIST:
+            raise EventError(f"ext {where} must be a list of at most {_MAX_LIST} ids")
+        for item in value:
+            as_id(item)
+    elif kind == "integer":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise EventError(f"ext {where} must be an integer")
+    elif kind == "number":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise EventError(f"ext {where} must be a number")
+    elif kind == "boolean" and not isinstance(value, bool):
+        raise EventError(f"ext {where} must be true or false")
 
 
 def events_path(target: Path, run_id: str) -> Path:
@@ -158,15 +248,18 @@ def require_appendable(target: Path, run_id: str) -> None:
 
 
 def append(target: Path, run_id: str, event: str, phase: str = "",
-           at: str | None = None, **fields) -> dict:
+           at: str | None = None, ext: dict | None = None, **fields) -> dict:
     """Write one event at the end of the run's chain, and return it. `at` lets
     a caller that measured an interval against a timestamp stamp the event
-    with THAT timestamp - one clock, not two."""
+    with THAT timestamp - one clock, not two. `ext` carries declared
+    extension fields (Z1); it is validated before anything is written."""
     if event not in TYPES:
         raise EventError(f"unknown event {event!r} - one of {', '.join(TYPES)}")
     if extra := [k for k in fields if k not in FIELDS[event]]:
         raise EventError(f"{event} does not carry {', '.join(sorted(extra))} - "
                          f"its fields are {', '.join(FIELDS[event]) or 'the common ones'}")
+    if ext:
+        fields["ext"] = _check_ext(ext)
     chain = read(target, run_id)
     if _break_at(chain) is not None:
         raise EventError(f"{EVENTS} for run {run_id} has an unreadable line - "

@@ -589,7 +589,8 @@ def events_schema() -> dict:
     and a field the writer adds without declaring fails the build by name."""
     from tools.sdlc import events
 
-    every = (*events.COMMON, *sorted({f for fs in events.FIELDS.values() for f in fs}))
+    every = (*events.COMMON, *sorted({f for fs in events.FIELDS.values() for f in fs}),
+             *events.OPTIONAL)
     missing = [f for f in every if f not in events.FIELD_TYPES]
     if missing:
         raise SchemaError(f"events fields with no declared type: {', '.join(missing)}")
@@ -609,7 +610,8 @@ def events_schema() -> dict:
         "additionalProperties": False,
         "properties": props,
         "allOf": [{"if": {"properties": {"event": {"const": t}}},
-                   "then": {"propertyNames": {"enum": [*events.COMMON, *events.FIELDS[t]]}}}
+                   "then": {"propertyNames": {"enum": [*events.COMMON, *events.FIELDS[t],
+                                                       *events.OPTIONAL]}}}
                   for t in events.TYPES],
     }
 
