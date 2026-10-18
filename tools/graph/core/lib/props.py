@@ -44,18 +44,21 @@ _WHITE = " \t\f"
 _DECLARATION = re.compile(
     r"[ \t\f]*((?:\\.|[^=: \t\f\\])+)(?:[ \t\f]*[=:][ \t\f]*|[ \t\f]+|[ \t\f]*$)(.*)$")
 
-#: A backslash in a key: `\uXXXX` is a code point, `\t` `\n` `\r` `\f` are control
+#: A backslash in a key or a value: `\uXXXX` is a code point, `\t` `\n` `\r` `\f` are control
 #: characters, and any other character stands for itself - how a key spells its own
-#: separators (`\ `, `\:`, `\=`) and a backslash (`\\`).
+#: separators (`\ `, `\:`, `\=`), a value its colons (`jdbc\:mysql\://...`, as
+#: `Properties.store` writes one), and either a backslash (`\\`). A malformed `\u`, which
+#: Java refuses the whole file for, reads its `u` as written.
 _KEY_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)")
 _KEY_CONTROL = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
 
 
-def _unescape_key(key: str) -> str:
-    """A declaration's key as the format reads it, its escapes undone."""
+def _unescape(text: str) -> str:
+    """A declaration's key or value as the format reads it, its escapes undone - one rule
+    for both, `java.util.Properties`' own (T644: a value kept its escapes)."""
     return _KEY_ESCAPE.sub(
         lambda m: (chr(int(m.group(1)[1:], 16)) if len(m.group(1)) == 5
-                   else _KEY_CONTROL.get(m.group(1), m.group(1))), key)
+                   else _KEY_CONTROL.get(m.group(1), m.group(1))), text)
 
 
 def parse_properties(text: str) -> list[tuple[str, str, int]]:
@@ -66,8 +69,9 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
     and a bare key - both valid lines - were dropped with no row (T538). A key's escaped
     separators are part of it, so `key\\ with\\ spaces=v` declares `key with spaces`: cut at
     the first space instead, it declared a key nobody wrote, holding the rest as its value.
-    A line with an empty key (`=v`) declares nothing a reader can look a value up by, and is
-    not returned.
+    A value's escapes are undone by the same rule (T644), so `jdbc\\:mysql\\://h:3306/d`
+    reads `jdbc:mysql://h:3306/d`, as `java.util.Properties` reads it. A line with an empty
+    key (`=v`) declares nothing a reader can look a value up by, and is not returned.
     """
     out: list[tuple[str, str, int]] = []
     # T607: the format's three line terminators, and only those. `str.splitlines()` also
@@ -99,9 +103,9 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
             buf += lines[i].lstrip(_WHITE)
         m = _DECLARATION.match(buf)
         if m:
-            # The value as written: its leading white space went with the separator, and
-            # Java keeps its trailing white space (T610).
-            out.append((_unescape_key(m.group(1)), m.group(2), start + 1))
+            # The value: its leading white space went with the separator, Java keeps its
+            # trailing white space (T610), and its escapes are undone as the key's are (T644).
+            out.append((_unescape(m.group(1)), _unescape(m.group(2)), start + 1))
         i += 1
     return out
 

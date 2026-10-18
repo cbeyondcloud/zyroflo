@@ -138,12 +138,40 @@ def test_a_properties_line_reads_white_space_as_java_does():
     ]
     for text, read in java:
         assert props.parse_properties(text + "\n") == read, repr(text)
-    # A backslash before trailing white space continues nothing. Java then undoes the escape
-    # the value ends with (`\ ` reads ` `); a value's escapes are T644's (Deferred), so here
-    # the value keeps it as written - the line structure is this row's.
+    # A backslash before trailing white space continues nothing, and Java then undoes the
+    # escape the value ends with: `\ ` reads ` `, a backslash before a no-break space the
+    # no-break space (T644, batch 27).
     for tail in (" ", nbsp):
         assert props.parse_properties(f"k=a{b}{tail}\nb=2\n") == [
-            ("k", f"a{b}{tail}", 1), ("b", "2", 2)], repr(tail)
+            ("k", f"a{tail}", 1), ("b", "2", 2)], repr(tail)
+
+
+def test_a_properties_value_reads_its_escapes_as_java_does():
+    """T644 (batch 27): a key's escapes were undone and a value's were not, so
+    `url=jdbc\\:mysql\\://h:3306/d` - how `Properties.store` writes a value holding colons -
+    entered the graph with its backslashes, where `java.util.Properties` reads
+    `jdbc:mysql://h:3306/d`. A value now reads by the key's own rule: `\\uXXXX` a code point,
+    `\\t` `\\n` `\\r` `\\f` control characters, any other escaped character itself. A malformed
+    `\\u` - which Java refuses the whole file for - keeps the key's answer: the `u` and what
+    follows it read as written, never raising mid-extraction."""
+    b = chr(92)
+    java = [
+        (f"url=jdbc{b}:mysql{b}://h:3306/d", "jdbc:mysql://h:3306/d"),
+        (f"tab=a{b}tb", "a\tb"),
+        (f"nl=a{b}nb{b}rc{b}fd", "a\nb\rc\x0cd"),
+        (f"e=caf{b}u00e9", "caf" + chr(0xE9)),
+        (f"bs=C:{b}{b}temp", f"C:{b}temp"),
+        (f"sp={b} lead", " lead"),
+        (f"eq=a{b}=b{b}#c{b}!d", "a=b#c!d"),
+        (f"m={b}u12zz", "u12zz"),
+        (f"n={b}" + chr(0xE9), chr(0xE9)),
+    ]
+    for line, value in java:
+        key = line.split("=", 1)[0]
+        assert props.parse_properties(line + "\n") == [(key, value, 1)], repr(line)
+    # A continuation joins first, then the joined value is read: `x\` + `\:y` is `x:y`.
+    assert props.parse_properties(f"c=x{b}\n  {b}:y\nz=1\n") == [("c", "x:y", 1),
+                                                                 ("z", "1", 3)]
 
 
 def test_interpolation_uses_default_and_reports_missing():
