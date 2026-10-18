@@ -14,8 +14,10 @@ entry hash instead of copying it.
 
 **No free text reaches an event.** A note, a prompt, a model's answer or a
 command line can carry anything - a key a runner echoed, a customer's data - so
-events carry ids, names, statuses, timings and hashes only. Every field is a
-value this module chose, never one a caller typed.
+events carry ids, names, statuses, timings and hashes only. Every core field is a
+value this module chose, never one a caller typed. Declared extension fields
+(`ext`, Z1) are caller-supplied but shape-checked against their declaration;
+the framework that registers them owns what it wires in (see the Z1 block).
 
 T446b adds `step_started`/`step_finished` (timings, tokens, cost) from the
 driver; T446c aggregates and exports. This row is the record they write into.
@@ -23,7 +25,11 @@ driver; T446c aggregates and exports. This row is the record they write into.
 from __future__ import annotations
 
 import json
+import math
+import re
 import sys
+import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,12 +86,226 @@ FIELD_TYPES = {
     "approver": "string", "ledger_hash": "string",
     "waited_ms": ["integer", "null"], "from": "string", "to": "string",
     "status": "string",
+    "ext": "object",
 }
 
 
 class EventError(RuntimeError):
     """An event that cannot be written as the schema says - refused, never
     written half-right into a record CI treats as append-only."""
+
+
+# ── Z1: declared extension fields, for frameworks built on the harness ───────
+#
+# A framework that drives the harness may need a few more ids on each event
+# (which team, agent and version, tier, policy version). They go in an optional
+# `ext` block, `{"<namespace>": {"<field>": value}}`, under these rules:
+#
+# * DECLARED first (`register_extension`): an undeclared namespace or field is
+#   refused like an undeclared core field; a different re-declaration is refused.
+# * SHAPE-CHECKED values: strings are id-shaped (letters, digits, ._@:/+=-, no
+#   spaces, max 128), numbers are finite and within +/-2**53. The shape keeps
+#   prose out; it cannot recognise a secret that has no spaces. So a field may
+#   carry its own `pattern` or `enum`, and the REGISTERING FRAMEWORK is
+#   responsible for what it wires into each field - this module refuses
+#   anything that does not fit the declaration.
+# * Validated, then deep-copied, BEFORE anything is written (T465): a refused
+#   event writes nothing, and a caller changing its dict afterwards changes
+#   nothing.
+# * Part of the entry, so the chain hash covers it.
+# * Optional: an event without `ext` is byte-for-byte what it was before; the
+#   harness's own readers ignore the block. `set_default_ext` lets a framework
+#   supply its ids once per process, so events the harness writes itself
+#   (`state.create`, `state.advance`, `approve.record`, drive) carry them too.
+#   Those paths ask the provider BEFORE their first write (`check_default_ext`),
+#   so a faulty provider refuses the command and leaves nothing behind (T465).
+#
+# Where it surfaces: NDJSON exports and the SQLite `events.payload` JSON keep it;
+# CSV exports and the typed SQLite columns do not. An ext value is exported AS
+# GIVEN: the export's `identity: hash` setting pseudonymises the identities the
+# harness itself records (`approver`), not ext fields - so a framework must not
+# wire a person's email or name into a field it would not export as is.
+
+#: Registered namespaces -> {field: {"type": ..., optional "pattern", "enum"}}.
+EXTENSIONS: dict[str, dict[str, dict]] = {}
+#: Optional on every event.
+OPTIONAL = ("ext",)
+EXT_TYPES = ("string", "integer", "boolean", "number", "string[]")
+_NAMESPACE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+_FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}")
+#: An id, name, version or hash: no spaces, no prose (`fullmatch`, so no newline).
+_ID_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:/+=-]{0,127}")
+_MAX_LIST = 100
+_MAX_INT = 2 ** 53
+_MAX_EXT_BYTES = 4096
+_REGISTRY_LOCK = threading.Lock()
+_default_ext: Callable[[str, str], dict | None] | None = None
+
+
+def register_extension(namespace: str, fields: dict) -> None:
+    """Declare an extension namespace and its fields. A field is a type name
+    (one of EXT_TYPES) or a mapping {"type": ..., "pattern": ..., "enum": [...]}.
+    Registering the same declaration again is a no-op; a different one is
+    refused - two writers disagreeing about a field is the undocumented column
+    this module exists to prevent."""
+    if not isinstance(namespace, str) or not _NAMESPACE.fullmatch(namespace):
+        raise EventError(f"extension namespace {namespace!r} must be lowercase letters, "
+                         f"digits, '-' or '_' (max 32)")
+    if not isinstance(fields, dict) or not fields:
+        raise EventError(f"extension {namespace!r} must declare at least one field")
+    specs: dict[str, dict] = {}
+    for name, spec in dict(fields).items():
+        if not isinstance(name, str) or not _FIELD.fullmatch(name):
+            raise EventError(f"extension field {namespace}.{name!r} must be lowercase "
+                             f"letters, digits or '_' (max 64)")
+        specs[name] = _field_spec(f"{namespace}.{name}", spec)
+    with _REGISTRY_LOCK:
+        if namespace in EXTENSIONS and EXTENSIONS[namespace] != specs:
+            raise EventError(f"extension {namespace!r} is already registered with "
+                             f"different fields - one declaration per namespace")
+        EXTENSIONS[namespace] = specs
+
+
+def set_default_ext(provider: Callable[[str, str], dict | None] | None) -> None:
+    """Supply `ext` for every event this process writes: `provider(event,
+    run_id)` returns an ext block (or None). An explicit `ext=` on `append`
+    adds to it or overrides it field by field, but cannot remove it: to write
+    an event without the default, the provider returns None for it. None
+    clears the provider.
+
+    The provider must be quick and must not write events itself (an `append`
+    from inside it would recurse). It is asked once per event type before an
+    operation's first write (`check_default_ext`), then again for each event
+    written - so it should answer the same way each time."""
+    global _default_ext
+    if provider is not None and not callable(provider):
+        raise EventError("set_default_ext takes a callable(event, run_id) or None")
+    _default_ext = provider
+
+
+def check_default_ext(run_id: str) -> None:
+    """Refuse NOW a default ext the run's events would refuse later (T465).
+
+    The harness's own write paths save their change first - `state.create`
+    claims the run folder, `state.advance` saves the move, `approve.record`
+    appends the approval - and append the event second. A default provider
+    that fails or returns a bad block would refuse only at that append, after
+    the write it belonged with. So the provider is asked for EVERY event type
+    (an operation may write several, and which ones depends on the move), and
+    each answer is validated, before the first write. `require_appendable`
+    asks this; `state.create` asks it before the folder exists."""
+    if _default_ext is None:
+        return
+    for event in TYPES:
+        _resolve_ext(event, run_id, None)
+
+
+def _field_spec(where: str, spec: object) -> dict:
+    if isinstance(spec, str):
+        spec = {"type": spec}
+    if not isinstance(spec, dict):
+        raise EventError(f"extension field {where} must be a type name or a mapping")
+    if unknown := sorted(set(spec) - {"type", "pattern", "enum"}):
+        raise EventError(f"extension field {where}: unknown keys {', '.join(unknown)}")
+    kind = spec.get("type")
+    if kind not in EXT_TYPES:
+        raise EventError(f"extension field {where} has type {kind!r} - "
+                         f"one of {', '.join(EXT_TYPES)}")
+    out: dict = {"type": kind}
+    if "pattern" in spec:
+        pattern = spec["pattern"]
+        if kind not in ("string", "string[]") or not isinstance(pattern, str):
+            raise EventError(f"extension field {where}: a pattern needs a string type")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise EventError(f"extension field {where}: pattern does not compile "
+                             f"({error})") from error
+        out["pattern"] = pattern
+    if "enum" in spec:
+        allowed = spec["enum"]
+        if not isinstance(allowed, list) or not allowed:
+            raise EventError(f"extension field {where}: enum must be a non-empty list")
+        scalar = {"type": "string" if kind == "string[]" else kind}
+        for value in allowed:
+            _check_value(where, scalar, value)
+        out["enum"] = list(allowed)
+    return out
+
+
+def _resolve_ext(event: str, run_id: str, ext: object) -> dict | None:
+    """The validated, deep-copied ext block for one event, or None for no block."""
+    if ext is not None and not isinstance(ext, dict):
+        raise EventError("ext must be a mapping of namespace -> fields")
+    merged: dict = {}
+    if _default_ext is not None:
+        try:
+            base = _default_ext(event, run_id)
+        except EventError:
+            raise
+        except Exception as error:  # a framework's bug, reported as a refusal, not a crash
+            raise EventError(f"the default ext provider failed for {event!r} "
+                             f"({type(error).__name__}) - nothing was written") from error
+        if base is not None and not isinstance(base, dict):
+            raise EventError("the default ext provider must return a mapping or None")
+        for namespace, values in (base or {}).items():
+            merged[namespace] = dict(values) if isinstance(values, dict) else values
+    for namespace, values in (ext or {}).items():
+        if isinstance(merged.get(namespace), dict) and isinstance(values, dict):
+            merged[namespace] = {**merged[namespace], **values}
+        else:
+            merged[namespace] = values
+    if not merged:
+        return None
+    _check_ext(merged)
+    text = json.dumps(merged, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    if len(text.encode("utf-8")) > _MAX_EXT_BYTES:
+        raise EventError(f"ext is {len(text.encode('utf-8'))} bytes - at most "
+                         f"{_MAX_EXT_BYTES}")
+    return json.loads(text)  # a deep, plain copy: later changes to the caller's dict do nothing
+
+
+def _check_ext(ext: dict) -> None:
+    for namespace, values in ext.items():
+        declared = EXTENSIONS.get(namespace)
+        if declared is None:
+            raise EventError(f"ext {namespace!r} is not a registered extension - "
+                             f"register_extension() it first")
+        if not isinstance(values, dict):
+            raise EventError(f"ext {namespace!r} must be a mapping of field -> value")
+        for name, value in values.items():
+            spec = declared.get(name)
+            if spec is None:
+                raise EventError(f"ext {namespace}.{name} is not declared - its fields "
+                                 f"are {', '.join(declared) or 'none'}")
+            _check_value(f"{namespace}.{name}", spec, value)
+
+
+def _check_value(where: str, spec: dict, value: object) -> None:
+    kind = spec["type"]
+    if kind == "string[]":
+        if not isinstance(value, list) or len(value) > _MAX_LIST:
+            raise EventError(f"ext {where} must be a list of at most {_MAX_LIST} ids")
+        for item in value:
+            _check_value(where, {**spec, "type": "string"}, item)
+        return
+    if kind == "string":
+        if not isinstance(value, str) or not _ID_VALUE.fullmatch(value):
+            raise EventError(f"ext {where}: {value!r} is not an id (letters, digits and "
+                             f"._@:/+=- only, no spaces, max 128) - events carry no free text")
+        if "pattern" in spec and not re.fullmatch(spec["pattern"], value):
+            raise EventError(f"ext {where}: {value!r} does not match the field's pattern")
+    elif kind == "integer":
+        if not isinstance(value, int) or isinstance(value, bool) or abs(value) > _MAX_INT:
+            raise EventError(f"ext {where} must be an integer within +/-2**53")
+    elif kind == "number":
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or abs(value) > _MAX_INT):
+            raise EventError(f"ext {where} must be a finite number within +/-2**53")
+    elif kind == "boolean" and not isinstance(value, bool):
+        raise EventError(f"ext {where} must be true or false")
+    if "enum" in spec and value not in spec["enum"]:
+        raise EventError(f"ext {where}: {value!r} is not one of {spec['enum']}")
 
 
 def events_path(target: Path, run_id: str) -> Path:
@@ -155,18 +375,23 @@ def require_appendable(target: Path, run_id: str) -> None:
         raise EventError(f"{EVENTS} for run {run_id}: line {line} is not readable JSON "
                          f"- refused before anything was written; repair that line "
                          f"(a committed run has it in git) and retry")
+    check_default_ext(run_id)  # Z1: the events about to be written must take their ext too
 
 
 def append(target: Path, run_id: str, event: str, phase: str = "",
-           at: str | None = None, **fields) -> dict:
+           at: str | None = None, ext: dict | None = None, **fields) -> dict:
     """Write one event at the end of the run's chain, and return it. `at` lets
     a caller that measured an interval against a timestamp stamp the event
-    with THAT timestamp - one clock, not two."""
+    with THAT timestamp - one clock, not two. `ext` carries declared
+    extension fields (Z1); it is validated before anything is written."""
     if event not in TYPES:
         raise EventError(f"unknown event {event!r} - one of {', '.join(TYPES)}")
     if extra := [k for k in fields if k not in FIELDS[event]]:
         raise EventError(f"{event} does not carry {', '.join(sorted(extra))} - "
                          f"its fields are {', '.join(FIELDS[event]) or 'the common ones'}")
+    resolved = _resolve_ext(event, run_id, ext)  # validated before anything is written
+    if resolved is not None:
+        fields["ext"] = resolved
     chain = read(target, run_id)
     if _break_at(chain) is not None:
         raise EventError(f"{EVENTS} for run {run_id} has an unreadable line - "

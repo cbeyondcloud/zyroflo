@@ -26,7 +26,8 @@
             "kind",
             "project",
             "owner",
-            "criticality"
+            "criticality",
+            "ext"
           ]
         }
       }
@@ -52,7 +53,8 @@
             "prev",
             "hash",
             "attempt",
-            "actor"
+            "actor",
+            "ext"
           ]
         }
       }
@@ -91,7 +93,8 @@
             "exit_code",
             "outcome",
             "artifacts",
-            "forced"
+            "forced",
+            "ext"
           ]
         }
       }
@@ -117,7 +120,8 @@
             "prev",
             "hash",
             "gate",
-            "hard"
+            "hard",
+            "ext"
           ]
         }
       }
@@ -147,7 +151,8 @@
             "approver",
             "ledger_hash",
             "waited_ms",
-            "forced"
+            "forced",
+            "ext"
           ]
         }
       }
@@ -173,7 +178,8 @@
             "prev",
             "hash",
             "from",
-            "to"
+            "to",
+            "ext"
           ]
         }
       }
@@ -198,7 +204,8 @@
             "step_name",
             "prev",
             "hash",
-            "status"
+            "status",
+            "ext"
           ]
         }
       }
@@ -267,6 +274,13 @@
         "integer",
         "null"
       ]
+    },
+    "ext": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "See tools/sdlc/events.py \u2014 the key `ext` is documented there.",
+      "type": "object"
     },
     "forced": {
       "description": "See tools/sdlc/events.py \u2014 the key `forced` is documented there.",

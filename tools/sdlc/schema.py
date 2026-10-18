@@ -589,13 +589,17 @@ def events_schema() -> dict:
     and a field the writer adds without declaring fails the build by name."""
     from tools.sdlc import events
 
-    every = (*events.COMMON, *sorted({f for fs in events.FIELDS.values() for f in fs}))
+    every = (*events.COMMON, *sorted({f for fs in events.FIELDS.values() for f in fs}),
+             *events.OPTIONAL)
     missing = [f for f in every if f not in events.FIELD_TYPES]
     if missing:
         raise SchemaError(f"events fields with no declared type: {', '.join(missing)}")
     props = {f: {"type": events.FIELD_TYPES[f], "description": _cites("events", f)}
              for f in every}
     props["event"] = {"enum": list(events.TYPES), "description": _cites("events", "event")}
+    # Z1: `ext` holds one object per registered namespace; values are shape-checked
+    # by `events.register_extension` declarations, which live in the writing process.
+    props["ext"]["additionalProperties"] = {"type": "object"}
     props["schema_version"] = {"const": events.SCHEMA_VERSION,
                                "description": _cites("events", "schema_version")}
     return {
@@ -609,7 +613,8 @@ def events_schema() -> dict:
         "additionalProperties": False,
         "properties": props,
         "allOf": [{"if": {"properties": {"event": {"const": t}}},
-                   "then": {"propertyNames": {"enum": [*events.COMMON, *events.FIELDS[t]]}}}
+                   "then": {"propertyNames": {"enum": [*events.COMMON, *events.FIELDS[t],
+                                                       *events.OPTIONAL]}}}
                   for t in events.TYPES],
     }
 
