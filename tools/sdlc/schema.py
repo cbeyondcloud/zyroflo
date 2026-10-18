@@ -597,6 +597,9 @@ def events_schema() -> dict:
     props = {f: {"type": events.FIELD_TYPES[f], "description": _cites("events", f)}
              for f in every}
     props["event"] = {"enum": list(events.TYPES), "description": _cites("events", "event")}
+    # Z1: `ext` holds one object per registered namespace; values are shape-checked
+    # by `events.register_extension` declarations, which live in the writing process.
+    props["ext"]["additionalProperties"] = {"type": "object"}
     props["schema_version"] = {"const": events.SCHEMA_VERSION,
                                "description": _cites("events", "schema_version")}
     return {

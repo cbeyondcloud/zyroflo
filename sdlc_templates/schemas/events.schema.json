@@ -276,6 +276,9 @@
       ]
     },
     "ext": {
+      "additionalProperties": {
+        "type": "object"
+      },
       "description": "See tools/sdlc/events.py \u2014 the key `ext` is documented there.",
       "type": "object"
     },

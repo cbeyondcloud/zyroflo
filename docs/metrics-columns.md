@@ -42,7 +42,7 @@ rest as "not measurable" rather than as zero.
 | `step` | The step id (`P0` …). | every event |
 | `step_name` | The step's name (`intake` …). | every event |
 | `prev` | The previous event's hash — the chain link. | every event |
-| `payload` | The type-specific fields, as JSON. | every event |
+| `payload` | The type-specific fields, as JSON — including a declared extension block (`ext`) when the writing framework registered one. | every event |
 
 ## `steps` — one row per step a runner or model ran, or a driving tool reported
 
