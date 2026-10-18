@@ -316,6 +316,9 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     # T446a: the audit trail opens with the run. Imported here, not at module
     # level: `events` reads the run folder through this module.
     from tools.sdlc import events
+    # Z1: a framework's default ext provider is asked here too, so a faulty one
+    # refuses before the folder claims the id, not at the first append after it.
+    events.check_default_ext(rid)
     # T447a: the pre-INIT metadata (T442) rides the opening event, so every
     # run in an exported store carries the repository, team and criticality
     # it was opened under - the roll-up key an estate's dashboards group by.

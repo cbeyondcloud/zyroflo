@@ -337,3 +337,73 @@ def test_ext_is_kept_in_the_ndjson_export(repo, tmp_path):
     opened_rows = [r for r in rows if r.get("event") == "run_opened" and r.get("run_id") == rid]
 
     assert opened_rows and opened_rows[0]["ext"] == {"agentic": {"team": "payments"}}
+
+
+# ── T465: a faulty default provider is refused BEFORE the harness writes ──────
+
+
+def _broken(event, run_id):
+    raise KeyError("no such team")
+
+
+@pytest.mark.parametrize("provider", [
+    lambda event, run_id: {"agentic": {"team": "has spaces"}},  # a value the field refuses
+    lambda event, run_id: "not a mapping",
+    _broken,  # a provider that crashes
+], ids=["bad-value", "not-a-mapping", "raises"])
+def test_a_faulty_default_refuses_create_before_the_run_folder_exists(repo, provider):
+    E.register_extension("agentic", AGENTIC)
+    E.set_default_ext(provider)
+
+    with pytest.raises(E.EventError):
+        L.create(repo, "requirement", "a change", run_id="r-faulty")
+    assert not (L.runs_dir(repo) / "r-faulty").exists()
+
+    # fixed, the same id is free: the refusal claimed nothing
+    E.set_default_ext(lambda event, run_id: {"agentic": {"team": "payments"}})
+    assert L.create(repo, "requirement", "a change", run_id="r-faulty")["run_id"] == "r-faulty"
+
+
+def test_a_provider_that_fails_only_for_a_later_event_still_refuses_up_front(repo):
+    E.register_extension("agentic", AGENTIC)
+    E.set_default_ext(lambda event, run_id: (
+        {"agentic": {"team": "payments"}} if event == E.RUN_OPENED
+        else {"agentic": {"team": "has spaces"}}))
+
+    with pytest.raises(E.EventError):
+        L.create(repo, "requirement", "a change", run_id="r-later")
+    assert not (L.runs_dir(repo) / "r-later").exists()
+
+
+def test_a_faulty_default_refuses_advance_before_the_move_is_saved(repo):
+    E.register_extension("agentic", AGENTIC)
+    E.set_default_ext(lambda event, run_id: {"agentic": {"team": "payments"}})
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    state_file = L.runs_dir(repo) / rid / L.STATE_NAME
+    before_state = state_file.read_bytes()
+    before_events = E.events_path(repo, rid).read_bytes()
+
+    E.set_default_ext(_broken)
+    with pytest.raises(E.EventError):
+        L.advance(repo, rid, phase="P3")
+
+    assert state_file.read_bytes() == before_state
+    assert E.events_path(repo, rid).read_bytes() == before_events
+
+
+def test_require_appendable_asks_the_default_provider(target):
+    # `approve.record` and `state.advance` call this before their first write
+    E.register_extension("agentic", AGENTIC)
+    E.set_default_ext(_broken)
+
+    with pytest.raises(E.EventError, match="default ext provider"):
+        E.require_appendable(target, RUN)
+
+
+def test_a_crashing_provider_is_an_event_error_on_append(target):
+    E.register_extension("agentic", AGENTIC)
+    E.set_default_ext(_broken)
+
+    with pytest.raises(E.EventError, match="KeyError"):
+        opened(target)
+    assert E.read(target, RUN) == []

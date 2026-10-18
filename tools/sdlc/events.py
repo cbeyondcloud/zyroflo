@@ -117,9 +117,14 @@ class EventError(RuntimeError):
 #   harness's own readers ignore the block. `set_default_ext` lets a framework
 #   supply its ids once per process, so events the harness writes itself
 #   (`state.create`, `state.advance`, `approve.record`, drive) carry them too.
+#   Those paths ask the provider BEFORE their first write (`check_default_ext`),
+#   so a faulty provider refuses the command and leaves nothing behind (T465).
 #
 # Where it surfaces: NDJSON exports and the SQLite `events.payload` JSON keep it;
-# CSV exports and the typed SQLite columns do not.
+# CSV exports and the typed SQLite columns do not. An ext value is exported AS
+# GIVEN: the export's `identity: hash` setting pseudonymises the identities the
+# harness itself records (`approver`), not ext fields - so a framework must not
+# wire a person's email or name into a field it would not export as is.
 
 #: Registered namespaces -> {field: {"type": ..., optional "pattern", "enum"}}.
 EXTENSIONS: dict[str, dict[str, dict]] = {}
@@ -164,11 +169,35 @@ def register_extension(namespace: str, fields: dict) -> None:
 def set_default_ext(provider: Callable[[str, str], dict | None] | None) -> None:
     """Supply `ext` for every event this process writes: `provider(event,
     run_id)` returns an ext block (or None). An explicit `ext=` on `append`
-    overrides it field by field. None clears it."""
+    adds to it or overrides it field by field, but cannot remove it: to write
+    an event without the default, the provider returns None for it. None
+    clears the provider.
+
+    The provider must be quick and must not write events itself (an `append`
+    from inside it would recurse). It is asked once per event type before an
+    operation's first write (`check_default_ext`), then again for each event
+    written - so it should answer the same way each time."""
     global _default_ext
     if provider is not None and not callable(provider):
         raise EventError("set_default_ext takes a callable(event, run_id) or None")
     _default_ext = provider
+
+
+def check_default_ext(run_id: str) -> None:
+    """Refuse NOW a default ext the run's events would refuse later (T465).
+
+    The harness's own write paths save their change first - `state.create`
+    claims the run folder, `state.advance` saves the move, `approve.record`
+    appends the approval - and append the event second. A default provider
+    that fails or returns a bad block would refuse only at that append, after
+    the write it belonged with. So the provider is asked for EVERY event type
+    (an operation may write several, and which ones depends on the move), and
+    each answer is validated, before the first write. `require_appendable`
+    asks this; `state.create` asks it before the folder exists."""
+    if _default_ext is None:
+        return
+    for event in TYPES:
+        _resolve_ext(event, run_id, None)
 
 
 def _field_spec(where: str, spec: object) -> dict:
@@ -210,7 +239,13 @@ def _resolve_ext(event: str, run_id: str, ext: object) -> dict | None:
         raise EventError("ext must be a mapping of namespace -> fields")
     merged: dict = {}
     if _default_ext is not None:
-        base = _default_ext(event, run_id)
+        try:
+            base = _default_ext(event, run_id)
+        except EventError:
+            raise
+        except Exception as error:  # a framework's bug, reported as a refusal, not a crash
+            raise EventError(f"the default ext provider failed for {event!r} "
+                             f"({type(error).__name__}) - nothing was written") from error
         if base is not None and not isinstance(base, dict):
             raise EventError("the default ext provider must return a mapping or None")
         for namespace, values in (base or {}).items():
@@ -340,6 +375,7 @@ def require_appendable(target: Path, run_id: str) -> None:
         raise EventError(f"{EVENTS} for run {run_id}: line {line} is not readable JSON "
                          f"- refused before anything was written; repair that line "
                          f"(a committed run has it in git) and retry")
+    check_default_ext(run_id)  # Z1: the events about to be written must take their ext too
 
 
 def append(target: Path, run_id: str, event: str, phase: str = "",
