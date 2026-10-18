@@ -144,6 +144,30 @@ def test_an_override_with_its_own_build_keeps_its_own_placement(tmp_path):
     assert edge_of(built, "deploy/docker-compose.yml")[0] == "svc:web@x"
 
 
+@pytest.mark.parametrize("build_block", [
+    "    build:\n      dockerfile: Dockerfile.dev\n",
+    "    build:\n      context:\n      args:\n        MODE: dev\n",
+])
+def test_an_override_whose_build_writes_no_context_takes_its_bases_placement(tmp_path,
+                                                                             build_block):
+    """T658 (batch 27): compose merges a `build:` mapping, so an override writing `dockerfile`
+    or `args` and no `context` builds from its BASE's context. It was placed from its own
+    directory instead, so one container became two service nodes - the override's on the
+    declaring component. It now takes its base's claim, as an override with no `build:` does."""
+    built = build(tmp_path, three_way("services:\n  web:\n" + build_block))
+    assert edge_of(built, "deploy/docker-compose.override.yml")[0] == \
+        edge_of(built, "deploy/docker-compose.yml")[0] == "svc:web@x"
+    assert not any(n["id"] == "svc:web@deploy" for n in built.nodes), "a second service node"
+
+
+def test_an_override_writing_its_own_context_keeps_it(tmp_path):
+    """B21-25 kept: an override that writes a context of its own - `build: .` - builds from it,
+    as compose builds it; only a `build:` writing no context is merged over its base's."""
+    built = build(tmp_path, three_way("services:\n  web:\n    build: .\n"))
+    assert edge_of(built, "deploy/docker-compose.override.yml")[0] == "svc:web@deploy"
+    assert edge_of(built, "deploy/docker-compose.yml")[0] == "svc:web@x"
+
+
 def test_an_override_takes_its_bases_name_only_claim_too(tmp_path):
     """D15a-15: the claim is taken whole but for three fields, `join` included - so a
     deployment-only component's override joins the same-named component with its base,

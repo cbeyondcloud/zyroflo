@@ -716,9 +716,11 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     declares none takes the component-wide answer when it is one component, and a row when
     it is several.
 
-    Before that rule, a service an override declares no `build:` of takes its base's claim
-    for the same name (T588; `layers` maps each override to its base): nine of `Claim`'s
-    seventeen fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
+    Before that rule, a service an override writes no build context for - no `build:`, or a
+    `build:` mapping whose `context:` is absent or null (`build: {}` included), which compose
+    merges over the base's (T658) - takes its base's claim for the same name (T588; `layers`
+    maps each override to its base): nine of `Claim`'s seventeen fields - `target`, `scope`,
+    `component`, `mapped_by`, `join`, `within`,
     `inferred`, `local` and `build_from` - and its `extends_unread` where it carries none of
     its own, a fact no row is emitted from (D23-118) - and `view` (decision 55: compose merges
     the pair itself); `unplaced` and `ambiguous` are the reasons for the base's own rows,
@@ -863,7 +865,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
                 extends=decl.claim.extends,
                 extends_unread=decl.claim.extends_unread or inherited[decl.name].extends_unread))
-            if decl.name in inherited and not _context_of(decl.service)[0]
+            # T658 (batch 27): an override writing no context of its own - no `build:`, or a
+            # `build:` mapping of `dockerfile`/`args` alone - builds from its base's, as compose
+            # merges a `build:` mapping; one writing its own context keeps it (B21-25).
+            if decl.name in inherited and not _explicit_context(decl.service)[1]
             and (override, k) not in brought else decl
             for k, decl in enumerate(decls[override])]
     # The image each claim's service runs with (batch 23), set after the layering so an

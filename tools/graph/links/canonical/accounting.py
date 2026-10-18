@@ -16,8 +16,12 @@ deployment of `web` in `a`" - so each is made only where it can be true:
   unread nor claim-bearing, and never a chart's `Chart.yaml` beside a values file the graph
   has a node for, read, unread or lost to its case: that values file speaks for its chart,
   as the helm reader reads the pair (D15b-136). Nothing else speaks for a file beside it -
-  one directory holds several compose packages (T588; review B15b-1); and its host-map
-  files.
+  one directory holds several compose packages (T588; review B15b-1); its host-map
+  files; and the directories its walk could enter but not list (`config["unlisted"]`, T645):
+  a block whose `path` lies in one is unknown, not absent - never accused - and they are named
+  first, as its unread files are, wherever `prefix` opens a sentence and in each of
+  `none_read`'s branches (the branch that names a block's own unread file, `named_unread`,
+  names that file alone).
 
 Both rows build their sentences here and are appended by their own passes, at their own
 emission sites, through `model.unresolved_row` (D15b-97). Every "none read" spelling ends
@@ -64,6 +68,10 @@ class Reading:
     #: The files its compose files' `include:` entries name that compose does not read (batch
     #: 23, D23-131) - each a file the graph could not read, named first, in `prefix`'s place.
     include_unread: list[str] = field(default_factory=list)
+    #: The directories the component's walk could enter but not list (`config["unlisted"]`):
+    #: what they hold is unknown, not absent, so every judgment of absence names them first
+    #: (T645, batch 27).
+    unlisted: list[str] = field(default_factory=list)
 
 
 def _component_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
@@ -134,7 +142,31 @@ def reading(config: dict, component: str, nodes: list[Node], edges: list[Edge],
                            key=lambda n: n.id)
     out.include_unread = sorted({str(entry.get("file", "")) for n in mine
                                  for entry in _entries(n.props.get("include_unread"))})
+    out.unlisted = sorted(str(d) for d in (config.get("unlisted") or {}).get(component) or [])
     return out
+
+
+def unlisted_spelling(directory: str) -> str:
+    """One directory the walk could not list, as `prefix` and `_listing` name it (T645)."""
+    return (f"`{directory}` could not be listed (see its row), so what it declares is "
+            f"unknown - allow listing it, then rebuild")
+
+
+def unlisted_holding(r: Reading, path: str) -> str:
+    """The unlisted directory `path` lies in, or "" - a component-relative path, and the
+    component's own root (`.`) holding every path (T645)."""
+    clean = path.strip("/")
+    for directory in r.unlisted:
+        d = directory.strip("/")
+        if d in ("", ".") or clean == d or clean.startswith(d + "/"):
+            return directory
+    return ""
+
+
+def _listing(r: Reading) -> str:
+    """The unlisted directories, said first, for a sentence `prefix` does not open."""
+    return ("; ".join(unlisted_spelling(d) for d in r.unlisted) + ", then: "
+            if r.unlisted else "")
 
 
 def _entries(value: object) -> list[dict]:
@@ -298,13 +330,17 @@ def include_spelling(path: str) -> str:
 
 
 def prefix(r: Reading, *, joining: bool = False) -> str:
-    """The component's unread files, named before anything else (D15b-47) - and, for a block
-    that joins (batch 23), the files its `include:` entries name that compose does not read,
-    in the same place (D23-155, D23-159)."""
+    """What the component holds that the graph could not read, before anything else
+    (D15b-47): its unread files that would claim nothing even read, each on its own (T625);
+    then the directories its walk could not list (T645), then its other unread files - and,
+    for a block that joins (batch 23), the files its `include:` entries name that compose
+    does not read, in the same place (D23-155, D23-159)."""
     # T625: a file that would claim nothing even read is still named - nothing is dropped -
     # but has nothing to fix first, so it is said on its own, before the files that do.
     inert = [n for n in r.unread if n.props.get("claims_nothing")]
-    fix = [unread_spelling(n) for n in r.unread if not n.props.get("claims_nothing")]
+    # A directory nobody could list first (T645): it may hold the deployment itself.
+    fix = [unlisted_spelling(d) for d in r.unlisted]
+    fix += [unread_spelling(n) for n in r.unread if not n.props.get("claims_nothing")]
     if joining:
         fix += [include_spelling(path) for path in r.include_unread]
     said = "".join(unread_spelling(n) + ". " for n in inert)
@@ -351,7 +387,8 @@ def none_read(r: Reading, component: str, head: str, *, mode: str) -> str:
     or, batch 23, `joining` (`deploys-unmatched`): the claims named by their own service, the
     files its `include:` names that compose does not read named first in every branch, no
     host-map clause, and its own way on in each branch's place (D23-89, D23-98, D23-107,
-    D23-108, D23-155)."""
+    D23-108, D23-155). In every branch the directories the component's walk could not list
+    are named first (T645) - by `prefix` where it opens the sentence, else by `_listing`."""
     if mode == JOINING:
         return _joining(r, component, head)
     refusing = mode == REFUSING
@@ -369,7 +406,7 @@ def none_read(r: Reading, component: str, head: str, *, mode: str) -> str:
         # Read whole and deploying nothing for its chart (T624) is not "could not be read".
         said = ("could be read" if not any(read_whole(n) for n in r.unread)
                 else "declares a service the graph read")
-        why = (head + f" None of `{component}`'s deployment files {said}: "
+        why = (_listing(r) + head + f" None of `{component}`'s deployment files {said}: "
                + "; ".join(unread_spelling(n) for n in r.unread) + ", or remove the block")
     elif r.nothing:
         tail = (f" The graph read {_files(r.nothing)} of `{component}`, and none declares a "
@@ -384,12 +421,12 @@ def none_read(r: Reading, component: str, head: str, *, mode: str) -> str:
                 tail += f"; {host_clause(r)}"
         why = prefix(r) + head + tail
     elif r.host_maps and not refusing:
-        why = (head + f" The graph read no deployment file of `{component}`; its host maps are "
-               f"designated by a path under: {_files(_host_roots(r))} - set `path` to one of "
-               f"them, or remove the block {_HOST_MAPS_KEPT}")
+        why = (_listing(r) + head + f" The graph read no deployment file of `{component}`; its "
+               f"host maps are designated by a path under: {_files(_host_roots(r))} - set "
+               f"`path` to one of them, or remove the block {_HOST_MAPS_KEPT}")
     else:
-        why = (head + f" The graph read no deployment file of `{component}`, so this block "
-               f"{can} nothing it read; remove the block")
+        why = (_listing(r) + head + f" The graph read no deployment file of `{component}`, so "
+               f"this block {can} nothing it read; remove the block")
     return f"{why}. {NOT_READ}"
 
 

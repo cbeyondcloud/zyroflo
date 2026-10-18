@@ -585,14 +585,24 @@ class CanonicalPass:
         (a) the graph read no claim of the owner on the service, and the path, if any,
         reaches no host map of the owner (a path ranking host maps is used whatever its
         service, D15b-95); (b) the owner claims the service, but the path reaches none of
-        those files. One row per block; (a) wins over (b). A path naming one of the owner's
-        unread files says so directly."""
+        those files. One row per block; (a) wins over (b). Before either, a path in a directory
+        the owner's walk could not list is unknown, not absent, and said so - the directory
+        named, never an accusation (T645) - and a path naming one of the owner's unread files
+        says so directly."""
         owner, service = str(block.get("owner", "")), str(block.get("service", ""))
         if not accounting.read_gate(config, owner, nodes, edges):
             return ""
         r = accounting.reading(config, owner, nodes, edges, nodes_by_id)
         path = _canonical.claimed_path(block, owner) or ""
         written = str(block.get("path") or "").strip()
+        # T645 (batch 27): a path in a directory the walk could not list is unknown, not absent
+        # - never "designates no file", whose remedy discards a block that may be right.
+        if path and not _canonical.is_root_path(block) and (
+                held := accounting.unlisted_holding(r, path)):
+            where = (f"`{written}` could not be listed" if path == held.strip("/") else
+                     f"`{written}` lies in `{held}`, which could not be listed")
+            return (f"{where} (see its row), so whether it deploys `{service}` is unknown, not "
+                    f"absent - allow listing it, then rebuild")
         if path and not _canonical.is_root_path(block):
             for node in r.unread:
                 if str(node.props.get("path", "")).strip("/") == path:
