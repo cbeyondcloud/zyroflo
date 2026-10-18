@@ -717,10 +717,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     it is several.
 
     Before that rule, a service an override writes no build context for - no `build:`, or a
-    `build:` mapping with no `context:`, which compose merges over the base's (T658) - takes
-    its base's claim for the same name (T588; `layers` maps each override to its base): nine of
-    `Claim`'s
-    seventeen fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
+    `build:` mapping whose `context:` is absent or null (`build: {}` included), which compose
+    merges over the base's (T658) - takes its base's claim for the same name (T588; `layers`
+    maps each override to its base): nine of `Claim`'s seventeen fields - `target`, `scope`,
+    `component`, `mapped_by`, `join`, `within`,
     `inferred`, `local` and `build_from` - and its `extends_unread` where it carries none of
     its own, a fact no row is emitted from (D23-118) - and `view` (decision 55: compose merges
     the pair itself); `unplaced` and `ambiguous` are the reasons for the base's own rows,

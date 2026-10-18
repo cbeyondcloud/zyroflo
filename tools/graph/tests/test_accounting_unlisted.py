@@ -57,12 +57,57 @@ def test_a_block_naming_a_file_in_an_unlisted_directory_is_unknown_not_accused(t
     if binds:
         assert len(said) == 1, built.rows
         assert said[0].startswith("`deploy/compose.yaml` lies in `deploy`, which could not be "
-                                  "listed, so whether it deploys `web` is unknown, not absent"), \
-            said
+                                  "listed (see its row), so whether it deploys `web` is unknown, "
+                                  "not absent"), said
         assert "remove the `path`" not in said[0] and "name one of them" not in said[0], said
         assert "allow listing it, then rebuild" in said[0], said
     else:
         assert said == [], built.rows
+
+
+def test_a_path_naming_the_unlisted_directory_itself_is_said_plainly(tmp_path):
+    """Review B27-1: a block whose `path` IS the unlisted directory was told it "lies in"
+    itself - said now as the directory that could not be listed."""
+    binds, built = built_with_unlisted(tmp_path, {
+        "a": {"compose.yaml": WEB, "deploy/compose.yaml": WEB, "app.py": producer("TOPIC")},
+        "__canonical__": [{"service": "web", "owner": "a", "path": "deploy"}]},
+        "a/deploy")
+    said = [r["why"] for r in rows(built, "canonical-unmatched")]
+    if binds:
+        assert said == ["`deploy` could not be listed (see its row), so whether it deploys "
+                        "`web` is unknown, not absent - allow listing it, then rebuild"], said
+    assert not any("lies in `deploy`" in s for s in said), said
+
+
+def test_a_sibling_sharing_the_directorys_prefix_is_not_held_by_it(tmp_path):
+    """Review B27-5: `deployment/compose.yaml` is not in the unlisted `deploy` - the path
+    boundary is kept, so a block naming it is judged on what was read (here: it designates a
+    file the graph read, so no row)."""
+    binds, built = built_with_unlisted(tmp_path, {
+        "a": {"deployment/compose.yaml": WEB, "deploy/compose.yaml": API,
+              "app.py": producer("TOPIC")},
+        "__canonical__": [{"service": "web", "owner": "a", "path": "deployment/compose.yaml"}]},
+        "a/deploy")
+    assert rows(built, "canonical-unmatched") == [], (binds, built.rows)
+
+
+def test_none_read_names_the_unlisted_directory_first_in_every_branch():
+    """Review B27-5: `none_read`'s branches that `prefix` does not open - the host-map branch
+    and the "read no deployment file" one - name the unlisted directory first, as the branch of
+    unread files does; with no unlisted directory, each is `main`'s word for word."""
+    from tools.graph.core.model import Node
+    from tools.graph.links.canonical import accounting as A
+
+    head = "HEAD."
+    host = Node("cfg:a/chart/templates/cm.yaml", "cfg",
+                {"component": "a", "kind": "configmap", "path": "chart/templates/cm.yaml",
+                 "ships_in": ["chart"]})
+    first = A.unlisted_spelling("deploy") + ", then: "
+    for r in (A.Reading(host_maps=[host]), A.Reading()):
+        plain = A.none_read(r, "a", head, mode=A.DESIGNATING)
+        r.unlisted = ["deploy"]
+        listed = A.none_read(r, "a", head, mode=A.DESIGNATING)
+        assert plain.startswith(head) and listed == first + plain, (plain, listed)
 
 
 def test_a_typo_beside_an_unlisted_directory_names_the_directory_first(tmp_path):

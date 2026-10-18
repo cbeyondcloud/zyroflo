@@ -18,8 +18,10 @@ deployment of `web` in `a`" - so each is made only where it can be true:
   as the helm reader reads the pair (D15b-136). Nothing else speaks for a file beside it -
   one directory holds several compose packages (T588; review B15b-1); its host-map
   files; and the directories its walk could enter but not list (`config["unlisted"]`, T645):
-  a block whose `path` lies in one is unknown, not absent - never accused - and every other
-  judgment of the component names them first, as its unread files are named.
+  a block whose `path` lies in one is unknown, not absent - never accused - and they are named
+  first, as its unread files are, wherever `prefix` opens a sentence and in each of
+  `none_read`'s branches (the branch that names a block's own unread file, `named_unread`,
+  names that file alone).
 
 Both rows build their sentences here and are appended by their own passes, at their own
 emission sites, through `model.unresolved_row` (D15b-97). Every "none read" spelling ends
@@ -328,9 +330,10 @@ def include_spelling(path: str) -> str:
 
 
 def prefix(r: Reading, *, joining: bool = False) -> str:
-    """The component's unread files, named before anything else (D15b-47) - and, for a block
-    that joins (batch 23), the files its `include:` entries name that compose does not read,
-    in the same place (D23-155, D23-159)."""
+    """The directories the component's walk could not list (T645), then its unread files,
+    named before anything else (D15b-47) - and, for a block that joins (batch 23), the files
+    its `include:` entries name that compose does not read, in the same place (D23-155,
+    D23-159)."""
     # T625: a file that would claim nothing even read is still named - nothing is dropped -
     # but has nothing to fix first, so it is said on its own, before the files that do.
     inert = [n for n in r.unread if n.props.get("claims_nothing")]
@@ -383,7 +386,8 @@ def none_read(r: Reading, component: str, head: str, *, mode: str) -> str:
     or, batch 23, `joining` (`deploys-unmatched`): the claims named by their own service, the
     files its `include:` names that compose does not read named first in every branch, no
     host-map clause, and its own way on in each branch's place (D23-89, D23-98, D23-107,
-    D23-108, D23-155)."""
+    D23-108, D23-155). In every branch the directories the component's walk could not list
+    are named first (T645) - by `prefix` where it opens the sentence, else by `_listing`."""
     if mode == JOINING:
         return _joining(r, component, head)
     refusing = mode == REFUSING
