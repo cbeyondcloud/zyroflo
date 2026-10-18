@@ -120,8 +120,8 @@ def test_a_typo_beside_an_unlisted_directory_names_the_directory_first(tmp_path)
     said = [r["why"] for r in rows(built, "canonical-unmatched")]
     assert len(said) == 1, built.rows
     if binds:
-        assert said[0].startswith("`deploy` could not be listed, so what it declares is unknown "
-                                  "- allow listing it, then rebuild, then: "), said
+        assert said[0].startswith("`deploy` could not be listed (see its row), so what it declares "
+                                  "is unknown - allow listing it, then rebuild, then: "), said
     else:
         assert said[0].startswith("`compos.yaml` designates no file"), said
     assert "`compos.yaml` designates no file of `a` deploying `web`" in said[0], said
@@ -137,7 +137,7 @@ def test_an_apart_block_over_an_unlisted_directory_names_it_first(tmp_path):
         "a/deploy")
     said = [r["why"] for r in rows(built, "apart-unmatched")]
     assert len(said) == 1, built.rows
-    named = "`deploy` could not be listed, so what it declares is unknown"
+    named = "`deploy` could not be listed (see its row), so what it declares is unknown"
     assert (named in said[0]) is binds, said
 
 
@@ -151,8 +151,9 @@ def test_an_unparsable_file_beside_an_unlisted_directory_names_the_directory_fir
         "a/deploy")
     said = [r["why"] for r in rows(built, "apart-unmatched")]
     assert len(said) == 1, built.rows
-    assert said[0].startswith("`deploy` could not be listed, so what it declares is unknown - "
-                              "allow listing it, then rebuild, then: ") is binds, said
+    assert said[0].startswith("`deploy` could not be listed (see its row), so what it "
+                              "declares is unknown - allow listing it, then rebuild, "
+                              "then: ") is binds, said
 
 
 def test_a_component_with_no_unlisted_directory_is_judged_as_before(tmp_path):

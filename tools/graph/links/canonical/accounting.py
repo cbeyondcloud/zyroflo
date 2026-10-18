@@ -147,9 +147,9 @@ def reading(config: dict, component: str, nodes: list[Node], edges: list[Edge],
 
 
 def unlisted_spelling(directory: str) -> str:
-    """One directory the walk could not list, as every judgment of absence names it (T645)."""
-    return (f"`{directory}` could not be listed, so what it declares is unknown - allow "
-            f"listing it, then rebuild")
+    """One directory the walk could not list, as `prefix` and `_listing` name it (T645)."""
+    return (f"`{directory}` could not be listed (see its row), so what it declares is "
+            f"unknown - allow listing it, then rebuild")
 
 
 def unlisted_holding(r: Reading, path: str) -> str:
@@ -330,10 +330,11 @@ def include_spelling(path: str) -> str:
 
 
 def prefix(r: Reading, *, joining: bool = False) -> str:
-    """The directories the component's walk could not list (T645), then its unread files,
-    named before anything else (D15b-47) - and, for a block that joins (batch 23), the files
-    its `include:` entries name that compose does not read, in the same place (D23-155,
-    D23-159)."""
+    """What the component holds that the graph could not read, before anything else
+    (D15b-47): its unread files that would claim nothing even read, each on its own (T625);
+    then the directories its walk could not list (T645), then its other unread files - and,
+    for a block that joins (batch 23), the files its `include:` entries name that compose
+    does not read, in the same place (D23-155, D23-159)."""
     # T625: a file that would claim nothing even read is still named - nothing is dropped -
     # but has nothing to fix first, so it is said on its own, before the files that do.
     inert = [n for n in r.unread if n.props.get("claims_nothing")]
