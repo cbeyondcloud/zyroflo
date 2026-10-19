@@ -59,6 +59,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["tools"]
 
+# Z2: the lifecycle content sits beside `tools/`, not in it, so an installed harness
+# had none. The wheel carries a copy laid out the same way; `tools.sdlc.content.root()`
+# says which copy a process reads (the checkout, when there is one).
+[tool.hatch.build.targets.wheel.force-include]
+"sdlc" = "tools/_content/sdlc"
+"sdlc_templates" = "tools/_content/sdlc_templates"
+"third_party/manifest.json" = "tools/_content/third_party/manifest.json"
+
 [tool.pytest.ini_options]
 # "tools", not "tools/graph/tests": the narrower root silently skipped tools/tests/,
 # so a bare `pytest` reported green while 46 tests never ran.

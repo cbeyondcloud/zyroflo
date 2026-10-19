@@ -217,13 +217,35 @@ def dirty_paths(where: Path) -> tuple[list[str] | None, str]:
     Two checks, one of which knew about the exclusion.
     """
     try:
-        proc = subprocess.run(["git", "-C", str(where), "status", "--porcelain"],
+        # `--untracked-files=all` (Z3): without it git folds a wholly untracked
+        # folder into one entry, so a `.sdlc/` holding only run folders read as
+        # `?? .sdlc/` and the run-folder exemption below never matched it.
+        # `core.quotePath=false`: a non-ASCII path is printed as itself, not as an
+        # octal-escaped quoted string the exemption below could never match.
+        proc = subprocess.run(["git", "-C", str(where), "-c", "core.quotePath=false",
+                               "status", "--porcelain", "--untracked-files=all"],
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"git did not run: {exc}"
     if proc.returncode != 0:
         return None, (proc.stderr or "git failed").strip().splitlines()[0][:200]
+    runs = ledger.RUNS_REL.as_posix()
+    if ledger.RUNS_REL != ledger.DEFAULT_RUNS_REL:
+        # A moved root (Z3) is meant to sit OUTSIDE the committed tree. One that
+        # holds tracked files is a mistake - `src` named by accident - and
+        # exempting it would hide real work from this very check.
+        # `:(top)`: the root is relative to the repository, as porcelain paths are,
+        # even when `where` is a component's subfolder.
+        try:
+            tracked = subprocess.run(["git", "-C", str(where), "ls-files", "--",
+                                      f":(top){runs}"], capture_output=True, text=True,
+                                     encoding="utf-8", errors="replace", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, f"git ls-files did not run: {exc}"
+        if tracked.returncode == 0 and tracked.stdout.strip():
+            return None, (f"the runs root {runs} holds tracked files - it must hold run "
+                          f"folders only, outside the committed tree (git-ignored)")
     dirty = []
     for line in proc.stdout.splitlines():
         if not line.strip():
@@ -244,7 +266,8 @@ def dirty_paths(where: Path) -> tuple[list[str] | None, str]:
         # cut of this exclusion reasoned about the profile and the graph and
         # simply had not met telemetry yet.
         clean = path.replace("\\", "/")
-        if clean.startswith(".sdlc/runs") or clean.startswith(".sdlc/metrics"):
+        if (clean == runs or clean.startswith(runs + "/")  # wherever they are (Z3)
+                or clean.startswith(".sdlc/metrics")):
             continue
         dirty.append(path)
     return dirty, ""
