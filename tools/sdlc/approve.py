@@ -491,6 +491,100 @@ def verify_signatures(target: Path, run_id: str) -> list[str]:
     return problems
 
 
+#: The fields every entry carries itself; `append_entry`'s `extra` may not replace them.
+CORE_FIELDS = frozenset({"schema_version", "kind", "run_id", "gate", "verdict", "approver",
+                         "at", "artifacts", "notes", "prev", "hash", "signature"})
+
+
+def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: str,
+                 artifacts: dict, *, step: str = "", notes: str = "",
+                 extra: dict | None = None, signer=None, forced: bool = False) -> dict:
+    """Append one hash-chained entry for ANY gate id, pinning the given artifacts,
+    and emit `gate_decided` (T688, Z6).
+
+    For a caller that runs a pipeline of its own - agentic-sdlc reuses this
+    harness as a pinned library, with gates such as `design-approval` and
+    artifacts such as `handoffs/design-1.md` - and so cannot use `record`,
+    which stands on G1-G5, P-phases and `state.json`. Nothing here decides
+    WHETHER the verdict may be recorded (phase reached, owed work, roles,
+    four-eyes): the caller has decided that. What it guarantees is the record
+    itself: a readable chain to link to, a hash over everything, an optional
+    DSSE signature, and artifacts that are paths INSIDE the run folder, so
+    `gate_state` voids the approval the moment one of them changes.
+
+    `artifacts` maps a path inside the run folder to its digest (`sha256:...`,
+    as `state.sha256_of` / `digest_of` write it). `extra` adds fields of the
+    caller's own (they are hashed and signed with the rest) and may not replace
+    the entry's own fields. `step` names the event's step.
+    """
+    if not isinstance(gate, str) or not gate.strip():
+        raise ValueError("an approval names its gate; '' is not one")
+    if verdict not in VERDICTS:
+        raise ValueError(f"unknown verdict {verdict!r} - one of {', '.join(VERDICTS)}")
+    if not approver:
+        raise RuntimeError("no approver - an approval attributed to nobody is not one")
+    pins = {}
+    for rel, digest in dict(artifacts).items():
+        key = ledger.artifact_key(rel)  # refuses absolute paths, '..', '' and NUL
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            raise ValueError(f"artifact {rel!r}: a digest is 'sha256:<hex>', not {digest!r}")
+        pins[key] = digest
+    if clash := sorted(set(extra or {}) & CORE_FIELDS):
+        raise ValueError(f"extra cannot replace the entry's own fields: {', '.join(clash)}")
+    if not ledger.run_dir(target, run_id).is_dir():
+        raise RuntimeError(f"no run folder for run {run_id} - an approval is about a run "
+                           f"that exists")
+    return _append_entry(target, run_id, gate, verdict, approver, pins, step=step,
+                         notes=notes, extra=dict(extra or {}), signer=signer, forced=forced)
+
+
+def _append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: str,
+                  artifacts: dict, *, step: str, notes: str, extra: dict, signer,
+                  forced: bool) -> dict:
+    """The one writer `record` and `append_entry` share: link, hash, sign, append,
+    and the `gate_decided` event that points at the entry."""
+    chain = read_chain(target, run_id)
+    if chain and "_unreadable" in chain[-1]:
+        raise RuntimeError("the last ledger line is not readable JSON - repair it "
+                           "before appending, or the chain starts lying here")
+    from tools.sdlc import events
+    events.require_appendable(target, run_id)
+    entry = {
+        "schema_version": SCHEMA_VERSION, "kind": "approval", "run_id": run_id,
+        "gate": gate, "verdict": verdict, "approver": approver, "at": _now(),
+        "artifacts": artifacts, "notes": notes, **extra,
+        "prev": chain[-1].get("hash", "") if chain else "",
+    }
+    entry["hash"] = entry_hash(entry)
+    if signer is not None:
+        # AFTER the hash and excluded from it: the envelope attests the same
+        # canonical body the hash covers, so the two agree by construction
+        # rather than by ordering luck.
+        entry["signature"] = sign_entry(entry, signer)
+    ledger.append_record(approvals_path(target, run_id),
+                         json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+
+    # T446a: the decision, in the audit trail - POINTING at this entry by its
+    # hash rather than copying it, with the human time it waited: from the
+    # `gate_waiting` it answers, or None when the run never halted there.
+    # The wait this decision ANSWERS: the latest event about this gate, if it is
+    # a wait. A wait an earlier decision already answered (a loop that came
+    # back and was decided again without halting) is not this one's.
+    latest = next((e for e in reversed(events.read(target, run_id))
+                   if e.get("gate") == gate
+                   and e.get("event") in (events.GATE_WAITING, events.GATE_DECIDED)),
+                  None)
+    waiting = latest if latest and latest["event"] == events.GATE_WAITING else None
+    at = events.now()
+    events.append(target, run_id, events.GATE_DECIDED, step, at=at,
+                  gate=gate, decision=verdict, approver=approver,
+                  ledger_hash=entry["hash"],
+                  waited_ms=(events.millis_between(waiting["at"], at)
+                             if waiting is not None else None),
+                  forced=forced)
+    return entry
+
+
 def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
            notes: str = "", force: bool = False, author: str | None = None) -> dict:
     """Append one entry and move the run. Refuses more than it accepts, on
@@ -598,22 +692,15 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     from tools.sdlc import feedback as corrections
     corrections.capture(target, run_id, gate, verdict, approver, notes)
     st = ledger.load(target, run_id)
-    entry = {
-        "schema_version": SCHEMA_VERSION, "kind": "approval", "run_id": run_id,
-        "gate": gate, "verdict": verdict, "approver": approver, "at": _now(),
+    # T688 (Z6): `record` builds the fields that are ITS OWN - phase, regime,
+    # resolved gates, the override flags - and hands them to the one writer it
+    # now shares with `append_entry`. Entries are serialised with sorted keys, so
+    # the bytes and the hash are exactly what this function wrote before;
+    # `test_append_entry.test_record_writes_exactly_what_it_wrote_before` pins it.
+    extra = {
         "phase": st.get("phase"), "gate_profile":
             intake_mod.profile_value(target, "gate_profile") or "unset",
-        # The artifacts THIS GATE is a verdict about, not the whole run. A gate
-        # stands at the end of a phase and approves the work up to it; it has no
-        # authority over a test report written afterwards. Pinning the whole map
-        # meant a G3 taken after a P6-to-P4 loop pinned P5's and P6's documents,
-        # and re-running those phases - the mandated next step - voided the gate
-        # that had just authorised the fix. Everything recorded stays covered by
-        # `state.verify_artifacts`, which asks the different question of whether
-        # what was RECORDED still matches the tree.
         "signing": mode,
-        "artifacts": {rel: digest for rel, digest in st.get("artifacts", {}).items()
-                      if stages.governs(gate, rel)},
         # Which constitution was in force. An auditor reading this entry years
         # later should not have to guess whether a policy file existed yet.
         "policy_source": (found.name if (found := guardrails.locate(target))
@@ -636,38 +723,23 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # True for EITHER override — a yes about work not yet reached, or a yes
         # over a phase that never produced what it owed. Both are the same
         # sentence to whoever reads this line later.
-        "notes": notes, "forced": bool(force and (
+        "forced": bool(force and (
             reached < ledger.PHASES.index(gate_phase) or owed)),
         "owed": owed,
-        "prev": chain[-1].get("hash", "") if chain else "",
     }
-    entry["hash"] = entry_hash(entry)
-    if signer is not None:
-        # AFTER the hash and excluded from it: the envelope attests the same
-        # canonical body the hash covers, so the two agree by construction
-        # rather than by ordering luck.
-        entry["signature"] = sign_entry(entry, signer)
-    ledger.append_record(approvals_path(target, run_id),
-                         json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
-
-    # T446a: the decision, in the audit trail - POINTING at this entry by its
-    # hash rather than copying it, with the human time it waited: from the
-    # `gate_waiting` it answers, or None when the run never halted there.
-    # The wait this decision ANSWERS: the latest event about this gate, if it is
-    # a wait. A wait an earlier decision already answered (a loop that came
-    # back and was decided again without halting) is not this one's.
-    latest = next((e for e in reversed(events.read(target, run_id))
-                   if e.get("gate") == gate
-                   and e.get("event") in (events.GATE_WAITING, events.GATE_DECIDED)),
-                  None)
-    waiting = latest if latest and latest["event"] == events.GATE_WAITING else None
-    at = events.now()
-    events.append(target, run_id, events.GATE_DECIDED, gate_phase, at=at,
-                  gate=gate, decision=verdict, approver=approver,
-                  ledger_hash=entry["hash"],
-                  waited_ms=(events.millis_between(waiting["at"], at)
-                             if waiting is not None else None),
-                  forced=bool(force))
+    # The artifacts THIS GATE is a verdict about, not the whole run. A gate
+    # stands at the end of a phase and approves the work up to it; it has no
+    # authority over a test report written afterwards. Pinning the whole map
+    # meant a G3 taken after a P6-to-P4 loop pinned P5's and P6's documents,
+    # and re-running those phases - the mandated next step - voided the gate
+    # that had just authorised the fix. Everything recorded stays covered by
+    # `state.verify_artifacts`, which asks the different question of whether
+    # what was RECORDED still matches the tree.
+    artifacts = {rel: digest for rel, digest in st.get("artifacts", {}).items()
+                 if stages.governs(gate, rel)}
+    entry = _append_entry(target, run_id, gate, verdict, approver, artifacts,
+                          step=gate_phase, notes=notes, extra=extra, signer=signer,
+                          forced=bool(force))
 
     # Only a ledger entry unblocks — that is the whole mechanism.
     if verdict == "approve":
