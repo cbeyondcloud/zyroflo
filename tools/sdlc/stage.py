@@ -44,6 +44,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.sdlc import content  # noqa: E402
 from tools.sdlc import intake as adapter  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
@@ -740,7 +741,8 @@ def gate_of(phase: str) -> str:
 
 
 def sop_path(stage: Stage, harness: Path | None = None) -> Path:
-    root = harness if harness is not None else HARNESS
+    # Z2: the SOPs are content - the checkout's, or the wheel's packaged copy.
+    root = harness if harness is not None else content.root()
     return root / SOP_DIR / f"{stage.phase}-{stage.name}.md"
 
 
@@ -2226,7 +2228,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 "phase": stage.phase,
                 "run": run_id,
                 "target": str(target),
-                "sop": str(sop_path(stage, root)),
+                "sop": str(sop_path(stage, harness)),
                 "harness": str(root),
                 "artifacts-out": str(folder),
                 "rubric": str(target / ".sdlc" / "review-rubric.md"),

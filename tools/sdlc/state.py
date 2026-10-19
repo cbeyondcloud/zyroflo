@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -76,7 +77,10 @@ STATUSES = ("running", "awaiting_approval", "halted", "rejected", "closed")
 TERMINAL = ("rejected", "closed")
 KINDS = ("requirement", "defect", "deploy-change")
 
-RUNS_REL = Path(".sdlc") / "runs"
+#: Where run folders live, relative to the target. The default, and what a
+#: committed run folder means; a framework may move it (Z3, `set_runs_root`),
+#: and `RUNS_REL` - set below, after the checks - is the one every reader asks.
+DEFAULT_RUNS_REL = Path(".sdlc") / "runs"
 ARCHIVE_NAME = "archive"
 STATE_NAME = "state.json"
 #: What `list_runs` shows for a run whose state carries no title. A stand-in for
@@ -87,6 +91,75 @@ UNTITLED = "(no state.json)"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+#: Child processes inherit a moved run-folder root through this variable (Z3).
+RUNS_ROOT_ENV = "SDLC_RUNS_ROOT"
+#: A device name is reserved whatever follows its first dot: `con.tar.gz` too.
+_WIN_RESERVED = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?", re.IGNORECASE)
+_WIN_FORBIDDEN = set('<>"|?*:')
+_MAX_PART, _MAX_ROOT = 100, 200
+
+
+def _runs_root_refusal(rel: object) -> str:
+    """Why `rel` cannot be the run-folder root, or "" if it can.
+
+    Relative and inside the target (no drive, no leading `/`, no `.` or `..`
+    part), never inside `.git`, and named so Windows stores it under the same
+    name - the reasoning `_safe_run_id` and `_win_storage_refusal` apply to one
+    run id, applied to every part of the root."""
+    text = str(rel).replace("\\", "/") if isinstance(rel, (str, Path)) else ""
+    parts = [p for p in text.split("/") if p]
+    why = ""
+    if not parts or text.startswith("/") or len(text) > _MAX_ROOT:
+        why = "it must be a relative folder inside the target"
+    elif any(p in (".", "..") for p in parts):
+        why = "a '.' or '..' part would leave the target"
+    elif any(p.lower() == ".git" for p in parts):
+        why = "run folders never go inside .git"
+    elif any(_WIN_FORBIDDEN & set(p) or p != p.rstrip(". ") or _WIN_RESERVED.fullmatch(p)
+             or len(p) > _MAX_PART for p in parts):
+        why = ("a part is stored under another name, or not at all, on Windows (a "
+               "reserved name, a trailing dot or space, or one of <>\"|?*:)")
+    return (f"runs root {rel!r}: {why} - e.g. .agentic/local/runs" if why else "")
+
+
+def set_runs_root(rel: str | Path | None) -> None:
+    """Z3: keep this process's run folders under `<target>/<rel>` instead of
+    `.sdlc/runs`. None restores the default.
+
+    For a framework built on the harness that keeps its runs OUT of the
+    committed tree (agentic-sdlc: `.agentic/local/runs`, git-ignored, its runs
+    shipped to its own control plane). Everything that finds a run reads
+    `RUNS_REL` when it runs, so one setting moves them all, the archive and the
+    clean-checkout exemption (`intake.dirty_paths`) included. What the harness
+    builds on committed run folders - the CI ledger gate, `validate` - then has
+    nothing in git to check, and that persistence is the framework's to own.
+
+    Set once, at startup: it is one value per process. It is exported as
+    `SDLC_RUNS_ROOT`, so a harness CLI the process spawns finds the same runs."""
+    global RUNS_REL
+    if rel is None:
+        RUNS_REL = DEFAULT_RUNS_REL
+        os.environ.pop(RUNS_ROOT_ENV, None)
+        return
+    if why := _runs_root_refusal(rel):
+        raise ValueError(why)
+    RUNS_REL = Path(*[p for p in str(rel).replace("\\", "/").split("/") if p])
+    os.environ[RUNS_ROOT_ENV] = RUNS_REL.as_posix()
+
+
+def _inherited_runs_root() -> Path:
+    """The root a parent process set (`SDLC_RUNS_ROOT`), refused by name if bad."""
+    inherited = os.environ.get(RUNS_ROOT_ENV, "")
+    if not inherited:
+        return DEFAULT_RUNS_REL
+    if why := _runs_root_refusal(inherited):
+        raise ValueError(f"{RUNS_ROOT_ENV}: {why}")
+    return Path(*[p for p in inherited.replace("\\", "/").split("/") if p])
+
+
+RUNS_REL = _inherited_runs_root()
 
 
 def runs_dir(target: Path) -> Path:
@@ -249,7 +322,24 @@ def digest_of(path: Path, target: Path) -> str:
 def harness_version() -> str:
     """The harness commit this run was driven by, so a past run's behaviour is
     attributable to exact rule and prompt versions. Absent history is said, not
-    guessed."""
+    guessed.
+
+    Installed as a dependency (Z2), the folder above `tools/` is the HOST's
+    site-packages, inside the host's repository - so `git rev-parse` there
+    would record the host's commit as the harness's. An installed harness
+    answers from its install record instead: the commit it was installed from
+    (`direct_url.json`, PEP 610), else its package version."""
+    from tools.sdlc import content
+    if content.installed():
+        dist = _harness_distribution()
+        if dist is None:
+            return "unknown"
+        try:
+            commit = json.loads(dist.read_text("direct_url.json") or "{}").get(
+                "vcs_info", {}).get("commit_id", "")
+        except (ValueError, AttributeError):
+            commit = ""
+        return commit or f"sdlc-harness=={dist.version}"
     try:
         proc = subprocess.run(["git", "-C", str(HARNESS), "rev-parse", "HEAD"],
                               capture_output=True, text=True, encoding="utf-8",
@@ -257,6 +347,15 @@ def harness_version() -> str:
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
     return proc.stdout.strip() if proc.returncode == 0 else "unknown"
+
+
+def _harness_distribution():
+    """This harness's installed distribution, or None."""
+    from importlib import metadata
+    try:
+        return metadata.distribution("sdlc-harness")
+    except metadata.PackageNotFoundError:
+        return None
 
 
 def new_run_id(title: str, now: datetime | None = None) -> str:

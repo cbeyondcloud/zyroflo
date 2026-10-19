@@ -957,9 +957,18 @@ def harness_state(path: str) -> bool:
     committed with the change it describes, so without this every run would
     read as a change to every component sharing the workspace's checkout. P9's
     one-act check reads it too (T551): the record moves on after a merge."""
-    parts = path.replace("\\", "/").split("/")
-    return any(part == ".sdlc" and nxt in HARNESS_STATE
-               for part, nxt in zip(parts, parts[1:]))
+    clean = path.replace("\\", "/")
+    parts = clean.split("/")
+    if any(part == ".sdlc" and nxt in HARNESS_STATE for part, nxt in zip(parts, parts[1:])):
+        return True
+    # Z3: run folders a framework moved (`state.set_runs_root`) are the record too -
+    # at the workspace root, and inside each component only for a dot-folder root
+    # (`.agentic/local/runs`), as `.sdlc` is: a plain name like `runs` would also
+    # match real code that shares it (`src/runs/handler.py`).
+    runs = ledger.RUNS_REL.as_posix()
+    if clean.startswith(runs + "/"):
+        return True
+    return runs.startswith(".") and f"/{runs}/" in f"/{clean}"
 
 
 # ── running one thing ────────────────────────────────────────────────────────
