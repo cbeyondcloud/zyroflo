@@ -35,6 +35,19 @@ the `sdlc config` engine (T371a) and its `/sdlc-config` and `--interactive` fron
 loader would call, but no loader is built or planned. The one deferred row, the OTLP emitter
 (T451), and every waived row are in `SDLC-harness-backlog.md`, which is the source of truth.
 
+**The open-core split (T689; the owner's decisions 58 to 61).** This repository is the free
+edition, MIT, and stays whole. The paid layer, Zyroflo Enterprise, lives in a private repository
+overlaid on the main checkout as `.git-commercial/` (`cg` = `git --git-dir=.git-commercial
+--work-tree=.`); it tracks `enterprise/`, `internal-docs/` and `.claude/agents/`, which this
+repository never tracks - `.gitignore` is the boundary. The barricade runs one way: the paid
+layer imports the free modules, and nothing under `tools/`, `sdlc/`, `sdlc_templates/` or
+`sdlc-init.py` imports the `enterprise` package or names the path `enterprise/`.
+`tools/tests/test_open_core_split.py` proves all of it. A worktree carries only `.git`, so
+enterprise work happens in the main checkout, and check-ins there go through
+`enterprise/checkin_push.py`: it routes each file to its repository, refuses a private or
+secret-shaped path on the public side, scans both staged sets with gitleaks, and commits and
+pushes both straight to the current branch - decision 61: no PR and no local CI on that path.
+
 ## Ground rules
 
 1. **`.env` holds every credential.** Never put a secret in any other file, ever — not in a
@@ -68,7 +81,9 @@ python tools/ci_local.py [--ref <branch>]           # CI, on this machine; needs
 alone (T460), so a push or a PR starts nothing. Run `tools/ci_local.py` once per logical chunk
 of work, before that chunk merges: it runs the workflow's two jobs (the suite, then gitleaks)
 in Linux containers against a clean clone of the ref, never the working tree. Exit 0 means
-both passed; nothing merges without it.
+both passed; nothing merges without it - except a check-in through the two-repository script
+(decision 61, above), which pushes straight to its branch: run `tools/ci_local.py` before one
+that deserves it.
 
 `uv.lock` is canonical. `tools/requirements.txt` is **generated** — regenerate it via the
 command in its header rather than editing it, then **put that header back**: `uv export`
