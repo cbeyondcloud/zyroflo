@@ -124,6 +124,7 @@ def test_no_free_file_imports_or_names_the_paid_layer():
     ("tools/v9.py", "p = posixpath.join(str(a), \"enterprise\")\n"),
     ("tools/w.py", "\"\"\"Tiers: 'free' / 'enterprise'.\"\"\"\n"),
     ("tools/x.py", "# we must not import enterprise modules\n"),
+    ("tools/y2.py", "p = str(ROOT) + os.sep + 'enterprise'\n"),
 ])
 def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: str):
     root = repo(tmp_path, {rel: text})
@@ -146,12 +147,17 @@ def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: 
     ("tools/q.py", "#: an 'enterprise' litellm proxy is a customer's\n"),
     ("tools/r.py", "help = \", \".join([\"free\", \"enterprise\"])\n"),
     ("tools/s.py", "print(\" or \".join(sorted((\"free\", \"enterprise\"))))\n"),
+    ("tools/fp1.py", "return json.loads(Path(root).read_text())[\"enterprise\"]\n"),
+    ("tools/fp2.py", "assert load(Path(p))[\"tier\"] == \"enterprise\"\n"),
+    ("tools/fp3.py", "#: Path(x) for the 'enterprise' tier is a customer concern\n"),
+    ("tools/fp4.py", "if os.path.join(a, b) and tier == 'enterprise':\n"),
 ])
 def test_the_word_and_the_rest_of_the_tree_are_not_breaches(tmp_path: Path, rel: str,
                                                               text: str):
     """The word "enterprise" is a customer's, and `docs/` may describe the split; inside the
-    shipped trees only an import of the package, the path `enterprise/`, or the quoted word used
-    as a path segment is a breach - `open_core.py`'s docstring lists the exact reach."""
+    shipped trees only an import of the package, the path `enterprise/`, the quoted word used
+    as a path segment, or Python prose writing `import enterprise` or `'x' / 'enterprise'` is a
+    breach - `open_core.py`'s docstring lists the exact reach."""
     assert open_core.barricade_breaches(repo(tmp_path, {rel: text})) == []
 
 

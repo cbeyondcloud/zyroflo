@@ -12,8 +12,11 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
   `sdlc-init.py`, that writes `enterprise/` or `enterprise\\` starting a path (any file, prose
   included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
   `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment -
-  joined with `/`, or anywhere on a line that calls `os.path.join`, `posixpath.join`,
-  `ntpath.join`, `.joinpath`, a `Path` class or names `os.sep`. Python prose is held to the
+  joined with `/`, inside the parentheses of an `os.path.join`, `posixpath.join`,
+  `ntpath.join`, `.joinpath` or `Path`-class call (whatever the earlier arguments), or joined to
+  `os.sep` with `+`. A parenthesis inside a string literal can mis-span a call: brackets are
+  counted plainly. The word used as a value on the same line as a path call
+  (`Path(p).read_text()["enterprise"]`) is not a breach. Python prose is held to the
   same rule: the words `import enterprise` anywhere on a line - a comment or a docstring
   included - and `'x' / 'enterprise'` are breaches, and the remedy is rephrasing. What it cannot
   see: a name built at run time (`'enter' + 'prise'`); the paid layer's directory put on
@@ -57,20 +60,40 @@ REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_C
 
 #: In a Python file: an import statement anywhere on a line (`if x: import enterprise`, and in
 #: a string, so `exec('import enterprise')` too), `import_module`/`__import__` with a plain,
-#: f-, r- or b-prefixed string starting `enterprise`, and `'enterprise'` quoted alone AS A PATH
-#: SEGMENT - joined with `/` (`ROOT / 'enterprise' / 'console'`) or passed to `join`,
-#: `joinpath`, `Path`, `PurePath`, `PosixPath` or `WindowsPath`. The word quoted as a value (a
-#: tuple of tiers, a comparison, a dict key, `choices=`, a comment) is not a breach.
+#: f-, r- or b-prefixed string starting `enterprise`, and `'enterprise'` joined with `/`
+#: (`ROOT / 'enterprise' / 'console'`). A path CALL's arguments are `_in_path_call`'s.
 _Q = r"[fFrRbB]{0,2}['\"]enterprise['\"]"
 _IMPORT = re.compile(r"(?<![\w.])(?:from|import)\s+enterprise(?![\w])"
                      r"|(?:import_module|__import__)\(\s*[fFrRbB]{0,2}['\"]enterprise(?![\w])"
                      rf"|/\s*{_Q}|{_Q}\s*/")
-#: A line that calls a path API: with the quoted word anywhere on it, the word is a path
-#: segment - `os.path.join(os.path.dirname(__file__), "enterprise")` included, whatever the
-#: earlier arguments are (B28-25). `str.join` is not a path API (B28-27).
-_PATH_API = re.compile(r"\b(?:os\.path|posixpath|ntpath)\.join\(|\.joinpath\("
-                       r"|\b(?:Pure|Posix|Windows|PurePosix|PureWindows)?Path\(|\bos\.sep\b")
+#: A path call - the quoted word is a path segment when it sits INSIDE the call's own
+#: parentheses, whatever its earlier arguments are: `os.path.join(os.path.dirname(__file__),
+#: "enterprise")` (B28-25), while `Path(root).read_text()["enterprise"]` is a value (B28-35).
+#: `str.join` is not a path API (B28-27).
+_PATH_CALL = re.compile(r"\b(?:os\.path|posixpath|ntpath)\.join\(|\.joinpath\("
+                        r"|\b(?:Pure|Posix|Windows|PurePosix|PureWindows)?Path\(")
 _QUOTED = re.compile(_Q)
+#: `os.sep` has no parentheses: the quoted word joined to it with `+`.
+_SEP = re.compile(rf"\bos\.sep\s*\+\s*{_Q}|{_Q}\s*\+\s*os\.sep\b")
+
+
+def _in_path_call(line: str) -> bool:
+    """Whether the quoted word lies between a path call's opening parenthesis and its match.
+    Brackets are counted plainly; a parenthesis inside a string literal can mis-span a call, a
+    limit listed in the module docstring."""
+    for m in _PATH_CALL.finditer(line):
+        depth, end = 0, len(line)
+        for i in range(m.end() - 1, len(line)):
+            if line[i] == "(":
+                depth += 1
+            elif line[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if _QUOTED.search(line, m.end(), end):
+            return True
+    return bool(_SEP.search(line))
 #: In any shipped file: `enterprise/` or `enterprise\` STARTING a path - not after a word
 #: character, `.`, `-`, `/`, `\` or `:`, so a URL segment (`https://x/enterprise/`) and
 #: `some-enterprise/` are not breaches, while prose that happens to write `enterprise/SMB` is.
@@ -134,8 +157,7 @@ def barricade_breaches(root: Path) -> list[str]:
             raise CouldNotLook(f"{rel} is tracked and could not be read: {exc}")
         python = rel.endswith(".py")
         for n, line in enumerate(text.splitlines(), 1):
-            if (python and (_IMPORT.search(line)
-                            or (_PATH_API.search(line) and _QUOTED.search(line)))) \
+            if (python and (_IMPORT.search(line) or _in_path_call(line))) \
                     or _PATH.search(line):
                 found.append(f"{rel}:{n}: {line.strip()}")
     return found
