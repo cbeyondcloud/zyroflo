@@ -42,7 +42,10 @@ overlaid on the main checkout as `.git-commercial/` (`cg` = `git --git-dir=.git-
 repository never tracks - `.gitignore` is the boundary. The barricade runs one way: the paid
 layer imports the free modules, and nothing under `tools/`, `sdlc/`, `sdlc_templates/` or
 `sdlc-init.py` imports the `enterprise` package or names the path `enterprise/`.
-`tools/tests/test_open_core_split.py` proves all of it. A worktree carries only `.git`, so
+`tools/tests/test_open_core_split.py` checks that no private path is tracked here, that a
+new file under each private root would be ignored, the barricade as far as
+`tools/tests/open_core.py`'s docstring lists its reach, and - where the twin is overlaid -
+that the two repositories hold disjoint files. A worktree carries only `.git`, so
 enterprise work happens in the main checkout, and check-ins there go through
 `enterprise/checkin_push.py`: it routes each file to its repository, refuses a private or
 secret-shaped path on the public side, scans both staged sets with gitleaks, and commits and

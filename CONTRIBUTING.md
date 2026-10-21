@@ -2,7 +2,8 @@
 
 Thank you for helping. Zyroflo is a governed lifecycle, and the repository holds itself to the
 same standard it asks of the repositories it runs in: every change is traceable to a backlog row,
-proven by a test that failed first, and gated by CI before it merges.
+proven by a test that failed first, and gated by local CI before it merges (the maintainers'
+two-repository check-in is the one exception, recorded in [`CLAUDE.md`](CLAUDE.md)).
 
 ## Before you start
 

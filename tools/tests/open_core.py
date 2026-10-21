@@ -8,12 +8,18 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
 * `private_paths_tracked` - a tracked path under a private root.
 * `private_paths_unignored` - a private root under which a NEW file would not be ignored, or a
   file under one that is neither tracked nor ignored (a negation rule).
-* `barricade_breaches` - a shipped file (`tools/`, `sdlc/`, `sdlc_templates/`,
-  `sdlc-init.py`) that imports the `enterprise` package or names the path `enterprise/`. The
-  WORD is not a breach: "an enterprise litellm proxy" is a customer's, and `docs/` may describe
-  the split. The paid layer imports the free modules; never the reverse.
+* `barricade_breaches` - a tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, or
+  `sdlc-init.py`, that writes `enterprise/` or `enterprise\\` starting a path (any file, prose
+  included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
+  `__import__` of a string starting `enterprise`, or `'enterprise'` quoted alone (a path
+  segment). What it cannot see: a name built at run time (`'enter' + 'prise'`), or the paid
+  layer's directory put on `sys.path` and its modules imported by their own names. The WORD is
+  not a breach - "an enterprise litellm proxy" is a customer's - nor is a URL segment, nor is
+  `docs/`, which may describe the split. The paid layer imports the free modules; never the
+  reverse.
 * `twin_overlap` - `None` where no twin is overlaid (a worktree, a fresh clone, CI's), else a
-  file both repositories track or a twin file this repository does not ignore.
+  file both repositories track or a twin file this repository does not ignore. The twin's
+  files are its HEAD's and its index's: a twin restored without an index is still read.
 * `required_public_files` - a public-repository file (licence, README, contributing, security,
   code of conduct) that is missing or untracked.
 
@@ -41,10 +47,17 @@ SHIPPED_FILES = ("sdlc-init.py",)
 GUARD = ("tools/tests/open_core.py", "tools/tests/test_open_core_split.py")
 REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md")
 
-_IMPORT = re.compile(r"^\s*(?:from|import)\s+enterprise(?:\.|\s|$)"
-                     r"|import_module\(\s*['\"]enterprise(?:\.|['\"])"
-                     r"|__import__\(\s*['\"]enterprise(?:\.|['\"])")
-_PATH = re.compile(r"(?<![\w.-])enterprise/")
+#: In a Python file: an import statement anywhere on a line (`if x: import enterprise`, and in
+#: a string, so `exec('import enterprise')` too), `import_module`/`__import__` with a plain,
+#: f-, r- or b-prefixed string starting `enterprise`, and `'enterprise'` quoted alone - a path
+#: segment such as `ROOT / 'enterprise' / 'console'`.
+_IMPORT = re.compile(r"(?<![\w.])(?:from|import)\s+enterprise(?![\w])"
+                     r"|(?:import_module|__import__)\(\s*[fFrRbB]{0,2}['\"]enterprise(?![\w])"
+                     r"|['\"]enterprise['\"]")
+#: In any shipped file: `enterprise/` or `enterprise\` STARTING a path - not after a word
+#: character, `.`, `-`, `/`, `\` or `:`, so a URL segment (`https://x/enterprise/`) and
+#: `some-enterprise/` are not breaches, while prose that happens to write `enterprise/SMB` is.
+_PATH = re.compile(r"(?<![\w.:/\\-])enterprise[/\\]")
 #: A name no one would give a file, used to ask "would a NEW file under this root be ignored?"
 _PROBE = "__open_core_probe__"
 
@@ -113,13 +126,25 @@ def twin_overlap(root: Path) -> list[str] | None:
     twin = root / TWIN_DIR
     if not twin.is_dir():
         return None
-    p = subprocess.run(["git", f"--git-dir={twin}", f"--work-tree={root}", "ls-files", "-z"],
-                       cwd=root, capture_output=True)
-    if p.returncode:
-        raise CouldNotLook(f"the private repository at {twin} could not be listed (git exited "
-                           f"{p.returncode}): "
-                           f"{p.stderr.decode('utf-8', 'replace').strip() or '(no message)'}")
-    private = [n for n in p.stdout.decode("utf-8", "replace").split("\0") if n]
+    base = ["git", f"--git-dir={twin}", f"--work-tree={root}"]
+
+    def listing(*args: str) -> list[str]:
+        p = subprocess.run([*base, *args], cwd=root, capture_output=True)
+        if p.returncode:
+            raise CouldNotLook(f"the private repository at {twin} could not be listed (git "
+                               f"{' '.join(args[:2])} exited {p.returncode}): "
+                               f"{p.stderr.decode('utf-8', 'replace').strip() or '(no message)'}")
+        return [n for n in p.stdout.decode("utf-8", "replace").split("\0") if n]
+
+    # Its files are what its HEAD holds AND what its index holds: a twin restored as a bare
+    # clone has a HEAD and no index, and an index alone would read as empty - clean (B28-2).
+    has_head = subprocess.run([*base, "rev-parse", "-q", "--verify", "HEAD"], cwd=root,
+                              capture_output=True).returncode == 0
+    private = sorted(set(listing("ls-files", "-z"))
+                     | set(listing("ls-tree", "-r", "-z", "--name-only", "HEAD")
+                           if has_head else ()))
+    if has_head and not private:
+        raise CouldNotLook(f"the private repository at {twin} has a commit but lists no file")
     if not private:
         return []
     public = set(tracked(root))

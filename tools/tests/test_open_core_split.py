@@ -108,6 +108,12 @@ def test_no_free_file_imports_or_names_the_paid_layer():
     ("sdlc-init.py", "PAID = ROOT / 'enterprise/' \n"),
     ("sdlc_templates/x.md", "see enterprise/README.md\n"),
     ("sdlc/LIFECYCLE.md", "the console lives in enterprise/console\n"),
+    ("tools/d.py", "mod = importlib.import_module(f'enterprise.{name}')\n"),
+    ("tools/e.py", "console = ROOT / 'enterprise' / 'console'\n"),
+    ("tools/f.py", "if True: import enterprise\n"),
+    ("tools/g.py", "exec('import enterprise')\n"),
+    ("sdlc_templates/y.md", "on Windows: enterprise\\console\\app.py\n"),
+    ("sdlc/notes.md", "the enterprise/SMB split\n"),
 ])
 def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: str):
     root = repo(tmp_path, {rel: text})
@@ -120,6 +126,9 @@ def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: 
     ("sdlc_templates/policy.yml", "# An enterprise fills this floor\n"),
     ("docs/notes.md", "the paid layer is in enterprise/\n"),
     ("tools/sdlc/b.py", "import enterprise_tools\n"),
+    ("sdlc/LIFECYCLE.md", "pricing: https://cbeyond.cloud/enterprise/plans\n"),
+    ("tools/h.py", "URL = 'https://example.test/enterprise/api'\n"),
+    ("tools/i.py", "TIER = enterprise_plan  # an enterprise customer\n"),
 ])
 def test_the_word_and_the_rest_of_the_tree_are_not_breaches(tmp_path: Path, rel: str,
                                                               text: str):
@@ -148,8 +157,9 @@ def _twin(root: Path, files: dict[str, str]) -> None:
     for rel, text in files.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text, encoding="utf-8")
-    git(root, *t, "add", "-f", *files)
-    git(root, *t, "commit", "-qm", "private")
+    if files:
+        git(root, *t, "add", "-f", *files)
+    git(root, *t, "commit", "-qm", "private", "--allow-empty")
 
 
 def test_a_clean_twin_overlaps_nothing(tmp_path: Path):
@@ -169,6 +179,35 @@ def test_a_twin_file_this_repository_would_publish_is_found(tmp_path: Path):
     root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
     _twin(root, {"notes/plan.md": "commercial", "enterprise/svc.py": "y"})
     assert open_core.twin_overlap(root) == ["notes/plan.md  (not ignored by this repository)"]
+
+
+def test_a_twin_restored_without_an_index_is_still_read(tmp_path: Path):
+    """The restore recipe (a bare clone into .git-commercial, then core.bare=false) leaves NO
+    index: the twin's files must be read from its HEAD too, or the check answers clean (B28-2)."""
+    root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-q", "-b", "main")
+    git(source, "config", "user.email", "t@example.invalid")
+    git(source, "config", "user.name", "t")
+    (source / "README.md").write_text("x", encoding="utf-8")
+    (source / "notes.md").write_text("private", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-qm", "private")
+    twin = root / open_core.TWIN_DIR
+    git(root, "clone", "-q", "--bare", str(source), str(twin))
+    git(root, f"--git-dir={twin}", "config", "core.bare", "false")
+    assert not (twin / "index").exists()
+    assert open_core.twin_overlap(root) == ["README.md  (tracked by both repositories)",
+                                            "README.md  (not ignored by this repository)",
+                                            "notes.md  (not ignored by this repository)"]
+
+
+def test_a_twin_with_a_commit_that_lists_nothing_is_could_not_look(tmp_path: Path):
+    root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
+    _twin(root, {})
+    with pytest.raises(CouldNotLook, match="lists no file"):
+        open_core.twin_overlap(root)
 
 
 def test_no_twin_answers_none_not_an_empty_list(tmp_path: Path):
