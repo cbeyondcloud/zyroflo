@@ -11,14 +11,20 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
 * `barricade_breaches` - a tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, or
   `sdlc-init.py`, that writes `enterprise/` or `enterprise\\` starting a path (any file, prose
   included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
-  `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment
-  (joined with `/`, or passed to `join`, `joinpath` or a `Path` class). What it cannot see: a
-  name built at run time (`'enter' + 'prise'`), the paid layer's directory put on `sys.path`
-  and its modules imported by their own names, or a quoted `'enterprise'` handed to a path API
-  other than those. The WORD is not a breach - "an enterprise litellm proxy" is a customer's,
-  and so is `'enterprise'` quoted as a value - nor is a URL segment, nor is `docs/`, which may
-  describe the split. The guard's own two files are exempt. The paid layer imports the free
-  modules; never the reverse.
+  `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment -
+  joined with `/`, or anywhere on a line that calls `os.path.join`, `posixpath.join`,
+  `ntpath.join`, `.joinpath`, a `Path` class or names `os.sep`. Python prose is held to the
+  same rule: the words `import enterprise` anywhere on a line - a comment or a docstring
+  included - and `'x' / 'enterprise'` are breaches, and the remedy is rephrasing. What it cannot
+  see: a name built at run time (`'enter' + 'prise'`); the paid layer's directory put on
+  `sys.path` and its modules imported by their own names; a quoted `'enterprise'` handed to a
+  path API other than those (a bare `join` imported from `os.path` included); and `enterprise/`
+  written after a slash - `f"{ROOT}/enterprise/app.py"`, `str(ROOT) + "/enterprise"` - which
+  the URL exclusion below also lets through. The WORD is not a breach - "an enterprise litellm
+  proxy" is a customer's, and so is `'enterprise'` quoted as a value, `", ".join(...)` of tier
+  names included - nor is a URL segment, nor is `docs/`, which may describe the split. The
+  guard's own two files are exempt. The paid layer imports the free modules; never the
+  reverse.
 * `twin_overlap` - `None` where no twin is overlaid (a worktree, a fresh clone, CI's), else a
   file both repositories track or a twin file this repository does not ignore. The twin's
   files are its HEAD's and its index's: a twin restored without an index is still read.
@@ -58,8 +64,13 @@ REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_C
 _Q = r"[fFrRbB]{0,2}['\"]enterprise['\"]"
 _IMPORT = re.compile(r"(?<![\w.])(?:from|import)\s+enterprise(?![\w])"
                      r"|(?:import_module|__import__)\(\s*[fFrRbB]{0,2}['\"]enterprise(?![\w])"
-                     rf"|/\s*{_Q}|{_Q}\s*/"
-                     rf"|(?:join|joinpath|Path|PurePath|PosixPath|WindowsPath)\([^)]*{_Q}")
+                     rf"|/\s*{_Q}|{_Q}\s*/")
+#: A line that calls a path API: with the quoted word anywhere on it, the word is a path
+#: segment - `os.path.join(os.path.dirname(__file__), "enterprise")` included, whatever the
+#: earlier arguments are (B28-25). `str.join` is not a path API (B28-27).
+_PATH_API = re.compile(r"\b(?:os\.path|posixpath|ntpath)\.join\(|\.joinpath\("
+                       r"|\b(?:Pure|Posix|Windows|PurePosix|PureWindows)?Path\(|\bos\.sep\b")
+_QUOTED = re.compile(_Q)
 #: In any shipped file: `enterprise/` or `enterprise\` STARTING a path - not after a word
 #: character, `.`, `-`, `/`, `\` or `:`, so a URL segment (`https://x/enterprise/`) and
 #: `some-enterprise/` are not breaches, while prose that happens to write `enterprise/SMB` is.
@@ -123,7 +134,9 @@ def barricade_breaches(root: Path) -> list[str]:
             raise CouldNotLook(f"{rel} is tracked and could not be read: {exc}")
         python = rel.endswith(".py")
         for n, line in enumerate(text.splitlines(), 1):
-            if (python and _IMPORT.search(line)) or _PATH.search(line):
+            if (python and (_IMPORT.search(line)
+                            or (_PATH_API.search(line) and _QUOTED.search(line)))) \
+                    or _PATH.search(line):
                 found.append(f"{rel}:{n}: {line.strip()}")
     return found
 

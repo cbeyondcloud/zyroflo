@@ -222,7 +222,7 @@ The full phase list, the capability-degradation table, and the gate regimes are 
 
 **Everything in this repository is free and open source under MIT, and stays that way** - every phase and gate, the approval ledger and its CI check, the audit trail, metrics and dashboards, the graph tier and every connector. Nothing here is a trial of a paid edition, and nothing will be moved behind a paywall.
 
-Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and nothing here depends on it: the suite's [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) checks that no tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, nor `sdlc-init.py`, apart from that guard's own two files, imports the `enterprise` package or writes the path `enterprise/`, and that no private path is tracked here. For what it offers, and the design-partner programme, see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo).
+Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and nothing here depends on it: the suite's [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) checks that no tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, nor `sdlc-init.py`, apart from that guard's own two files, imports the `enterprise` package, writes the path `enterprise/` or uses the quoted word `'enterprise'` as a path segment, and that no private path is tracked here. For what it offers, and the design-partner programme, see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo).
 
 ## Multi-component workspaces
 

@@ -117,6 +117,13 @@ def test_no_free_file_imports_or_names_the_paid_layer():
     ("tools/j.py", "paid = os.path.join(root, \"enterprise\", \"console\")\n"),
     ("tools/k.py", "paid = Path('enterprise')\n"),
     ("tools/l.py", "paid = root.joinpath('enterprise')\n"),
+    ("tools/v1.py", "p = os.path.join(str(ROOT), \"enterprise\")\n"),
+    ("tools/v2.py", "p = os.path.join(os.path.dirname(__file__), \"enterprise\")\n"),
+    ("tools/v3.py", "p = Path(str(ROOT), \"enterprise\")\n"),
+    ("tools/v5.py", "p = root.joinpath(sub(), \"enterprise\")\n"),
+    ("tools/v9.py", "p = posixpath.join(str(a), \"enterprise\")\n"),
+    ("tools/w.py", "\"\"\"Tiers: 'free' / 'enterprise'.\"\"\"\n"),
+    ("tools/x.py", "# we must not import enterprise modules\n"),
 ])
 def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: str):
     root = repo(tmp_path, {rel: text})
@@ -137,11 +144,14 @@ def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: 
     ("tools/o.py", "LABELS = {\"enterprise\": \"paid\"}\n"),
     ("tools/p.py", "ap.add_argument('--tier', choices=['free', 'enterprise'])\n"),
     ("tools/q.py", "#: an 'enterprise' litellm proxy is a customer's\n"),
+    ("tools/r.py", "help = \", \".join([\"free\", \"enterprise\"])\n"),
+    ("tools/s.py", "print(\" or \".join(sorted((\"free\", \"enterprise\"))))\n"),
 ])
 def test_the_word_and_the_rest_of_the_tree_are_not_breaches(tmp_path: Path, rel: str,
                                                               text: str):
-    """The word "enterprise" is a customer's, and `docs/` may describe the split; only an
-    import of the package or the path `enterprise/` inside the shipped trees is a breach."""
+    """The word "enterprise" is a customer's, and `docs/` may describe the split; inside the
+    shipped trees only an import of the package, the path `enterprise/`, or the quoted word used
+    as a path segment is a breach - `open_core.py`'s docstring lists the exact reach."""
     assert open_core.barricade_breaches(repo(tmp_path, {rel: text})) == []
 
 
@@ -216,6 +226,27 @@ def test_a_twin_whose_only_commit_is_empty_overlaps_nothing(tmp_path: Path):
     root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
     _twin(root, {})
     assert open_core.twin_overlap(root) == []
+
+
+def test_a_twin_tree_that_is_not_empty_yet_lists_nothing_is_could_not_look(tmp_path: Path):
+    """The cardinal rule for the one listing that reads another repository: a HEAD whose tree
+    is not the empty tree, while both listings answer nothing at exit 0, is could-not-look."""
+    root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
+    _twin(root, {})
+    twin = root / open_core.TWIN_DIR
+    t = [f"--git-dir={twin}"]
+    empty = subprocess.run(["git", *t, "hash-object", "-w", "-t", "tree", "--stdin"], input="",
+                           env=_env(), capture_output=True, text=True, check=True).stdout.strip()
+    tree = subprocess.run(["git", *t, "mktree"], input=f"040000 tree {empty}\tsub\n", env=_env(),
+                          capture_output=True, text=True, check=True).stdout.strip()
+    commit = subprocess.run(["git", *t, "commit-tree", tree, "-m", "a tree of one empty subtree"],
+                            env=dict(_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x.invalid",
+                                     GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x.invalid"),
+                            capture_output=True, text=True, check=True).stdout.strip()
+    git(root, *t, "update-ref", "refs/heads/main", commit)
+    git(root, *t, "read-tree", "--empty")
+    with pytest.raises(CouldNotLook, match="tree is not empty"):
+        open_core.twin_overlap(root)
 
 
 def test_no_twin_answers_none_not_an_empty_list(tmp_path: Path):
