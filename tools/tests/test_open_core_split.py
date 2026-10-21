@@ -114,6 +114,9 @@ def test_no_free_file_imports_or_names_the_paid_layer():
     ("tools/g.py", "exec('import enterprise')\n"),
     ("sdlc_templates/y.md", "on Windows: enterprise\\console\\app.py\n"),
     ("sdlc/notes.md", "the enterprise/SMB split\n"),
+    ("tools/j.py", "paid = os.path.join(root, \"enterprise\", \"console\")\n"),
+    ("tools/k.py", "paid = Path('enterprise')\n"),
+    ("tools/l.py", "paid = root.joinpath('enterprise')\n"),
 ])
 def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: str):
     root = repo(tmp_path, {rel: text})
@@ -129,6 +132,11 @@ def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: 
     ("sdlc/LIFECYCLE.md", "pricing: https://cbeyond.cloud/enterprise/plans\n"),
     ("tools/h.py", "URL = 'https://example.test/enterprise/api'\n"),
     ("tools/i.py", "TIER = enterprise_plan  # an enterprise customer\n"),
+    ("tools/m.py", "TIERS = ('free', 'enterprise')\n"),
+    ("tools/n.py", "if host_kind == 'enterprise':\n"),
+    ("tools/o.py", "LABELS = {\"enterprise\": \"paid\"}\n"),
+    ("tools/p.py", "ap.add_argument('--tier', choices=['free', 'enterprise'])\n"),
+    ("tools/q.py", "#: an 'enterprise' litellm proxy is a customer's\n"),
 ])
 def test_the_word_and_the_rest_of_the_tree_are_not_breaches(tmp_path: Path, rel: str,
                                                               text: str):
@@ -203,11 +211,11 @@ def test_a_twin_restored_without_an_index_is_still_read(tmp_path: Path):
                                             "notes.md  (not ignored by this repository)"]
 
 
-def test_a_twin_with_a_commit_that_lists_nothing_is_could_not_look(tmp_path: Path):
+def test_a_twin_whose_only_commit_is_empty_overlaps_nothing(tmp_path: Path):
+    """Both listings read a tree that IS empty (B28-19): that answer is evidence of absence."""
     root = repo(tmp_path, {"README.md": "x"}, BOUNDARY)
     _twin(root, {})
-    with pytest.raises(CouldNotLook, match="lists no file"):
-        open_core.twin_overlap(root)
+    assert open_core.twin_overlap(root) == []
 
 
 def test_no_twin_answers_none_not_an_empty_list(tmp_path: Path):

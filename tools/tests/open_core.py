@@ -11,12 +11,14 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
 * `barricade_breaches` - a tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, or
   `sdlc-init.py`, that writes `enterprise/` or `enterprise\\` starting a path (any file, prose
   included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
-  `__import__` of a string starting `enterprise`, or `'enterprise'` quoted alone (a path
-  segment). What it cannot see: a name built at run time (`'enter' + 'prise'`), or the paid
-  layer's directory put on `sys.path` and its modules imported by their own names. The WORD is
-  not a breach - "an enterprise litellm proxy" is a customer's - nor is a URL segment, nor is
-  `docs/`, which may describe the split. The paid layer imports the free modules; never the
-  reverse.
+  `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment
+  (joined with `/`, or passed to `join`, `joinpath` or a `Path` class). What it cannot see: a
+  name built at run time (`'enter' + 'prise'`), the paid layer's directory put on `sys.path`
+  and its modules imported by their own names, or a quoted `'enterprise'` handed to a path API
+  other than those. The WORD is not a breach - "an enterprise litellm proxy" is a customer's,
+  and so is `'enterprise'` quoted as a value - nor is a URL segment, nor is `docs/`, which may
+  describe the split. The guard's own two files are exempt. The paid layer imports the free
+  modules; never the reverse.
 * `twin_overlap` - `None` where no twin is overlaid (a worktree, a fresh clone, CI's), else a
   file both repositories track or a twin file this repository does not ignore. The twin's
   files are its HEAD's and its index's: a twin restored without an index is still read.
@@ -49,11 +51,15 @@ REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_C
 
 #: In a Python file: an import statement anywhere on a line (`if x: import enterprise`, and in
 #: a string, so `exec('import enterprise')` too), `import_module`/`__import__` with a plain,
-#: f-, r- or b-prefixed string starting `enterprise`, and `'enterprise'` quoted alone - a path
-#: segment such as `ROOT / 'enterprise' / 'console'`.
+#: f-, r- or b-prefixed string starting `enterprise`, and `'enterprise'` quoted alone AS A PATH
+#: SEGMENT - joined with `/` (`ROOT / 'enterprise' / 'console'`) or passed to `join`,
+#: `joinpath`, `Path`, `PurePath`, `PosixPath` or `WindowsPath`. The word quoted as a value (a
+#: tuple of tiers, a comparison, a dict key, `choices=`, a comment) is not a breach.
+_Q = r"[fFrRbB]{0,2}['\"]enterprise['\"]"
 _IMPORT = re.compile(r"(?<![\w.])(?:from|import)\s+enterprise(?![\w])"
                      r"|(?:import_module|__import__)\(\s*[fFrRbB]{0,2}['\"]enterprise(?![\w])"
-                     r"|['\"]enterprise['\"]")
+                     rf"|/\s*{_Q}|{_Q}\s*/"
+                     rf"|(?:join|joinpath|Path|PurePath|PosixPath|WindowsPath)\([^)]*{_Q}")
 #: In any shipped file: `enterprise/` or `enterprise\` STARTING a path - not after a word
 #: character, `.`, `-`, `/`, `\` or `:`, so a URL segment (`https://x/enterprise/`) and
 #: `some-enterprise/` are not breaches, while prose that happens to write `enterprise/SMB` is.
@@ -144,7 +150,16 @@ def twin_overlap(root: Path) -> list[str] | None:
                      | set(listing("ls-tree", "-r", "-z", "--name-only", "HEAD")
                            if has_head else ()))
     if has_head and not private:
-        raise CouldNotLook(f"the private repository at {twin} has a commit but lists no file")
+        # Both listings read a tree; nothing is evidence of absence only if that tree IS the
+        # empty one (a twin whose only commit is empty - B28-19).
+        tree = subprocess.run([*base, "rev-parse", "HEAD^{tree}"], cwd=root,
+                              capture_output=True, text=True).stdout.strip()
+        empty = subprocess.run([*base, "hash-object", "-t", "tree", "--stdin"], cwd=root,
+                               input="", capture_output=True, text=True).stdout.strip()
+        if not tree or tree != empty:
+            raise CouldNotLook(f"the private repository at {twin} has a commit whose tree is "
+                               f"not empty but lists no file")
+        return []
     if not private:
         return []
     public = set(tracked(root))
