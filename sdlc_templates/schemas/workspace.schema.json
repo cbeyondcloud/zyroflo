@@ -1,5 +1,5 @@
 {
-  "$id": "https://github.com/cbeyondcloud/sdlc-harness/schemas/workspace.schema.json",
+  "$id": "https://github.com/cbeyondcloud/zyroflo/schemas/workspace.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "A multi-repo workspace, declared before INIT runs. See sdlc_templates/workspace.example.toml \u2014 the key `every key` is documented there.",

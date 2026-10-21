@@ -1,12 +1,15 @@
-"""The repository is named where it now lives (T650, the owner's decision 38).
+"""The repository is named where it now lives (T650, the owner's decision 38; T689, decision 59).
 
-The owner moved the repository to `github.com/cbeyondcloud/sdlc-harness` on 2026-10-14. A badge
-or a schema id naming the old home points at a repository that is no longer there, and nothing
-fails when it does: GitHub redirects a browser, so the drift is invisible from a README.
+The repository has moved twice: on 2026-10-14 from the `sumitdevgupto` account to the
+`cbeyondcloud` organisation, and on 2026-10-21 renamed to `zyroflo` at publication (T689, the
+open-core split). A badge or a schema id naming a retired home points at a repository that is no
+longer there, and nothing fails when it does: GitHub redirects a browser, so the drift is
+invisible from a README.
 
 Every tracked file is read, so a link pasted from an old page is caught wherever it lands. The
-old home is built from its parts, never written whole, so this file does not name it.
+retired homes are built from their parts, never written whole, so this file does not name them.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -18,8 +21,9 @@ sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import schema  # noqa: E402
 
-OLD_HOME = "/".join(("sumitdevgupto", "sdlc-harness"))
-NEW_HOME = "cbeyondcloud/sdlc-harness"
+RETIRED_HOMES = ("/".join(("sumitdevgupto", "sdlc-harness")),
+                 "/".join(("cbeyondcloud", "sdlc-harness")))
+NEW_HOME = "cbeyondcloud/zyroflo"
 
 
 def _tracked() -> list[str]:
@@ -31,15 +35,16 @@ def _tracked() -> list[str]:
     return names
 
 
-def test_no_tracked_file_names_the_old_home():
-    found = [name for name in _tracked()
-             if (ROOT / name).is_file() and OLD_HOME.encode() in (ROOT / name).read_bytes()]
-    assert not found, (f"these tracked files name the repository's old home, {OLD_HOME}; it "
-                       f"lives at {NEW_HOME} now: {found}")
+def test_no_tracked_file_names_a_retired_home():
+    found = {home: [name for name in _tracked() if (ROOT / name).is_file()
+                    and home.encode() in (ROOT / name).read_bytes()]
+             for home in RETIRED_HOMES}
+    assert not any(found.values()), (f"these tracked files name a retired home of the "
+                                     f"repository; it lives at {NEW_HOME} now: {found}")
 
 
 def test_the_schema_ids_and_the_badges_name_the_new_home():
-    """The positive control: the six places T650 names say the new home, so the scan above
+    """The positive control: the six places T650 named say the new home, so the scan above
     cannot pass merely because the lines it looks for were deleted."""
     assert schema.BASE_ID == f"https://github.com/{NEW_HOME}/schemas"
     for name in ("events", "policy", "profile", "workspace"):
