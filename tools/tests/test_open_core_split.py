@@ -185,6 +185,12 @@ def test_a_twin_nobody_can_list_is_could_not_look(tmp_path: Path):
 # ── the public face ──────────────────────────────────────────────────────────
 
 
+def test_this_repository_carries_its_public_files():
+    """A public repository says how to contribute, where to report a vulnerability and what
+    conduct it expects - tracked, not merely present on one machine."""
+    assert open_core.required_public_files(ROOT) == []
+
+
 def test_a_missing_or_untracked_public_file_is_found(tmp_path: Path):
     root = repo(tmp_path, {"README.md": "x", "LICENSE": "MIT"})
     (root / "SECURITY.md").write_text("untracked", encoding="utf-8")

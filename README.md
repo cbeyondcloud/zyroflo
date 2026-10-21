@@ -218,6 +218,12 @@ The full phase list, the capability-degradation table, and the gate regimes are 
 > map. Tier 0's "no packages, no network" property is a gate the estate tier is not allowed to
 > break.
 
+## Free vs Enterprise
+
+**Everything in this repository is free and open source under MIT, and stays that way** - every phase and gate, the approval ledger and its CI check, the audit trail, metrics and dashboards, the graph tier and every connector. Nothing here is a trial of a paid edition, and nothing will be moved behind a paywall.
+
+Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and no file here depends on it - [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) proves that on every CI run. For what it offers, and the design-partner programme, see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo).
+
 ## Multi-component workspaces
 
 The harness never hardcodes a path, a repository name, or how many there are. Everything about *your* workspace enters through one file that you write and that stays yours:
@@ -382,6 +388,10 @@ For a single droppable file (no `sdlc_templates/` sibling needed):
 ```bash
 python sdlc-init.py --bundle sdlc-init.bundled.py
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); report vulnerabilities as [SECURITY.md](SECURITY.md) describes, and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
