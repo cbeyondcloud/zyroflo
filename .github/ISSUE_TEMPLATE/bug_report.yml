@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in the harness behaves differently from what it documents.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **A security vulnerability goes to a private advisory, not here** -
+        see SECURITY.md. Please never paste a credential, token or `.env` value into an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what it printed (exit code included), and what you expected.
+      placeholder: |
+        $ python sdlc-init.py --target ../my-repo
+        ...
+        exit 2 - expected the installer to ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest repository shape or profile that shows it. A failing test is best.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD` in your harness clone."
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, Linux, macOS, Other]
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: AI coding tool and tier
+      description: e.g. Claude Code, Cursor, Codex - and Tier 0 (one repo) or the estate/graph tier.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Logs, the relevant part of `.sdlc/profile.yml` (no secrets), screenshots.

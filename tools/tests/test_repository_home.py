@@ -43,6 +43,16 @@ def test_no_tracked_file_names_a_retired_home():
                                      f"repository; it lives at {NEW_HOME} now: {found}")
 
 
+def test_the_package_metadata_names_the_new_home():
+    """A published package says where it lives and under which licence (T692)."""
+    import tomllib
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["urls"]["Repository"] == f"https://github.com/{NEW_HOME}"
+    assert project["urls"]["Issues"] == f"https://github.com/{NEW_HOME}/issues"
+    assert project["license"] == {"text": "MIT"}
+    assert project["readme"] == "README.md"
+
+
 def test_the_schema_ids_and_the_badges_name_the_new_home():
     """The positive control: the six places T650 named say the new home, so the scan above
     cannot pass merely because the lines it looks for were deleted."""

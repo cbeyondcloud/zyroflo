@@ -7,7 +7,7 @@ It applies in every project space - issues, pull requests, discussions and revie
 someone represents the project in public.
 
 **Reporting.** Instances of abusive, harassing or otherwise unacceptable behaviour may be
-reported to the maintainers at `sumit.gupta@cbeyond.com`. Every complaint is reviewed and
+reported to the maintainers at `sumit.gupta@cbeyond.cloud`. Every complaint is reviewed and
 investigated promptly and fairly, and the privacy and security of the person reporting is
 respected.
 

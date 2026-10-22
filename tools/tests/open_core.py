@@ -59,7 +59,13 @@ PRIVATE_ROOTS = ("enterprise/", "internal-docs/", ".claude/", TWIN_DIR + "/")
 SHIPPED = ("tools/", "sdlc/", "sdlc_templates/")
 SHIPPED_FILES = ("sdlc-init.py",)
 GUARD = ("tools/tests/open_core.py", "tools/tests/test_open_core_split.py")
-REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md")
+#: A public repository's own files (T689, T692): the licence and its third-party notices,
+#: how to contribute, get help, report a vulnerability, and what conduct it expects, and the
+#: issue and pull-request templates that route a report to the right place.
+REQUIRED = ("LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
+            "SUPPORT.md", "THIRD_PARTY_LICENSES.md", ".github/PULL_REQUEST_TEMPLATE.md",
+            ".github/ISSUE_TEMPLATE/bug_report.yml", ".github/ISSUE_TEMPLATE/feature_request.yml",
+            ".github/ISSUE_TEMPLATE/config.yml")
 
 #: In a Python file: an import statement anywhere on a line (`if x: import enterprise`, and in
 #: a string, so `exec('import enterprise')` too), `import_module`/`__import__` with a plain,

@@ -276,11 +276,25 @@ def test_this_repository_carries_its_public_files():
     assert open_core.required_public_files(ROOT) == []
 
 
+def test_no_tracked_file_gives_a_contact_at_a_domain_that_is_not_the_companys():
+    """The security and conduct contact is at the company's own domain (T692, the owner's
+    choice). The wrong one is built from its parts, so this file does not name it."""
+    wrong = "@" + ".".join(("cbeyond", "com"))
+    found = [n for n in open_core.tracked(ROOT) if (ROOT / n).is_file()
+             and wrong.encode() in (ROOT / n).read_bytes()]
+    assert not found, f"these tracked files give a contact at {wrong}: {found}"
+    for name in ("SECURITY.md", "CODE_OF_CONDUCT.md", "SUPPORT.md"):
+        assert "sumit.gupta@cbeyond.cloud" in (ROOT / name).read_text(encoding="utf-8"), name
+
+
 def test_a_missing_or_untracked_public_file_is_found(tmp_path: Path):
     root = repo(tmp_path, {"README.md": "x", "LICENSE": "MIT"})
     (root / "SECURITY.md").write_text("untracked", encoding="utf-8")
     assert open_core.required_public_files(root) == [
-        "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md"]
+        ".github/ISSUE_TEMPLATE/bug_report.yml", ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml", ".github/PULL_REQUEST_TEMPLATE.md",
+        "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md", "SUPPORT.md",
+        "THIRD_PARTY_LICENSES.md"]
 
 
 # ── could not look ───────────────────────────────────────────────────────────

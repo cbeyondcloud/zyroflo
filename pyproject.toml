@@ -1,8 +1,12 @@
 [project]
 name = "sdlc-harness"
 version = "0.1.0"
-description = "Cross-repo graph substrate + human-gated multi-agent SDLC pipeline"
+description = "Zyroflo - a generic, human-gated SDLC harness: one governed lifecycle for any repo, any AI tool, any model"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Sumit Gupta" }]
 requires-python = ">=3.11"
+keywords = ["sdlc", "ai-agents", "governance", "approval-ledger", "code-review", "developer-tools"]
 
 # Pinned via uv.lock (canonical). tools/requirements.txt is generated for compat.
 dependencies = [
@@ -19,6 +23,11 @@ dependencies = [
     "tree-sitter-javascript>=0.23",
     "tree-sitter-typescript>=0.23",
 ]
+
+[project.urls]
+Homepage = "https://cbeyond.cloud/zyroflo"
+Repository = "https://github.com/cbeyondcloud/zyroflo"
+Issues = "https://github.com/cbeyondcloud/zyroflo/issues"
 
 # T448: one console command, `sdlc <subcommand>`, over the module CLIs - a thin
 # dispatcher (tools/sdlc/__main__.py); every path-based invocation keeps working.

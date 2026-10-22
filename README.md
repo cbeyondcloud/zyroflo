@@ -391,8 +391,8 @@ python sdlc-init.py --bundle sdlc-init.bundled.py
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md); report vulnerabilities as [SECURITY.md](SECURITY.md) describes, and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md); report vulnerabilities as [SECURITY.md](SECURITY.md) describes, and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Questions and commercial support: [SUPPORT.md](SUPPORT.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Third-party software the other tiers use or fetch, and its licences: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

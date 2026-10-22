@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a change to the lifecycle, the installer, a gate or the graph tier.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every change in this repository starts as a row in `SDLC-harness-backlog.md`. A feature
+        request is how a row is proposed: describe the problem first, then the change.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and where the harness got in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The change you propose
+      description: What should happen instead. If it touches a gate or the approval ledger, say how a reviewer could still prove who approved what.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: generic
+    attributes:
+      label: Generic by design
+      options:
+        - label: The change names no particular repository, estate, provider or tool in the lifecycle (the harness must work on any repo).

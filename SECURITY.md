@@ -12,7 +12,7 @@ in one of two ways:
 
 1. **GitHub Security Advisories** (preferred): the **Report a vulnerability** button under this
    repository's *Security* tab opens an advisory only the maintainers can see.
-2. **Email** the maintainers at `sumit.gupta@cbeyond.com`.
+2. **Email** the maintainers at `sumit.gupta@cbeyond.cloud`.
 
 Please include what the issue is and its impact, the steps to reproduce it (a proof of concept if
 you have one), the commit or version affected and your configuration, and any fix you suggest.
