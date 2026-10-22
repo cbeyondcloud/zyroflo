@@ -1,5 +1,5 @@
 {
-  "$id": "https://github.com/cbeyondcloud/sdlc-harness/schemas/events.schema.json",
+  "$id": "https://github.com/cbeyondcloud/zyroflo/schemas/events.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "allOf": [

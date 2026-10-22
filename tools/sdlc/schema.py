@@ -52,7 +52,7 @@ cli.use_utf8()
 SCHEMA_DIR = Path("sdlc_templates") / "schemas"
 
 #: The one place the harness's own schema id prefix is written.
-BASE_ID = "https://github.com/cbeyondcloud/sdlc-harness/schemas"
+BASE_ID = "https://github.com/cbeyondcloud/zyroflo/schemas"
 
 HARNESS = Path(__file__).resolve().parents[2]
 

@@ -15,11 +15,11 @@
   <a href="https://youtu.be/v_1nk1uJCRE" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
 </p>
 
-[![CI](https://github.com/cbeyondcloud/sdlc-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/cbeyondcloud/sdlc-harness/actions/workflows/ci.yml)
+[![CI](https://github.com/cbeyondcloud/zyroflo/actions/workflows/ci.yml/badge.svg)](https://github.com/cbeyondcloud/zyroflo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#no-packages-no-network-no-api-keys)
-[![GitHub stars](https://img.shields.io/github/stars/cbeyondcloud/sdlc-harness?style=social)](https://github.com/cbeyondcloud/sdlc-harness/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/cbeyondcloud/zyroflo?style=social)](https://github.com/cbeyondcloud/zyroflo/stargazers)
 
 **Zyroflo** is a portable, **provider-agnostic** and **tool-agnostic** software-development lifecycle you drop into **any** repo. One command scaffolds it; one command per task runs the whole lifecycle end-to-end — hand it a bug or a one-line feature and it elaborates the requirement, asks the clarifying questions, then designs, implements, tests and prepares the deploy, with a human at every gate.
 
@@ -218,6 +218,12 @@ The full phase list, the capability-degradation table, and the gate regimes are 
 > map. Tier 0's "no packages, no network" property is a gate the estate tier is not allowed to
 > break.
 
+## Free vs Enterprise
+
+**Everything in this repository is free and open source under MIT, and stays that way** - every phase and gate, the approval ledger and its CI check, the audit trail, metrics and dashboards, the graph tier and every connector. Nothing here is a trial of a paid edition, and nothing will be moved behind a paywall.
+
+Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and nothing here depends on it: the suite's [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) checks that no tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, nor `sdlc-init.py`, apart from that guard's own two files, imports the `enterprise` package, writes the path `enterprise/` or uses the quoted word `'enterprise'` as a path segment (Python prose writing `import enterprise` counts too), and that no private path is tracked here. For what it offers, and the design-partner programme, see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo).
+
 ## Multi-component workspaces
 
 The harness never hardcodes a path, a repository name, or how many there are. Everything about *your* workspace enters through one file that you write and that stays yours:
@@ -382,6 +388,10 @@ For a single droppable file (no `sdlc_templates/` sibling needed):
 ```bash
 python sdlc-init.py --bundle sdlc-init.bundled.py
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); report vulnerabilities as [SECURITY.md](SECURITY.md) describes, and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
