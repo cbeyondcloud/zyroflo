@@ -15,7 +15,7 @@
   <a href="https://youtu.be/v_1nk1uJCRE" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
 </p>
 
-[![CI](https://github.com/cbeyondcloud/zyroflo/actions/workflows/ci.yml/badge.svg)](https://github.com/cbeyondcloud/zyroflo/actions/workflows/ci.yml)
+[![CI: runs locally](https://img.shields.io/badge/CI-runs_locally-blue.svg)](CONTRIBUTING.md#run-ci-before-you-ask-for-a-merge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#no-packages-no-network-no-api-keys)

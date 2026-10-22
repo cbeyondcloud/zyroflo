@@ -54,12 +54,27 @@ def test_the_package_metadata_names_the_new_home():
 
 
 def test_the_schema_ids_and_the_badges_name_the_new_home():
-    """The positive control: the six places T650 named say the new home, so the scan above
-    cannot pass merely because the lines it looks for were deleted."""
+    """The positive control: the places T650 named still say the new home (T693 retired the
+    Actions badge), so the scan above cannot pass merely because the lines it looks for were
+    deleted."""
     assert schema.BASE_ID == f"https://github.com/{NEW_HOME}/schemas"
     for name in ("events", "policy", "profile", "workspace"):
         text = (ROOT / schema.SCHEMA_DIR / f"{name}.schema.json").read_text(encoding="utf-8")
         assert f'"$id": "https://github.com/{NEW_HOME}/schemas/{name}.schema.json"' in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert f"https://github.com/{NEW_HOME}/actions/workflows/ci.yml/badge.svg" in readme
     assert f"https://img.shields.io/github/stars/{NEW_HOME}?style=social" in readme
+
+
+LOCAL_CI_BADGE = ("[![CI: runs locally](https://img.shields.io/badge/CI-runs_locally-blue.svg)]"
+                  "(CONTRIBUTING.md#run-ci-before-you-ask-for-a-merge)")
+
+
+def test_the_ci_badge_says_ci_runs_locally():
+    """CI runs on this machine (`tools/ci_local.py`), never on push (T460), so an Actions badge
+    reports only the last run someone dispatched - "cancelled" at publication - and says nothing
+    about main (T693). The badge says where CI runs, and links to the section that says how."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "actions/workflows/ci.yml/badge.svg" not in readme
+    assert LOCAL_CI_BADGE in readme
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "\n## Run CI before you ask for a merge\n" in contributing
