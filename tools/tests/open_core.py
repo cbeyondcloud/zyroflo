@@ -13,10 +13,13 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
   included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
   `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment -
   joined with `/`, inside the parentheses of an `os.path.join`, `posixpath.join`,
-  `ntpath.join`, `.joinpath` or `Path`-class call (whatever the earlier arguments), or joined to
-  `os.sep` with `+`. A parenthesis inside a string literal can mis-span a call: brackets are
-  counted plainly. The word used as a value on the same line as a path call
-  (`Path(p).read_text()["enterprise"]`) is not a breach. Python prose is held to the
+  `ntpath.join`, `os.sep.join`, `.joinpath` or `Path`-class call (whatever the earlier
+  arguments, and a value inside them - `Path(CFG["enterprise"])` - included), or joined to
+  `os.sep` with `+`. Brackets are counted plainly, so a parenthesis inside a string literal can
+  mis-span a call in either direction - missing a breach or flagging a value. The word used as a
+  value OUTSIDE a path call's parentheses on the same line (`Path(p).read_text()["enterprise"]`)
+  is not a breach. The rule reads one physical line, so a path call split across lines, with the
+  quoted word on a continuation line, is not seen. Python prose is held to the
   same rule: the words `import enterprise` anywhere on a line - a comment or a docstring
   included - and `'x' / 'enterprise'` are breaches, and the remedy is rephrasing. What it cannot
   see: a name built at run time (`'enter' + 'prise'`); the paid layer's directory put on
@@ -70,7 +73,7 @@ _IMPORT = re.compile(r"(?<![\w.])(?:from|import)\s+enterprise(?![\w])"
 #: parentheses, whatever its earlier arguments are: `os.path.join(os.path.dirname(__file__),
 #: "enterprise")` (B28-25), while `Path(root).read_text()["enterprise"]` is a value (B28-35).
 #: `str.join` is not a path API (B28-27).
-_PATH_CALL = re.compile(r"\b(?:os\.path|posixpath|ntpath)\.join\(|\.joinpath\("
+_PATH_CALL = re.compile(r"\b(?:os\.path|posixpath|ntpath|os\.sep)\.join\(|\.joinpath\("
                         r"|\b(?:Pure|Posix|Windows|PurePosix|PureWindows)?Path\(")
 _QUOTED = re.compile(_Q)
 #: `os.sep` has no parentheses: the quoted word joined to it with `+`.
@@ -94,6 +97,8 @@ def _in_path_call(line: str) -> bool:
         if _QUOTED.search(line, m.end(), end):
             return True
     return bool(_SEP.search(line))
+
+
 #: In any shipped file: `enterprise/` or `enterprise\` STARTING a path - not after a word
 #: character, `.`, `-`, `/`, `\` or `:`, so a URL segment (`https://x/enterprise/`) and
 #: `some-enterprise/` are not breaches, while prose that happens to write `enterprise/SMB` is.

@@ -125,6 +125,7 @@ def test_no_free_file_imports_or_names_the_paid_layer():
     ("tools/w.py", "\"\"\"Tiers: 'free' / 'enterprise'.\"\"\"\n"),
     ("tools/x.py", "# we must not import enterprise modules\n"),
     ("tools/y2.py", "p = str(ROOT) + os.sep + 'enterprise'\n"),
+    ("tools/y3.py", "p = os.sep.join([str(root), \"enterprise\"])\n"),
 ])
 def test_a_reference_to_the_paid_layer_is_found(tmp_path: Path, rel: str, text: str):
     root = repo(tmp_path, {rel: text})
