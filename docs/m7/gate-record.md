@@ -565,3 +565,29 @@ take; it is not the close.
 delegated and is stated plainly so it can be overruled. This line is not
 delegated and is left unfilled, in M5's form. Amend by appending, never by
 editing a section above.*
+
+---
+
+## M7 gate — amendment: the owner's ruling — 2026-10-28
+
+**Appended, never edited into §8.** The blank line above stood for as long as
+it stood, and it stays blank in the record of that time.
+
+**Decision taken: CLOSED — superseded by Zyroflo 1.0 (2026-10-17).** Ruled by
+the owner, 2026-10-28 (backlog row T694).
+
+**Why the reason for the blank no longer holds.** §8 left the line unfilled
+because §5's remainder (66 filed repository rows and 9 audit partitions nobody
+had swept) was open. Each part of it has since been dealt with:
+
+| §5 remainder | Where it went |
+|---|---|
+| The filed rows in the `agent-swarm/` tracker | Frozen into `SDLC-harness-backlog.md` on 2026-09-19, the single source of truth from that day |
+| The unswept audit partitions | Overtaken by the full-repo review, T482 (2026-09-25), which filed its findings as backlog rows |
+| Those rows | Closed or deferred under ruling 35's frozen list; its last row closed on 2026-10-17, with the final verification (T686) green |
+
+**Not claimed:** a live, LLM-driven end-to-end run. T369 (goose, P0 to P11)
+and T370 (item 33's codex run) stay waived as needing paid LLM tooling; every
+lifecycle run behind this ruling used the model-free reference runner. The 44
+rows Deferred to after 1.0 stay open in the backlog and are not part of this
+close.
