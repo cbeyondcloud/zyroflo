@@ -8,7 +8,7 @@ the same folder as `.git-commercial/` and holds files this one never tracks; thi
 * `private_paths_tracked` - a tracked path under a private root.
 * `private_paths_unignored` - a private root under which a NEW file would not be ignored, or a
   file under one that is neither tracked nor ignored (a negation rule).
-* `barricade_breaches` - a tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, or
+* `barricade_breaches` - a tracked file under `tools/`, `zyroflo/`, `sdlc/` or `sdlc_templates/`, or
   `sdlc-init.py`, that writes `enterprise/` or `enterprise\\` starting a path (any file, prose
   included), or - in a Python file - an `import`/`from` of `enterprise`, an `import_module` or
   `__import__` of a string starting `enterprise`, or `'enterprise'` quoted as a path segment -
@@ -56,7 +56,7 @@ TWIN_DIR = ".git-commercial"
 PRIVATE_ROOTS = ("enterprise/", "internal-docs/", ".claude/", TWIN_DIR + "/")
 #: The shipped trees the barricade reads; the guard's own two files name the paid layer by
 #: necessity and are not shipped behaviour.
-SHIPPED = ("tools/", "sdlc/", "sdlc_templates/")
+SHIPPED = ("tools/", "zyroflo/", "sdlc/", "sdlc_templates/")  # zyroflo/: T696
 SHIPPED_FILES = ("sdlc-init.py",)
 GUARD = ("tools/tests/open_core.py", "tools/tests/test_open_core_split.py")
 #: A public repository's own files (T689, T692): the licence and its third-party notices,

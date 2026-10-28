@@ -66,7 +66,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tools"]
+# T696 (Z4): `zyroflo` is a second name for `tools` (zyroflo/__init__.py), shipped
+# from the same distribution, so either import name works wherever one does.
+packages = ["tools", "zyroflo"]
 
 # Z2: the lifecycle content sits beside `tools/`, not in it, so an installed harness
 # had none. The wheel carries a copy laid out the same way; `tools.sdlc.content.root()`
