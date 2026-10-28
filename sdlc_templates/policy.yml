@@ -100,6 +100,11 @@ push_branch_prefix: "sdlc/"
 # Git operations that destroy history or other people's work. Matched as
 # substrings of the normalised command line, so `git push --force-with-lease`
 # is caught by `--force` and `git  push   -f` by `-f` after whitespace collapse.
+# Also matched by WORDS on every git command, in any order: a short flag by its
+# letter inside a cluster, case kept, so `git clean -df` is `clean -f`,
+# `git push origin -f` is `push -f`, and `git branch -d` is not `branch -D`.
+# The word reading stops at a free-text option (`-m`, `-F`, `--grep`, ...), so
+# a commit message that names an operation is not that operation.
 deny_git:
   - "--force"
   - "-f origin"
@@ -126,6 +131,10 @@ deny_git:
 # one rule covers every ordering of a cluster. The program is read without its
 # directory, extension or case, a command is split on `&&`, `||`, `|` and `;`,
 # and a command handed to an interpreter or to `find -exec` is judged too.
+# What a shell removes before the program runs cannot hide it: a keyword
+# (`if`, `then`, `do`, `!`), a leading redirect (`>log`, `2>&1`), quotes, a
+# caret or a backslash inside its name, a quoted path. A rule naming a wrapper
+# (`sudo`, `env`, `nice`) matches where that wrapper runs, never the bare word.
 #
 # Recursion alone is the trigger, not recursion plus force: `-f` only silences
 # the prompts, so requiring it would be a silent miss on `rm -r tree`. This does
