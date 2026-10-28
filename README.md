@@ -389,6 +389,8 @@ For a single droppable file (no `sdlc_templates/` sibling needed):
 python sdlc-init.py --bundle sdlc-init.bundled.py
 ```
 
+Used as a library, the package imports under either name: `import zyroflo.sdlc.policy` is the same module object as `import tools.sdlc.policy`, so a patch or an `isinstance` check through one name holds through the other. Both names ship in one distribution.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md); report vulnerabilities as [SECURITY.md](SECURITY.md) describes, and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Questions and commercial support: [SUPPORT.md](SUPPORT.md).

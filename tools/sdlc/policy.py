@@ -3421,9 +3421,15 @@ _GROUPING = re.compile(r"\$\(|[()`]|(?<![\S]){(?=[\s])|(?<=[\s])}(?![\S])")
 #: `stdbuf` is here for its `-oL`-style flags alone. `eval` runs its argument
 #: string as a command, and `nice`/`ionice`/`setsid`/`parallel` each run the
 #: command that follows them — the same hat as `sudo`, one wrapper over.
+#:
+#: **T695.** `builtin` runs a shell builtin by name - `builtin eval rm -rf x`
+#: runs `rm` through `eval` - `chroot NEWROOT CMD` runs CMD after one
+#: positional, and `watch CMD` runs CMD over and over. Measured allowed on
+#: `main`, each one.
 _PREFIXES = {"sudo": 0, "doas": 0, "env": 0, "command": 0, "nohup": 0,
              "time": 0, "exec": 0, "timeout": 1, "stdbuf": 0,
-             "eval": 0, "nice": 0, "ionice": 0, "setsid": 0, "parallel": 0}
+             "eval": 0, "nice": 0, "ionice": 0, "setsid": 0, "parallel": 0,
+             "builtin": 0, "chroot": 1, "watch": 0}
 #: The value-taking flags of each prefix, named so the VALUE is skipped WITH the
 #: flag rather than read as the program. `sudo -u root rm -rf /` ran `root`;
 #: only flags that genuinely take a SEPARATE word belong here, because listing
@@ -3446,6 +3452,8 @@ _PREFIX_VALUE_FLAGS = {
     "nice": ("-n", "--adjustment"),
     "ionice": ("-c", "--class", "-n", "--classdata"),
     "parallel": ("-j", "--jobs"),
+    "chroot": ("--userspec", "--groups"),
+    "watch": ("-n", "--interval"),
 }
 
 #: Flags whose value is not a value but a COMMAND, per prefix, in the spellings
@@ -3467,6 +3475,23 @@ _PREFIX_VALUE_FLAGS = {
 #: ATTACHED spelling is split, and only for the flags named here.
 _COMMAND_VALUE_FLAGS = {"env": ("--split-string", "-S")}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+#: **T695.** Shell words that stand where a program would and are not one:
+#: `if rm -rf x; then`, `do rm -rf x`, `! rm -rf x`. Each was read as the
+#: program, a name no rule is about, and `rm` ran behind it - measured allowed
+#: on `main`, every one. Skipped like an assignment, with no flags of their own.
+#: Exact case, as the shell reads them (`If` is a program name, not a keyword).
+#: `for`, `case` and `select` are absent on purpose: what follows them is a
+#: name and a word list, not a command; the command comes after `do` or `)`,
+#: which this list and `_GROUPING` already cut at.
+_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!",
+                       "coproc"})
+#: **T695.** A redirect standing before the program: `>log rm -rf x`,
+#: `2> err rm -rf x`, `<in rm -rf x`, `<<<data rm -rf x`. The shell removes
+#: it, with its target - attached (group 1) or the next word - and runs what is
+#: left. `2>&1 rm -rf x` arrives here as `2>` and `1 rm -rf x`, because `&`
+#: separates commands; the `&`-free spelling `spellings` adds is what reads it.
+_LEADING_REDIRECT = re.compile(r"\d*(?:<<<|<<-?|<>|>>|<|>)(.*)")
 
 
 def _attached_value(word: str, flags: tuple[str, ...]) -> str | None:
@@ -3593,7 +3618,13 @@ def _program(token: str) -> tuple[str, str]:
 
 def _segment_words(segment: str) -> list[str]:
     """One segment's tokens, unquoted, with the prefixes that are not the
-    command dropped.
+    command dropped - the last of `_segment_commands`."""
+    return _segment_commands(segment)[-1]
+
+
+def _segment_commands(segment: str) -> list[list[str]]:
+    """One segment's tokens, unquoted: one list per wrapper, from the wrapper
+    on, and last the command with the prefixes that are not it dropped.
 
     Quotes come off because a nested command arrives wearing them:
     `powershell -Command "Remove-Item -Recurse x"` tokenises to `"Remove-Item`,
@@ -3601,23 +3632,47 @@ def _segment_words(segment: str) -> list[str]:
 
     A prefix that takes arguments takes them with it — see `_PREFIXES`. A flag
     that carries a COMMAND instead of a value hands it back to be judged — see
-    `_COMMAND_VALUE_FLAGS`.
+    `_COMMAND_VALUE_FLAGS`. A control keyword (`_KEYWORDS`) and a redirect with
+    its target (`_LEADING_REDIRECT`) where the program would stand are dropped
+    too (T695).
+
+    **T695: a wrapper is a command as well as a hat.** Each wrapper is also
+    handed back as a command of its own, so a rule that NAMES one (`sudo`,
+    `env`, `nice`) can match it where it runs. Dropped and never handed back,
+    such a rule could match nothing at all - and refusing the bare word
+    anywhere instead refuses `echo sudo`. The command list is always last and
+    may be empty: a wrapper with nothing after it is still a wrapper that ran.
+
+    A wrapper is handed back as ITS OWN words - the wrapper, its options and
+    its positionals (`timeout -k 5 60`), never the command after them, which is
+    judged on its own. One index walks the words once: handing back the whole
+    rest of the line per wrapper, and shifting the list at every word, made a
+    run of wrappers, keywords or redirects quadratic (100 KB of `sudo ` took 30
+    seconds, review F1).
     """
     words = [w.strip("\"'") for w in segment.split()]
     words = [w for w in words if w]
-    while words:
-        if _ASSIGNMENT.match(words[0]):
-            words.pop(0)
+    typed = list(words)  # a carried command rewrites its word; a wrapper keeps it
+    wrappers: list[list[str]] = []
+    i, n = 0, len(words)
+    while i < n:
+        if _ASSIGNMENT.match(words[i]) or words[i] in _KEYWORDS:
+            i += 1
             continue
-        name = _program(words[0])[0]
+        if redirect := _LEADING_REDIRECT.fullmatch(words[i]):
+            # The target goes with it, attached or written as the next word.
+            i += 1 if redirect.group(1) else 2
+            continue
+        name = _program(words[i])[0]
         if name not in _PREFIXES:
             break
+        start, own_end = i, i + 1
         value_flags = _PREFIX_VALUE_FLAGS.get(name, ())
         command_flags = _COMMAND_VALUE_FLAGS.get(name, ())
         positionals = _PREFIXES[name]
-        words.pop(0)
-        while words and words[0].startswith("-"):
-            word = _declustered(words[0], command_flags, value_flags)
+        i += 1
+        while i < n and words[i].startswith("-"):
+            word = _declustered(words[i], command_flags, value_flags)
             if (carried := _attached_value(word, command_flags)) is not None:
                 # The flag's value IS the command - but that value can ITSELF
                 # begin with one of the wrapper's own options, and env's split
@@ -3634,17 +3689,18 @@ def _segment_words(segment: str) -> list[str]:
                 # another attached flag (`-S-S...`) is re-split the same way.
                 # Terminating: each pass through this branch strips at least
                 # `len(flag)` characters, so the word strictly shortens.
-                words[0] = carried
+                words[i] = carried
                 positionals = 0
+                own_end = i + 1
                 continue
-            if words.pop(0) in value_flags and words:
-                words.pop(0)
+            i += 2 if words[i] in value_flags and i + 1 < n else 1
         # Never eat the last word: a wrapper with nothing after it is a wrapper
         # with no command, not a command spelled `-rf`.
-        while positionals and len(words) > 1:
-            words.pop(0)
+        while positionals and n - i > 1:
+            i += 1
             positionals -= 1
-    return words
+        wrappers.append(typed[start:max(i, own_end)])
+    return [*wrappers, words[i:]]
 
 
 #: `find . -exec rm -rf {} \;` runs `rm` without `rm` ever being the segment's
@@ -3744,6 +3800,35 @@ def _shell_command_at(words: list[str], program: str) -> int | None:
             saw_c = True
         i += 2 if word in _SHELL_VALUE_FLAGS else 1
     return None                                   # options only, nothing to run
+
+
+def _here_string_script(words: list[str], program: str) -> list[str] | None:
+    """The script a POSIX shell reads from a here-string, as words, or None (T695).
+
+    With no `-c` and no script file, a shell reads its script from stdin, and
+    `<<<` IS its stdin: `bash <<< 'rm -rf x'` runs `rm`. Measured allowed on
+    `main`. So the options are walked as `_shell_command_at` walks them, and a
+    here-string standing where the first operand would is the script - and,
+    after `-s` (read the script from stdin, the operands are its arguments), a
+    here-string anywhere. A here-string to a script file (`bash run.sh <<< x`)
+    or to any other program (`cat <<< x`) is data.
+    """
+    if program not in _POSIX_SHELLS:
+        return None
+    from_stdin = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word.startswith("<<<"):
+            script = [word[3:].strip("\"'"), *words[i + 1:]]
+            return [w for w in script if w] or None
+        if not (word.startswith("-") or word.startswith("+")):
+            if not from_stdin:
+                return None                       # a script file: stdin is its data
+        elif word == "-s" or (_SHORT_CLUSTER.fullmatch(word) and "s" in word[1:]):
+            from_stdin = True
+        i += 2 if word in _SHELL_VALUE_FLAGS else 1
+    return None
 
 
 def _carried_command(words: list[str], flags: tuple[str, ...],
@@ -3883,11 +3968,14 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     invocation always resolves through `_xargs_command_at`, and `exec_ok`'s
     inheritance is left to do the one job it is for: peeling a chain of
     exec-family tokens that are not xargs.
+
+    Each wrapper the segment runs through is one of its commands too (T695,
+    `_segment_commands`), ahead of the command it wraps.
     """
-    words = _segment_words(segment)
+    *wrappers, words = _segment_commands(segment)
     if not words:
-        return []
-    found = [words]
+        return wrappers
+    found = [*wrappers, words]
     nested: list[str] | None = None
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
@@ -3899,7 +3987,8 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
         # exactly as before.
         at = _shell_command_at(words, program)
         nested = (words[at:] if at is not None
-                  else _bare_first_carried_command(words, _RUN_FLAGS, 1))
+                  else _bare_first_carried_command(words, _RUN_FLAGS, 1)
+                  or _here_string_script(words, program))
     if nested is None and program == "xargs":
         at = _xargs_command_at(words)
         nested = None if at is None else words[at:]
@@ -3919,12 +4008,14 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     return found
 
 
-def _short_letters(words: list[str]) -> set[str]:
+def _short_letters(words: list[str], fold: bool = True) -> set[str]:
     """Every letter appearing in a short-flag CLUSTER.
 
     `-rf`, `-fr`, `-Rf` and `-r -f` are one operation spelled four ways, and a
     matcher that cannot see that is a matcher an agent defeats by reordering two
-    characters. Case-folded, so `-R` counts as `r`.
+    characters. Case-folded, so `-R` counts as `r` - unless `fold` is False, for
+    a program whose short flags differ by case (git: `branch -D` forces a
+    delete that `branch -d` refuses, T695).
 
     **T372.** A flag that takes a VALUE can be attached directly (`-s0`,
     GNU truncate's short form of `--size=0`) rather than standing alone,
@@ -3945,7 +4036,8 @@ def _short_letters(words: list[str]) -> set[str]:
                 if not ch.isalpha():
                     break
                 prefix.append(ch)
-            out.update("".join(prefix).lower())
+            letters = "".join(prefix)
+            out.update(letters.lower() if fold else letters)
     return out
 
 
@@ -4043,18 +4135,38 @@ def denied_command(policy: dict, command: str) -> list[str]:
     * *PowerShell `-EncodedCommand`* — base64 hides the nested command from the
       interpreter unwrapping below. Named here because a wall that silently
       cannot see something is the failure this file exists to avoid.
+
+    **T695: every spelling in `spellings`, not only the one typed.** A quote,
+    caret or backslash inside the program word, a quoted program path and the
+    `&` of a redirect hid the program from the reading below, and each was
+    measured allowed on `main`. The command as typed is still read first and
+    exactly as before, so a spelling can only ADD a refusal; a message names the
+    command as typed, never a spelling of it.
     """
+    return _denied(policy, command, _read(spellings(str(command))))
+
+
+def _read(spelled: list[str]) -> list[list[list[str]]]:
+    """Every command each spelling runs, read once for both walls."""
+    return [_commands_of(spelling) for spelling in spelled]
+
+
+def _denied(policy: dict, command: str, read: list[list[list[str]]]) -> list[str]:
+    """`denied_command` over spellings already read (`_read`), so `destructive`
+    reads them once. Each rule is split once, not once per command read."""
+    rules = [(rule, parts, _program(parts[0])[0])
+             for rule in policy.get("deny_commands", []) if (parts := str(rule).split())]
     problems = []
     seen: set[str] = set()
-    joined = _ESCAPED_SPACE.sub("", _LINE_CONTINUATION.sub(" ", str(command)))
-    for segment in _SEPARATORS.split(_GROUPING.sub(";", joined)):
-        for words in _commands_in(segment):
+    for commands in read:
+        for words in commands:
             name, family = _program(words[0])
-            letters = _short_letters(words[1:])
-            for rule in policy.get("deny_commands", []):
-                parts = str(rule).split()
-                if not parts or _program(parts[0])[0] not in (name, family):
+            letters: set[str] | None = None
+            for rule, parts, program in rules:
+                if program not in (name, family):
                     continue
+                if letters is None:
+                    letters = _short_letters(words[1:])
                 if all(_requirement_met(req, words[1:], letters)
                        for req in parts[1:]) and rule not in seen:
                     seen.add(rule)
@@ -4072,11 +4184,267 @@ def destructive(policy: dict, command: str) -> list[str]:
     since item 35 and still the right shape for them. `deny_commands` is
     tokenised — see `denied_command` for why the first mechanism cannot be
     pointed at `rm`. Both are reported here so one door answers one question.
+
+    **T695: `deny_git` is ALSO read by tokens, on every git command found.** The
+    substring search missed an operation whose words a shell joins or reorders:
+    `git reset "--hard"` (a quote), `git reset -q --hard` and `git push origin
+    -f` (a word between), `git clean -df` and `git branch -vD x` (a cluster).
+    Both readings ask every spelling in `spellings`; the substring one is kept
+    whole, so nothing it refused is allowed now. See `_git_operation` for the
+    token reading.
     """
-    flat = " ".join(str(command).split())
+    tokens = [str(token) for token in policy["deny_git"]]
+    hit = [False] * len(tokens)
+    spelled = spellings(str(command))
+    read = _read(spelled)
+    for spelling, commands in zip(spelled, read):
+        flat = " ".join(spelling.split())
+        gits = [words for words in commands if _program(words[0])[0] == "git"]
+        for i, token in enumerate(tokens):
+            hit[i] = hit[i] or token in flat or any(_git_operation(token, w) for w in gits)
     return [f"{command!r}: matches the denied git operation {token!r}"
-            for token in policy["deny_git"] if str(token) in flat] \
-        + denied_command(policy, command)
+            for token, found in zip(policy["deny_git"], hit) if found] \
+        + _denied(policy, command, read)
+
+
+#: **T695.** Where a word ends, outside quotes, for `_paths_as_programs`.
+_WORD_ENDS = frozenset(";|&()<>")
+#: **T695.** The `&` of a redirect: `2>&1`, `>&2`, `&>log`, `>&log`. The split
+#: into commands reads it as a separator, so `2>&1 rm -rf x` became the
+#: commands `2>` and `1 rm -rf x`, whose program is `1`.
+_REDIRECT_AMPERSAND = re.compile(r"&(?=>)|(?<=[<>])&")
+
+
+def _paths_as_programs(text: str) -> str:
+    """`text` with each word holding a quoted path written as its file name.
+
+    A word with a quoted part, and whatever is glued to it -
+    `"\\Program Files\\Git\\usr\\bin\\rm.exe"`, `\\"Program Files"\\x\\rm.exe`,
+    `'/opt/my tools/rm'` - was split at its spaces, and read as the program
+    `"\\program` while `rm` ran (T695). Each such word that names a path is
+    written as its file name, so `"\\...\\rm.exe" -rf x` reads `rm.exe -rf x`.
+    A file name with a space in it is left as written: it is no program name.
+
+    One pass, never a backtracking pattern: a quote with no partner is an
+    ordinary character, and the search for a partner reaches the end of the
+    text at most once per kind of quote, since a later quote of the same kind
+    would have been the partner. A first draft used a regular expression that
+    took 15 seconds over 16,000 characters behind one unpaired quote.
+    """
+    if '"' not in text and "'" not in text:
+        return text  # no quoted part, nothing to rewrite
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i].isspace() or text[i] in _WORD_ENDS:
+            out.append(text[i])
+            i += 1
+            continue
+        start, bare, quoted = i, [], False
+        while i < n and not (text[i].isspace() or text[i] in _WORD_ENDS):
+            end = text.find(text[i], i + 1) if text[i] in "\"'" else -1
+            if end >= 0:
+                bare.append(text[i + 1:end])
+                quoted, i = True, end + 1
+            else:
+                bare.append(text[i])
+                i += 1
+        word, path = text[start:i], "".join(bare)
+        base = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        named = quoted and ("/" in path or "\\" in path)
+        out.append(base if named and base and not any(c.isspace() for c in base) else word)
+    return "".join(out)
+
+
+def _unhidden(text: str) -> str:
+    """`text` without the characters a shell removes before a program sees its
+    name and this tokeniser kept (T695): a quoted part with no space in it
+    loses its quotes, so `r""m`, `r'm'` and `--ha''rd` read `rm` and `--hard`;
+    and cmd's escape caret goes, so `r^m` reads `rm`. A quoted part WITH a space
+    keeps its quotes: it is one word with a space in it to the shell, never a
+    program and its arguments, and `echo "{ rm -rf x; }"` stays data (item 157)."""
+    if '"' not in text and "'" not in text and "^" not in text:
+        return text
+    out, i = [], 0
+    while i < len(text):
+        ch = text[i]
+        end = text.find(ch, i + 1) if ch in "\"'" else -1  # linear: see above
+        if end < 0:
+            out.append("" if ch == "^" else ch)
+            i += 1
+            continue
+        body = text[i + 1:end]
+        out.append(text[i:end + 1] if any(ch.isspace() for ch in body)
+                   else body.replace("^", ""))
+        i = end + 1
+    return "".join(out)
+
+
+def _redirect_targets_named(text: str) -> str:
+    """`text` with each redirect target that holds a quote or a backslash
+    written as the plain word `_` (review F2).
+
+    A target is one word to the shell however it is written: `>"my log"`,
+    `> 'my log'`, `2>my\\ log`, `>my" "log`. Split at its space, its second
+    half stood where the program would, so `>"my log" rm -rf x` was read as the
+    program `log"` with `rm` an argument. A quoted part with a space keeps its
+    quotes in `_unhidden` on purpose, so that spelling could not repair it. A
+    target is a file name, never a command, so naming it `_` loses nothing the
+    wall reads - and the command as typed is still read too.
+
+    One pass: a quote's partner is found as in `_paths_as_programs`, a
+    backslash takes the character after it, and an operator with no target
+    (`<(` of a process substitution, `>` at the end) is left as written.
+    """
+    if not any(c in text for c in "<>"):
+        return text
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            end = text.find(ch, i + 1)
+            stop = end + 1 if end >= 0 else i + 1
+            out.append(text[i:stop])
+            i = stop
+            continue
+        if ch == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch not in "<>":
+            out.append(ch)
+            i += 1
+            continue
+        start = i
+        while i < n and text[i] in "<>":
+            i += 1
+        if i < n and (text[i] == "&" or (text[i] == "-" and text[i - 2:i] == "<<")):
+            i += 1
+        while i < n and text[i] in " \t":
+            i += 1
+        target, hidden = i, False
+        while i < n and not (text[i].isspace() or text[i] in _WORD_ENDS):
+            end = text.find(text[i], i + 1) if text[i] in "\"'" else -1
+            if end >= 0:
+                hidden, i = True, end + 1
+            elif text[i] == "\\":
+                hidden, i = True, i + 2
+            else:
+                i += 1
+        i = min(i, n)
+        out.append(text[start:target] + "_" if hidden else text[start:i])
+    return "".join(out)
+
+
+def spellings(command: str) -> list[str]:
+    """The command as typed, first, then as it reads once the spellings that
+    hide a program from this file's tokeniser are undone (T695): cmd's doubled
+    quotes (`""\\x\\rm.exe" -rf x"`), the `&` of a redirect and a carriage
+    return (PowerShell ends a statement at one), each quoted path as its file
+    name, a quoted or escaped redirect target as one word
+    (`_redirect_targets_named`), the quotes and carets a shell removes
+    (`_unhidden`), and then every backslash (`r\\m` is `rm` to bash). No
+    spelling repeats.
+
+    `destructive` and `denied_command` judge every one and report a refusal
+    from any of them, so a spelling can only add a refusal - the command as
+    typed is always among them, read exactly as before. Public, so a caller
+    with walls of its own (agentic-sdlc's guard) reads the same spellings
+    rather than keeping a copy of this list.
+
+    Not undone, so the gap is a sentence: `>|` (its `|` separates commands),
+    `$'...'` quoting beyond `env -S` (T372), a here-document's body, and a
+    variable or command substitution used as the program name.
+    """
+    out: dict[str, None] = {}
+    done: set[str] = set()
+    for base in (command, command.replace('""', '"')):
+        for shaped in (base, _REDIRECT_AMPERSAND.sub("", base).replace("\r", "\n")):
+            texts = (shaped, _paths_as_programs(shaped),
+                     _paths_as_programs(_redirect_targets_named(shaped)))
+            for text in dict.fromkeys(texts):
+                if text in done:
+                    continue
+                done.add(text)
+                light = _unhidden(text)
+                out.update(dict.fromkeys((text, light, light.replace("\\", ""))))
+    return list(out)
+
+
+def _commands_of(spelling: str) -> list[list[str]]:
+    """Every command one spelling runs, segment by segment (`_commands_in`)."""
+    joined = _ESCAPED_SPACE.sub("", _LINE_CONTINUATION.sub(" ", spelling))
+    return [words for segment in _SEPARATORS.split(_GROUPING.sub(";", joined))
+            for words in _commands_in(segment)]
+
+
+def _git_operation(token: str, words: list[str]) -> bool:
+    """Whether one git command holds every word of a `deny_git` operation, in
+    any order, as git reads them (T695).
+
+    A plain word (`reset`, `origin`, `filter-branch`) must be one of the
+    command's words, in any case. A long option (`--hard`) is matched as
+    `_requirement_met` matches one, so `--ha` - git's own abbreviation - counts.
+    A short flag (`-f`, `-D`) is matched by LETTER inside any cluster, case
+    KEPT: `clean -df` is `clean -f`, `branch -vD` is `branch -D`, and `branch
+    -d`, which refuses to delete unmerged work, is not `branch -D`.
+
+    Any order, because the substring reading already refused `git push -f` and
+    the order of git's words changes nothing it does: `git push origin -f` is
+    the same force push. Its cost, stated: two words of an operation anywhere
+    in one git command count, so `git add -f origin` is refused, as the
+    substring `-f origin` already refused it.
+
+    **Review F3: the words are read only up to the first free-text option**
+    (`_git_free_text`). A message, a file name, a search string or a person
+    is text, not operation: `git commit -m "explain push and the -f flag"` is
+    no force push, and an agent writes commit messages all day. The quotes that
+    would mark where the message ends are gone by this point, so every word
+    from that option on is left out. No git command that does a denied
+    operation takes one of these options, so nothing is hidden behind one
+    that git would run; the substring reading above is unchanged.
+    """
+    parts = token.split()
+    args = words[1:]
+    for k, arg in enumerate(args):
+        if _git_free_text(arg):
+            args = args[:k]
+            break
+    letters = _short_letters(args, fold=False)
+    lowered = {a.lower() for a in args}
+    for part in parts:
+        if part.startswith("--"):
+            met = _requirement_met(part, args, set())
+        elif len(part) == 2 and part[0] == "-" and part[1].isalpha():
+            met = part[1] in letters
+        else:
+            met = part.lower() in lowered
+        if not met:
+            return False
+    return bool(parts)
+
+
+#: **Review F3.** Git options whose value is free text: a message (`-m`, `-F`,
+#: `--message`, `--file`, `--trailer`), a search string (`-S`, `-G`, `--grep`),
+#: a person (`--author`, `--committer`) or a format (`--format`, `--pretty`).
+_GIT_FREE_TEXT_LONG = frozenset({"--message", "--file", "--trailer", "--grep", "--author",
+                                 "--committer", "--format", "--pretty"})
+
+
+def _git_free_text(arg: str) -> bool:
+    """Whether one git word starts a free-text value, in any spelling git takes:
+    `--message=x`, `-m`, `-mx`, a cluster ending in it (`-am`), `-S`/`-G`."""
+    if arg.startswith("--"):
+        return "--" + arg[2:].partition("=")[0].lower() in _GIT_FREE_TEXT_LONG
+    if not arg.startswith("-"):
+        return False
+    letters = ""
+    for ch in arg[1:]:
+        if not ch.isalpha():
+            break
+        letters += ch
+    return bool(set(letters) & {"m", "F"}) or letters[:1] in ("S", "G")
 
 
 def budget(policy: dict, diff_text: str) -> list[str]:

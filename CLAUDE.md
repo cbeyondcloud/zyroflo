@@ -40,8 +40,8 @@ edition, MIT, and stays whole. The paid layer, Zyroflo Enterprise, lives in a pr
 overlaid on the main checkout as `.git-commercial/` (`cg` = `git --git-dir=.git-commercial
 --work-tree=.`); it tracks `enterprise/`, `internal-docs/` and `.claude/agents/`, which this
 repository never tracks - `.gitignore` is the boundary. The barricade runs one way: the paid
-layer imports the free modules, and nothing under `tools/`, `sdlc/`, `sdlc_templates/` or
-`sdlc-init.py` imports the `enterprise` package or names the path `enterprise/`.
+layer imports the free modules, and nothing under `tools/`, `zyroflo/` (T696's alias for
+`tools`), `sdlc/`, `sdlc_templates/` or `sdlc-init.py` imports the `enterprise` package or names the path `enterprise/`.
 `tools/tests/test_open_core_split.py` checks that no private path is tracked here, that a
 new file under each private root would be ignored, the barricade as far as
 `tools/tests/open_core.py`'s docstring lists its reach, and - where the twin is overlaid -
