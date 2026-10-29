@@ -152,8 +152,16 @@ DEFAULTS: dict = {
     "deny_commands": ["rm -r|-R|--recursive|-recurse",
                       "rmdir /s|-recurse|-r",
                       "rd /s|-recurse|-r",
-                      "del /s",
-                      "erase /s",
+                      # T697: `del` and `erase` are PowerShell aliases of
+                      # `Remove-Item`, as `ri`, `rd` and `rmdir` are, so they
+                      # carry its `-Recurse` beside cmd's `/s`. Measured
+                      # allowed on `main`: `del -Recurse x`, `erase -r x`.
+                      # Spelled `-recurse:`, the PowerShell parameter (any
+                      # prefix, any value), not `-r`, the letter in a cluster:
+                      # `del -Force x` deletes one file (review F2). The rules
+                      # above keep `-r`, which `main` refused them with.
+                      "del /s|-recurse:",
+                      "erase /s|-recurse:",
                       "remove-item -recurse|-recu|-r",
                       "ri -recurse|-recu|-r",
                       "find -delete",
@@ -3812,6 +3820,10 @@ def _here_string_script(words: list[str], program: str) -> list[str] | None:
     after `-s` (read the script from stdin, the operands are its arguments), a
     here-string anywhere. A here-string to a script file (`bash run.sh <<< x`)
     or to any other program (`cat <<< x`) is data.
+
+    Kept as it is; the shapes it cannot see - a redirect between the shell and
+    the here-string, a here-string before the program's name - are read by
+    `_stdin_scripts` (T697), which reads quotes where this reads words.
     """
     if program not in _POSIX_SHELLS:
         return None
@@ -4085,6 +4097,19 @@ def _requirement_met(alternatives: str, words: list[str], letters: set[str]) -> 
                     if head and name.startswith(head):
                         return True
             continue
+        if alt.startswith("-") and alt.endswith(":") and len(alt) > 2:
+            # Review F2: a PowerShell parameter, `-recurse:`. PowerShell takes
+            # any unambiguous prefix of its name, its value after `:` or in the
+            # next word, and refuses an ambiguous one - so, as for `--`, every
+            # prefix may count; a letter inside another name (`-Force`) does not.
+            name = alt[1:-1]
+            for w in words:
+                wl = w.lower()
+                if wl.startswith("-") and not wl.startswith("--"):
+                    head = wl[1:].partition(":")[0]
+                    if head and name.startswith(head):
+                        return True
+            continue
         if alt.endswith("="):                # `of=` matches `of=/dev/sda`
             if any(w.lower().startswith(alt) for w in words):
                 return True
@@ -4109,7 +4134,9 @@ def denied_command(policy: dict, command: str) -> list[str]:
     by requirements, all of which must be present; a requirement may name
     several spellings separated by `|`. Short flags are matched by LETTER, so
     `-rf`, `-fr`, `-Rf` and `-r -f` are one rule, and the program is compared
-    without its directory, extension or case, so `/bin/rm` is `rm`.
+    without its directory, extension or case, so `/bin/rm` is `rm`. A
+    requirement ending in `:` is a PowerShell parameter (T697 review F2):
+    `-recurse:` is `-r`, `-rec` or `-Recurse:$true`, never the `r` of `-Force`.
 
     **Recursion alone is the trigger, not recursion plus force.** `-f` only
     suppresses the prompts; `rm -r tree` deletes the tree either way, and a rule
@@ -4142,13 +4169,43 @@ def denied_command(policy: dict, command: str) -> list[str]:
     measured allowed on `main`. The command as typed is still read first and
     exactly as before, so a spelling can only ADD a refusal; a message names the
     command as typed, never a spelling of it.
+
+    **T697: and every script a shell reads from its stdin** - a here-string
+    behind a redirect or before the program, a process substitution, what
+    `echo` prints into `| sh` - is judged as a command (`_stdin_scripts`).
+    Measured run by a real shell, and allowed on `main`, every one.
     """
     return _denied(policy, command, _read(spellings(str(command))))
 
 
-def _read(spelled: list[str]) -> list[list[list[str]]]:
-    """Every command each spelling runs, read once for both walls."""
-    return [_commands_of(spelling) for spelling in spelled]
+def _read(spelled: list[str], depth: int = 0) -> list[list[list[str]]]:
+    """Every command each spelling runs, read once for both walls.
+
+    **T697: and every command in a script a shell reads from its stdin**
+    (`_stdin_scripts`) - a here-string, a process substitution, what `echo`
+    prints into a pipe - read in all its own spellings and counted with the
+    command as typed, so a refusal names the command as typed. Each distinct
+    script is read once, and a script inside a script only to `_FED_DEPTH`.
+
+    The stdin reading respects quotes, backslashes, redirect targets and quoted
+    program paths by itself, so it reads the command as typed, with cmd's
+    doubled quotes undone, without cmd's carets, and with every backslash a
+    slash - an unquoted `\\Windows\\System32\\cmd.exe` after a drive letter
+    still names cmd, and PowerShell's path names PowerShell, where a POSIX
+    reading takes each backslash as an escape and loses the name. Not every
+    spelling: they cost a pass each and found nothing more.
+    """
+    read = [_commands_of(spelling) for spelling in spelled]
+    if depth < _FED_DEPTH and spelled:
+        typed = spelled[0]
+        bases = dict.fromkeys((typed, typed.replace('""', '"'), typed.replace("^", ""),
+                               typed.replace("\\", "/")))
+        fed = dict.fromkeys(script for base in bases
+                            for script in _stdin_scripts(base, depth))
+        for script in fed:
+            for commands in _read(spellings(script), depth + 1):
+                read[0].extend(commands)
+    return read
 
 
 def _denied(policy: dict, command: str, read: list[list[list[str]]]) -> list[str]:
@@ -4353,9 +4410,25 @@ def spellings(command: str) -> list[str]:
     with walls of its own (agentic-sdlc's guard) reads the same spellings
     rather than keeping a copy of this list.
 
+    A script a shell reads from its stdin - a here-string wherever it is
+    written, a process substitution, what `echo`/`printf`/`Write-Output` print
+    into a pipe - is not a spelling of the command but a command of its own;
+    `destructive` and `denied_command` read it too (`_stdin_scripts`, T697),
+    in a command string handed to `bash -c`, `powershell -Command` or `cmd /c`
+    as well, and past a line break or a comment after the `|`.
+
     Not undone, so the gap is a sentence: `>|` (its `|` separates commands),
     `$'...'` quoting beyond `env -S` (T372), a here-document's body, and a
-    variable or command substitution used as the program name.
+    variable or command substitution used as the program name. And of a
+    shell's stdin (T697): a script printed by any program but a printer (`cat
+    run.txt | sh`, `base64 -d | sh`, `curl ... | sh`), the output of a command
+    substitution (`bash <<< "$(...)"`), an output substitution (`tee >(sh)`), a
+    pipe into a group or subshell (`echo ... | (sh)`), `printf` escapes other
+    than `\\n`, `\\r` and `\\t`, and scripts, substitutions or command strings
+    nested deeper than `_FED_DEPTH`. Over-refusals, stated: `bash -n` parses a
+    script from stdin without running it, and a destroying one is refused all
+    the same; and a printer's own redirect (`echo 'rm -rf x' >f | sh`) is not
+    read, so what it would print into the pipe is judged.
     """
     out: dict[str, None] = {}
     done: set[str] = set()
@@ -4377,6 +4450,339 @@ def _commands_of(spelling: str) -> list[list[str]]:
     joined = _ESCAPED_SPACE.sub("", _LINE_CONTINUATION.sub(" ", spelling))
     return [words for segment in _SEPARATORS.split(_GROUPING.sub(";", joined))
             for words in _commands_in(segment)]
+
+
+#: **T697.** How deep a script a shell reads from its stdin is itself read for
+#: such a script, and how deep a process substitution is opened: `echo "echo
+#: 'rm -rf x' | sh" | sh` is two levels. Bounded, so a run of nested
+#: substitutions or quotes costs a fixed number of passes, never one per level.
+_FED_DEPTH = 3
+#: **T697.** A redirect operator where a word would begin, longest first, with
+#: the file descriptor it names: `2>&1`, `&>log`, `<<<'text'`, `>|log`.
+_REDIRECT_AT = re.compile(r"\d*(?:&>>|&>|<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)")
+#: **T697.** Programs whose output is their arguments, so what they print into
+#: a pipe or a process substitution is text this file can read: `echo`,
+#: `printf`, and PowerShell's `Write-Output` and its alias `write`. Any other
+#: program's output (`cat notes.txt | bash`, `curl ... | sh`) is unknown here.
+_PRINTERS = ("echo", "printf", "write-output", "write")
+_ECHO_FLAGS = re.compile(r"-[neE]+")
+#: The escapes `printf`, `echo -e` and dash's plain `echo` turn into a line
+#: break or a space: `printf 'true\nrm -rf x'` prints two commands.
+_PRINT_ESCAPES = re.compile(r"\\[nrt]")
+#: Wrappers `_printed` steps over before the printer's name. `_segment_commands`
+#: is not used there, because it splits at every space and a printed line
+#: keeps its own.
+_PRINT_WRAPPERS = ("sudo", "command", "builtin", "exec", "nohup", "time")
+#: PowerShell's own parameters, after `-` or `/`, as `_powershell_reads_stdin`
+#: tells a command or a file from stdin: any unambiguous prefix is accepted.
+_PS_VALUE_PARAMS = ("executionpolicy", "windowstyle", "version", "inputformat",
+                    "outputformat", "psconsolefile", "configurationname",
+                    "workingdirectory", "settingsfile", "custompipename",
+                    "configurationfile")
+_PS_VALUE_ALIASES = ("ep", "ex", "w", "v", "if", "inp", "of", "o", "wd", "config")
+
+
+def _substitution(text: str, i: int) -> tuple[str, int]:
+    """The text inside a parenthesised substitution whose `(` ends just before
+    `i`, and the index after its `)` (T697). Quotes are stepped over as
+    `_paths_as_programs` steps over them; with no closing `)` the rest of the
+    text is the inside, so a run of unclosed `<(` is read once, not once each."""
+    depth, n, start = 1, len(text), i
+    while i < n:
+        ch = text[i]
+        end = text.find(ch, i + 1) if ch in "\"'" else -1
+        if end >= 0:
+            i = end + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if not depth:
+                return text[start:i], i + 1
+        i += 1
+    return text[start:], n
+
+
+def _shell_word(text: str, i: int) -> tuple[str, int]:
+    """One shell word from `i`, as the program receives it, and the index after
+    it (T697): a quoted part loses its quotes and keeps its spaces, a backslash
+    takes the character after it, and the word ends at a space or an operator.
+    An unpaired quote is an ordinary character, as everywhere in this file."""
+    out: list[str] = []
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace() or ch in _WORD_ENDS:
+            break
+        end = text.find(ch, i + 1) if ch in "\"'" else -1
+        if end >= 0:
+            out.append(text[i + 1:end])
+            i = end + 1
+        elif ch == "\\" and i + 1 < n:
+            out.append("" if text[i + 1] == "\n" else text[i + 1])
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out), i
+
+
+def _simple_commands(text: str) -> list[tuple[str, list[tuple]]]:
+    """`text` as simple commands, each with the separator written before it,
+    read with quotes respected (T697) - the reading `_commands_of` cannot make,
+    because it splits a quoted `'rm -rf x; ls'` at its `;`.
+
+    Each item is `("word", value)`, `("sub", inside)` for a process
+    substitution `<(...)` standing as a word, or `("redirect", operator,
+    target)` where the target is `("word", value)` or `("sub", inside)`. A
+    redirect may stand anywhere in the command, before the program's name too:
+    `<<< 'rm -rf x' bash` is `bash <<< 'rm -rf x'`. A parenthesis that is not a
+    substitution's ends a command, as `_GROUPING` cuts at one; `|&` is a pipe.
+    One pass: every step consumes at least one character, and a quote's
+    partner is searched for once per quote, as in `_paths_as_programs`.
+    """
+    commands: list[tuple[str, list[tuple]]] = []
+    items: list[tuple] = []
+    sep, i, n = "", 0, len(text)
+    while i < n:
+        ch, after = text[i], text[i + 1:i + 2]
+        if ch.isspace() and ch not in "\n\r":
+            # Every space `_shell_word` stops at, never a blank and a tab alone:
+            # it stopped at ` ` and was asked for a word again, forever.
+            i += 1
+            continue
+        if not items and sep in ("|", "||", "&&") and ch in "\n\r#":
+            # Review F1: bash reads on past a line break, a blank line or a
+            # comment after `|`, so the next line's program is the pipe's reader.
+            if ch != "#":
+                i += 1
+            while ch == "#" and i < n and text[i] not in "\n\r":
+                i += 1
+            continue
+        if ch in "\n\r;()" or ch == "|" or (ch == "&" and after != ">"):
+            commands.append((sep, items))
+            items = []
+            if ch == "|":
+                sep = "||" if after == "|" else "|"
+                i += 2 if after in ("|", "&") else 1
+            elif ch == "&":
+                sep = "&&" if after == "&" else "&"
+                i += 2 if after == "&" else 1
+            else:
+                sep, i = ";", i + 1
+            continue
+        if redirect := _REDIRECT_AT.match(text, i):
+            op = redirect.group().lstrip("0123456789")
+            i = redirect.end()
+            if op in ("<", ">") and redirect.group() == op and text[i:i + 1] == "(":
+                inside, i = _substitution(text, i + 1)
+                items.append(("sub", inside))
+                continue
+            while i < n and text[i] in " \t":
+                i += 1
+            if text.startswith(("<(", ">("), i):
+                inside, i = _substitution(text, i + 2)
+                items.append(("redirect", op, ("sub", inside)))
+            else:
+                value, i = _shell_word(text, i)
+                items.append(("redirect", op, ("word", value)))
+            continue
+        value, i = _shell_word(text, i)
+        items.append(("word", value))
+    commands.append((sep, items))
+    return commands
+
+
+def _stdin_scripts(text: str, depth: int = 0) -> list[str]:
+    """Every script a shell in `text` reads from its stdin, or from a process
+    substitution named as its script file, as text to judge (T697).
+
+    `bash 2>&1 <<< 'rm -rf x'`, `<<< 'rm -rf x' bash`, `bash < <(echo rm -rf x)`,
+    `bash <(echo rm -rf x)` and `echo 'rm -rf x' | sh` each RAN `rm` (measured
+    with a marker in its place, bash 5 on Windows 11), and `rm` never stood in
+    the command line as a command. A here-string, a process substitution read
+    as stdin, and what the program before a pipe prints (`_printed`) are this
+    command's stdin; it is a script only where the program receiving it reads
+    its script there (`_script_source`), so `cat <<< 'rm -rf x'`, `bash run.sh
+    <<< 'rm -rf x'` and `echo 'rm -rf x' | grep rm` are data. Every source is
+    judged where a shell reads several (`bash < in.txt <<< x` reads only the
+    last): a refusal somebody argues with over a miss nobody notices. What
+    runs inside a process substitution is read for such scripts too, to
+    `_FED_DEPTH` substitutions deep.
+    """
+    if depth >= _FED_DEPTH:
+        return []
+    scripts: list[str] = []
+    piped: list[str] = []
+    for sep, items in _simple_commands(text):
+        argv: list[str] = []
+        subs: dict[str, str] = {}
+        feeds: list[str] = []
+        inner: list[str] = []
+        for item in items:
+            if item[0] == "word":
+                argv.append(item[1])
+                continue
+            kind, value = item[2] if item[0] == "redirect" else item
+            if kind == "sub":
+                inner.append(value)
+            if item[0] == "sub":
+                argv.append(f"\x00{len(subs)}\x00")
+                subs[argv[-1]] = value
+            elif item[1] == "<<<":
+                feeds.append(value)
+            elif item[1] == "<" and kind == "sub":
+                feeds.extend(_printed_by(value, depth + 1))
+        if sep == "|":
+            feeds.extend(piped)
+        # A quoted word is one word (`"\Program Files\...\bash.exe"`): its spaces
+        # are kept from `_segment_commands`, which splits at every space.
+        # Review F1: a comment ends what bash reads (`| sh # why` reads stdin, not
+        # a script named `#`), and cmd reads `#` as a word: both are judged.
+        cut = next((k for k, word in enumerate(argv) if word.startswith("#")), len(argv))
+        for shown in dict.fromkeys((len(argv), cut)):
+            whole = [re.sub(r"\s", "\x01", word) for word in argv[:shown]]
+            words = _segment_commands(" ".join(whole))[-1] if whole else []
+            reads, script_at = _script_source(words)
+            if reads:
+                scripts.extend(feeds)
+            if script_at is not None and words[script_at] in subs:
+                scripts.extend(_printed_by(subs[words[script_at]], depth + 1))
+            if shown == len(argv) and words and _runs_a_string(words):
+                # Review F3: a command string is a command line of its own, and
+                # a shell it feeds runs its script (`bash -c "echo .. | sh"`).
+                for word in argv[1:]:
+                    scripts.extend(_stdin_scripts(word, depth + 1))
+                    if word[:2].lower() in ("/c", "/k"):      # cmd's `/c"..."`
+                        scripts.extend(_stdin_scripts(word[2:], depth + 1))
+        for body in inner:
+            scripts.extend(_stdin_scripts(body, depth + 1))
+        piped = _printed(argv)
+    return [script for script in scripts if script.strip()]
+
+
+def _printed_by(text: str, depth: int) -> list[str]:
+    """What the command line inside a process substitution prints (T697): what
+    each printer in it prints, unless it prints into a pipe to another program."""
+    if depth >= _FED_DEPTH:
+        return []
+    commands = _simple_commands(text)
+    out: list[str] = []
+    for k, (_, items) in enumerate(commands):
+        if k + 1 < len(commands) and commands[k + 1][0] == "|":
+            continue
+        out.extend(_printed([item[1] for item in items if item[0] == "word"]))
+    return out
+
+
+def _printed(argv: list[str]) -> list[str]:
+    """What one command prints, if it is a printer (`_PRINTERS`), else nothing
+    (T697): its arguments as one line, after `echo`'s own flags; for `printf`,
+    with and without its format, since `printf '%s' 'rm -rf x'` prints the
+    second; and each again with its escapes read as line breaks."""
+    at = 0                                # an index, never a slice per word (T695 F1)
+    while at < len(argv) and (_ASSIGNMENT.match(argv[at]) or argv[at] in _KEYWORDS
+                              or _program(argv[at])[0] in _PRINT_WRAPPERS):
+        at += 1
+    if at >= len(argv):
+        return []
+    program, args = _program(argv[at])[0], argv[at + 1:]
+    if program == "echo":
+        while args and _ECHO_FLAGS.fullmatch(args[0]):
+            args = args[1:]
+        texts = [" ".join(args)]
+    elif program == "printf":
+        args = args[1:] if args[:1] == ["--"] else args
+        if args[:1] == ["-v"]:
+            return []                     # assigns to a variable, prints nothing
+        texts = [" ".join(args), " ".join(args[1:])]
+    elif program in ("write-output", "write"):
+        texts = [" ".join(a for a in args if a.lower() not in ("-noenumerate", "-inputobject"))]
+    else:
+        return []
+    out = [t for text in texts for t in (text, _PRINT_ESCAPES.sub("\n", text))]
+    return list(dict.fromkeys(t for t in out if t.strip()))
+
+
+def _script_source(words: list[str]) -> tuple[bool, int | None]:
+    """Whether this command reads its script from stdin, and the index of the
+    word it reads its script FILE from, if any (T697). Measured, each with a
+    marker: a POSIX shell with no `-c` reads stdin unless an operand names a
+    script file, and always after `-s`; `source` and `.` read their first
+    argument; PowerShell and cmd as `_powershell_reads_stdin` and
+    `_cmd_reads_stdin` say. Any other program reads data."""
+    if not words:
+        return False, None
+    program = _program(words[0])[0]
+    if program in ("source", "."):
+        return False, 1 if len(words) > 1 else None
+    if program in ("powershell", "pwsh"):
+        return _powershell_reads_stdin(words), None
+    if program == "cmd":
+        return not any(w.lower().startswith(("/c", "/k")) for w in words[1:]), None
+    if program not in _POSIX_SHELLS:
+        return False, None
+    from_stdin, i = False, 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-", "--"):
+            i += 1
+            break
+        if not (word.startswith("-") or word.startswith("+")):
+            break
+        if word == "-c" or (_SHORT_CLUSTER.fullmatch(word) and "c" in word[1:].lower()):
+            return False, None            # a command string: stdin is its data
+        if word == "-s" or (_SHORT_CLUSTER.fullmatch(word) and "s" in word[1:]):
+            from_stdin = True
+        i += 2 if word in _SHELL_VALUE_FLAGS else 1
+    if from_stdin or i >= len(words):
+        return True, None
+    return False, i
+
+
+def _runs_a_string(words: list[str]) -> bool:
+    """Whether this command runs a command string it is handed (T697 review
+    F3): a POSIX shell with `-c` in any word, PowerShell given a command or a
+    file rather than stdin, cmd with `/c` or `/k`. Broad on purpose: every word
+    of such a command is read for a shell's stdin, which only adds refusals."""
+    program = _program(words[0])[0]
+    if program in ("powershell", "pwsh"):
+        return not _powershell_reads_stdin(words)
+    if program == "cmd":
+        return any(w.lower().startswith(("/c", "/k")) for w in words[1:])
+    return program in _POSIX_SHELLS and any(
+        w == "-c" or bool(_SHORT_CLUSTER.fullmatch(w) and "c" in w[1:].lower())
+        for w in words[1:])
+
+
+def _powershell_reads_stdin(words: list[str]) -> bool:
+    """Whether PowerShell reads its commands from stdin (T697). MEASURED,
+    Windows PowerShell 5.1: it does with no command and no file at all
+    (`echo 'Write-Output M' | powershell -NoProfile` printed M), and with
+    `-Command -`, `-c -`, `-File -` or a bare `-`; a command or a file named
+    in any other word, or `-EncodedCommand`, is what it runs instead."""
+    i = 1
+    while i < len(words):
+        word = words[i].lower()
+        name = word[1:].partition(":")[0] if word[:1] in ("-", "/") and len(word) > 1 else ""
+        nxt = words[i + 1] if i + 1 < len(words) else ""
+        if not name:
+            return word == "-"            # a bare word is the command, or `-` stdin
+        if name in ("ep", "ex") or (len(name) >= 3 and "executionpolicy".startswith(name)):
+            i += 2
+        elif name == "c" or (len(name) >= 3 and "command".startswith(name)):
+            return nxt == "-"
+        elif name == "f" or (len(name) >= 2 and "file".startswith(name)):
+            return nxt == "-"
+        elif name in ("e", "ec") or (len(name) >= 2 and "encodedcommand".startswith(name)):
+            return False
+        elif name in _PS_VALUE_ALIASES or (
+                len(name) >= 3 and any(p.startswith(name) for p in _PS_VALUE_PARAMS)):
+            i += 2
+        else:
+            i += 1
+    return True
 
 
 def _git_operation(token: str, words: list[str]) -> bool:

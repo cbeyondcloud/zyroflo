@@ -135,6 +135,14 @@ deny_git:
 # (`if`, `then`, `do`, `!`), a leading redirect (`>log`, `2>&1`), quotes, a
 # caret or a backslash inside its name, a quoted path. A rule naming a wrapper
 # (`sudo`, `env`, `nice`) matches where that wrapper runs, never the bare word.
+# A script a shell reads from its stdin is judged as a command too: a
+# here-string, a process substitution, or what `echo`/`printf` print into a
+# pipe (`echo 'rm -rf x' | sh`) - only where the receiving program reads its
+# script there, so `cat <<< 'rm -rf x'` is still data. `del` and `erase` are
+# PowerShell aliases of `Remove-Item`, so they carry its `-Recurse` beside
+# cmd's `/s`. A requirement ending in `:` (`-recurse:`) is a PowerShell
+# parameter: any prefix of its name (`-r`, `-rec`), with or without a value
+# (`-Recurse:$true`), never a letter inside another name (`del -Force x`).
 #
 # Recursion alone is the trigger, not recursion plus force: `-f` only silences
 # the prompts, so requiring it would be a silent miss on `rm -r tree`. This does
@@ -149,8 +157,8 @@ deny_commands:
   - "rm -r|-R|--recursive|-recurse"
   - "rmdir /s|-recurse|-r"
   - "rd /s|-recurse|-r"
-  - "del /s"
-  - "erase /s"
+  - "del /s|-recurse:"
+  - "erase /s|-recurse:"
   - "remove-item -recurse|-recu|-r"
   - "ri -recurse|-recu|-r"
   - "find -delete"
