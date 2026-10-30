@@ -37,6 +37,7 @@ import argparse
 import contextlib
 import fnmatch
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -4631,21 +4632,20 @@ def _simple_commands(text: str) -> list[tuple[str, list[tuple]]]:
 class _Feed:
     """Text that reaches a command's stdin, LINKED to where it came from rather
     than copied (T703): a pipe through a thousand programs is a thousand links,
-    and a shell that reads one marks it, so every text is collected once."""
+    and a shell that reads one records it, so every text is collected once."""
 
-    __slots__ = ("texts", "parents", "read")
+    __slots__ = ("texts", "parents")
 
     def __init__(self, texts=(), parents=()):
         self.texts = list(texts)
         self.parents = [p for p in parents if p is not None and (p.texts or p.parents)]
-        self.read = False
 
     def __bool__(self) -> bool:
         return bool(self.texts or self.parents)
 
 
 def _fed(reads: list[_Feed]) -> list[str]:
-    """Every text a shell read: in each node it marked and each node linked to
+    """Every text a shell read: in each node it recorded and each node linked to
     it, every node visited once (T703)."""
     out: list[str] = []
     seen: set[int] = set()
@@ -4665,8 +4665,16 @@ def _fed(reads: list[_Feed]) -> list[str]:
 #: command inside, as `( ... )` does.
 _OPENERS = frozenset({"{", "if", "while", "until", "for", "select", "case"})
 _CLOSERS = frozenset({"}", "fi", "done", "esac"})
-#: **T703.** A script file that is the reader's own stdin.
-_STDIN_FILES = ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0")
+#: Every reserved word that may stand before a command's program.
+_LEADS = _OPENERS | _CLOSERS | {"then", "do", "else", "elif", "!", "time"}
+#: **T703.** A script file that is the reader's own stdin, however the path is
+#: spelled: `/dev/stdin`, `/dev//stdin`, `/dev/fd/00`, `/proc/self/fd/../fd/0`.
+_STDIN_FILE = re.compile(r"/dev/stdin|/dev/fd/0+|/proc/[^/]+/fd/0+")
+
+
+def _is_stdin_file(word: str) -> bool:
+    """Whether a script file named `word` is the reader's own stdin (T703)."""
+    return word.startswith("/") and bool(_STDIN_FILE.fullmatch(posixpath.normpath(word)))
 
 
 def _stdin_scripts(text: str, depth: int = 0) -> list[str]:
@@ -4704,7 +4712,7 @@ def _stdin_scripts(text: str, depth: int = 0) -> list[str]:
 def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
           scripts: list[str]) -> _Feed:
     """What `text` writes to its output, as a node; every shell in it that
-    reads its script from a node marks that node in `reads` (T703). `stdin` is
+    reads its script from a node records that node in `reads` (T703). `stdin` is
     what `text` itself is handed: a command string inherits its shell's."""
     out = _Feed()
     if depth >= _FED_DEPTH:
@@ -4715,6 +4723,7 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
     inherited: list[tuple[int, _Feed]] = [(0, stdin)] if stdin else []
     carry: _Feed | None = None    # what an empty command hands the `(` after it
     groups: list[list[_Feed]] = []  # what each open compound's commands pass on
+    kinds: list[str] = []           # what opened each: `(`, `{`, `if`, `case` ...
 
     def close() -> _Feed | None:
         """Leave the innermost compound: what it passed on, as one node."""
@@ -4724,6 +4733,7 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
         while inherited and inherited[-1][0] >= level:
             inherited.pop()
         level -= 1
+        kinds.pop()
         return _Feed((), groups.pop())
 
     for k, (sep, items) in enumerate(commands):
@@ -4731,9 +4741,11 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
         if sep == "(":
             level += 1
             groups.append([])
+            kinds.append("(")
             if carry:
                 inherited.append((level, carry))
-        elif sep == ")":
+        elif sep == ")" and not (kinds and kinds[-1] == "case"):
+            # Review F2: in `case x in x) sh;; esac` the `)` ends a pattern.
             closed = close()
         carry = None
         argv: list[str] = []
@@ -4750,8 +4762,10 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
             if kind == "out":
                 outs.append(value)
                 if item[0] == "out":
+                    # Named as a shell's script file (`sh >(echo rm -rf x)`), what it
+                    # prints is judged, as `main` judged it (review F5).
                     argv.append(f"\x00{len(subs)}\x00")
-                    subs[argv[-1]] = ""
+                    subs[argv[-1]] = value
                 continue
             if kind == "sub":
                 printed = _flow(value, depth + 1, None, reads, scripts)
@@ -4768,24 +4782,28 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
         if inherited:
             links.append(inherited[-1][1])
         fed = _Feed(texts, links)
-        first = argv[0] if argv else ""
         if not argv:
             carry = fed
-        elif first in _OPENERS:
-            level += 1
-            groups.append([])
-            if fed:
-                inherited.append((level, fed))
-        elif first in _CLOSERS:
-            closed = close()
-        # `{` is not in `_KEYWORDS` (a quoted `"{"` is a program name to bash, and
-        # this reader has lost the quotes), but here it opens the group whose
-        # first command reads the pipe: `{ echo 'rm -rf x'; } | sh`.
-        braces = 0
-        while braces < len(argv) and argv[braces] == "{":
-            braces += 1
-        if braces:
-            argv = argv[braces:]
+        # The reserved words before the program: each opener opens a level, each
+        # closer closes one, and `then`, `do`, `!` and `time` stand between -
+        # `{ if true; then :; fi; sh; }` opens two and closes one before `sh`
+        # (review F1). `{` is not in `_KEYWORDS` (a quoted `"{"` is a program
+        # name to bash, and this reader has lost the quotes), but here it opens
+        # the group whose first command reads the pipe.
+        lead = 0
+        while lead < len(argv) and argv[lead] in _LEADS:
+            word = argv[lead]
+            if word in _CLOSERS:
+                closed = close()
+            elif word in _OPENERS:
+                level += 1
+                groups.append([])
+                kinds.append(word)
+                if fed:
+                    inherited.append((level, fed))
+            lead += 1
+        if lead:
+            argv = argv[lead:]
         # A quoted word is one word (`"\Program Files\...\bash.exe"`): its spaces
         # are kept from `_segment_commands`, which splits at every space.
         # Review F1: a comment ends what bash reads (`| sh # why` reads stdin, not
@@ -4799,14 +4817,11 @@ def _flow(text: str, depth: int, stdin: _Feed | None, reads: list[_Feed],
             if shown == len(argv):
                 received = words
             reads_stdin, script_at = _script_source(words)
-            if reads_stdin or (script_at is not None and words[script_at] in _STDIN_FILES):
-                fed.read = True
+            if reads_stdin or (script_at is not None and _is_stdin_file(words[script_at])):
                 reads.append(fed)
                 passes = False
             if script_at is not None and subs.get(words[script_at]):
-                named = _flow(subs[words[script_at]], depth + 1, None, reads, scripts)
-                named.read = True
-                reads.append(named)
+                reads.append(_flow(subs[words[script_at]], depth + 1, None, reads, scripts))
             lines: list[str] = []
             if words and shown == len(argv) and _runs_a_string(words):
                 # Review F3: a command string is a command line of its own, and
@@ -4876,16 +4891,27 @@ def _script_source(words: list[str]) -> tuple[bool, int | None]:
     script file, and always after `-s`; `source` and `.` read their first
     argument; PowerShell and cmd as `_powershell_reads_stdin` and
     `_cmd_reads_stdin` say; `at` and `batch` read stdin unless `-f` names a
-    file (T703). Any other program reads data."""
+    file (T703); `ssh`, `su`, `runuser` and `wsl` with no command of their own,
+    and `xargs` with a replace string inside the command string it runs, read
+    their stdin as a script too (T703). Any other program reads data."""
     if not words:
         return False, None
     program = _program(words[0])[0]
     if program in ("source", "."):
-        return False, 1 if len(words) > 1 else None
+        at = 2 if words[1:2] == ["--"] else 1
+        return False, at if len(words) > at else None
     if program in ("at", "batch"):
         # T703: `at` and `batch` run what they read on stdin with `sh`, unless
         # `-f` names a file; `at now <<< 'rm -rf x'` ran `rm` at the minute.
         return not any(w.startswith("-f") for w in words[1:]), None
+    if program in ("ssh", "su", "runuser", "wsl"):
+        # T703 review F3: with no command of its own, each starts a shell that
+        # reads the stdin it was handed (`echo 'rm -rf x' | ssh h`).
+        return not _carried(words), None
+    if program == "xargs":
+        # T703 review F3: `xargs -I{} sh -c '{}'` runs each line of its stdin as
+        # the command string; without a replace string a line is an argument.
+        return _xargs_runs_its_input(words), None
     if program in ("powershell", "pwsh"):
         return _powershell_reads_stdin(words), None
     if program == "cmd":
@@ -4976,6 +5002,30 @@ _EXEC_CARRIERS = ("unshare", "nsenter", "kubectl", "docker", "podman", "systemd-
 _TMUX_RUNS = ("new-session", "new", "new-window", "neww", "split-window", "splitw",
               "respawn-pane", "respawnp", "respawn-window", "respawnw", "run-shell",
               "run", "display-popup", "popup")
+#: `wsl`'s options that take a SEPARATE value word.
+_WSL_VALUE_FLAGS = ("-d", "--distribution", "-u", "--user", "--cd", "--shell-type")
+
+
+def _xargs_runs_its_input(words: list[str]) -> bool:
+    """Whether `xargs` puts each line of its stdin into a command string a shell
+    runs: a replace string (`-I R`, `-IR`, `-i`, `--replace[=R]`) that stands in
+    the text the command it runs carries (T703 review F3)."""
+    replace = None
+    for j, word in enumerate(words[1:], 1):
+        if word == "-I" and j + 1 < len(words):
+            replace = words[j + 1]
+        elif word.startswith("-I") and len(word) > 2:
+            replace = word[2:]
+        elif word in ("-i", "--replace"):
+            replace = "{}"
+        elif word.startswith("-i") and len(word) > 2:
+            replace = word[2:]
+        elif word.startswith("--replace="):
+            replace = word.partition("=")[2] or "{}"
+    at = _xargs_command_at(words)
+    if not replace or at is None:
+        return False
+    return any(replace in text for text in _carried(words[at:]))
 
 
 def _quoted(words: list[str]) -> str:
@@ -5063,20 +5113,35 @@ def _carried(words: list[str]) -> list[str]:
         if i < len(words):
             out.append(" ".join(words[i:]))
     elif program == "tmux":
-        if any(word in _TMUX_RUNS for word in words[1:]) and len(words) > 2:
+        # Only a subcommand that runs a shell command, and only its last word: a
+        # session name, a message or a format is text (review F6).
+        at = next((j for j, word in enumerate(words[1:], 1) if word in _TMUX_RUNS), None)
+        if at is not None and len(words) - 1 > at and not words[-1].startswith("-"):
             out.append(words[-1])
-        out.extend(word for word in words[1:-1] if any(c.isspace() for c in word))
+    elif program == "wsl":
+        # `wsl CMD` runs CMD through the default shell; `wsl -e CMD` runs it as a
+        # program and its arguments; `--` hands on the rest as it stands.
+        i = 1
+        while (i < len(words) and words[i].startswith("-")
+               and words[i] not in ("-e", "--exec", "--")):
+            i += 2 if words[i] in _WSL_VALUE_FLAGS else 1
+        if i < len(words) and words[i] in ("-e", "--exec"):
+            out.append(_quoted(words[i + 1:]))
+        elif i < len(words):
+            out.append(" ".join(words[i + 1:] if words[i] == "--" else words[i:]))
     if program in _STRING_FLAG_CARRIERS:
-        for j, word in enumerate(words[1:-1], 1):
+        for j, word in enumerate(words[1:], 1):
             if word in ("-c", "--command") or (
                     _SHORT_CLUSTER.fullmatch(word) and word.endswith("c")):
-                out.append(words[j + 1])
-            elif word.startswith("--command="):
+                if j + 1 < len(words):
+                    out.append(words[j + 1])
+            elif word.startswith("--command="):              # last word too (F4)
                 out.append(word.partition("=")[2])
+            elif word.startswith("-c") and not _SHORT_CLUSTER.fullmatch(word):
+                out.append(word[2:])                         # `-c'...'` attached (F10)
     if program == "xterm" and "-e" in words[1:]:
         rest = words[words.index("-e", 1) + 1:]
-        if len(rest) == 1:
-            out.append(rest[0])
+        out.append(rest[0] if len(rest) == 1 else _quoted(rest))
     if program in _EXEC_CARRIERS:
         if "--" in words[1:]:
             rest = words[words.index("--", 1) + 1:]

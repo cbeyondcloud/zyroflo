@@ -172,6 +172,52 @@ def test_the_door_refuses_a_carried_group_as_a_process(tmp_path):
     assert done.returncode == 1 and "REFUSED" in done.stdout, (done.stdout, done.stderr)
 
 
+# ── found by the final review ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("command", [
+    # a compound opened after `then`, `do`, `!`, `time` or another `{` (F1)
+    "echo 'rm -rf x' | { if true; then :; fi; sh; }",
+    "echo 'rm -rf x' | if true; then if true; then :; fi; sh; fi",
+    "echo 'rm -rf x' | while true; do if true; then :; fi; sh; done",
+    "echo 'rm -rf x' | { { :; }; sh; }", "echo 'rm -rf x' | { for i in 1; do :; done; sh; }",
+    "echo 'rm -rf x' | { ! if true; then :; fi; sh; }",
+    "echo 'rm -rf x' | { time for i in 1; do :; done; sh; }",
+    # a `case` pattern's `)` is not a subshell's (F2)
+    "echo 'rm -rf x' | case x in x) sh;; esac",
+    "echo 'rm -rf x' | { case x in x) :;; esac; sh; }",
+    # programs that hand their stdin to a shell (F3)
+    "echo 'rm -rf x' | ssh h", "ssh h <<< 'rm -rf x'", "su <<< 'rm -rf x'",
+    "wsl <<< 'rm -rf x'", "echo 'rm -rf x' | xargs -I{} sh -c '{}'",
+    "echo 'rm -rf x' | xargs -I@ bash -c @",
+    # a command option as the last word, or attached (F4, F10)
+    "su user --command='{ rm -rf x; }'", "flock /tmp/l --command='{ rm -rf x; }'",
+    "su -c'{ rm -rf x; }'",
+    # a stdin file in another spelling (F7)
+    "echo 'rm -rf x' | source -- /dev/stdin", "echo 'rm -rf x' | source /dev//stdin",
+    "echo 'rm -rf x' | source /dev/./stdin", "echo 'rm -rf x' | source /dev/fd/00",
+    "echo 'rm -rf x' | bash /proc/self/fd/../fd/0",
+    # an exec carrier's own command (F10)
+    "xterm -e rm -rf x", "wsl rm -rf x", "wsl -e sh -c '{ rm -rf x; }'",
+    # refused on main, so refused still (F5): the substitution is named as the script
+    "sh >(echo rm -rf x)", "bash >(echo 'rm -rf x')",
+])
+def test_the_shapes_the_final_review_found_are_refused(command):
+    assert refused(command), command
+
+
+@pytest.mark.parametrize("command", [
+    "tmux display-message -p 'rm -rf x' -t s", "tmux list-panes -F 'rm -rf x #{pane_id}' -a",
+    "tmux new-session -s 'rm -rf x' -d 'ls'", "echo 'rm -rf x' | ssh h ls",
+    "ssh h ls <<< 'rm -rf x'", "su -c ls <<< 'rm -rf x'", "echo 'rm -rf x' | xargs sh -c 'ls'",
+    "echo 'rm -rf x' | xargs -I{} echo {}",
+])
+def test_quoted_tmux_arguments_and_a_remote_command_stay_data(command):
+    """A tmux name, message or format is text (F6), and an ssh, su or xargs that
+    runs a command of its own does not run its stdin."""
+    assert not refused(command), command
+
+
 # ── what must stay allowed ───────────────────────────────────────────────────
 
 
