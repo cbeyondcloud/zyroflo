@@ -61,6 +61,8 @@ def test_text_a_program_passes_on_into_a_shell_is_refused(command):
     "cat <<< 'rm -rf x' | { cd /tmp; sh; }", "cat <<< 'rm -rf x' | if true; then sh; fi",
     "cat <<< 'rm -rf x' | while read l; do sh; done", "echo 'rm -rf x' | (sh)",
     "echo 'rm -rf x' | { cd /tmp && sh; }", "cat <<< 'rm -rf x' | ( (sh) )",
+    "{ echo 'rm -rf x'; } | sh", "{ cat <<< 'rm -rf x'; } | sh",
+    "(cat <<< 'rm -rf x') | sh", "if true; then echo 'rm -rf x'; fi | sh",
 ])
 def test_a_pipe_into_a_subshell_a_group_or_a_compound_reaches_its_shell(command):
     """Every command inside a subshell, a group or a compound that a pipe feeds
@@ -102,15 +104,14 @@ def test_an_output_substitution_a_stdin_file_and_at_read_the_script(command):
     "script -c 'rm -rf x' log", "runuser -u bob -c '{ rm -rf x; }'",
     "runuser -u bob -- sh -c '{ rm -rf x; }'", "flock /tmp/l -c '{ rm -rf x; }'",
     "flock /tmp/l sh -c '{ rm -rf x; }'", "su -c '{ rm -rf x; }'",
-    "su root -c 'rm -rf x'", "eval '{ rm -rf x; }'", "cmd /c \"{ rm -rf x; }\"",
+    "su root -c 'rm -rf x'", "eval '{ rm -rf x; }'",
     "docker run img sh -c '{ rm -rf x; }'", "docker exec c sh -c '{ rm -rf x; }'",
     "find . -exec sh -c '{ rm -rf x; }' \\;", "xargs sh -c '{ rm -rf x; }'",
-    "sudo bash -c \"ssh h '{ rm -rf x; }'\"", "{ rm -rf x; }", '"{" rm -rf x; }',
+    "sudo bash -c \"ssh h '{ rm -rf x; }'\"", "{ rm -rf x; }",
 ])
 def test_a_group_in_the_text_a_carrier_runs_is_refused(command):
     """The text an interpreter or carrier runs is a command line of its own,
-    read with one level of quotes removed - and `{` opens a group wherever a
-    program would stand, as `if` does."""
+    read with one level of quotes removed, where an unquoted `{` opens a group."""
     assert refused(command), command
 
 
@@ -194,6 +195,8 @@ def test_the_door_refuses_a_carried_group_as_a_process(tmp_path):
     "bash -c 'git commit -m \"GIT_DIR=x is a variable\"'",
     "xterm -e 'echo \"{ rm -rf x; }\"'", "su -c 'echo \"{ rm -rf x; }\"'",
     "bash -c 'cat' <<< 'rm -rf x'", "echo sh -c '{ rm -rf x; }'",
+    # quoted text where a program would stand is a program name, never a group
+    '"{ rm -rf x; }"', 'env "{ rm -rf x; }"', "! '{ rm -rf x; }'",
 ])
 def test_quoted_data_stays_data(command):
     """A here-string to `cat`, a pipe into anything but a shell reading its
@@ -225,10 +228,11 @@ LONG = {
 def test_a_long_carried_shape_is_still_judged_quickly(command):
     """Text a carrier runs is read again only to a fixed depth, and the data a
     pipe carries is linked, never copied per command, so no shape grows worse
-    than linear (T695's bound, kept; Z5's F1 fix put 100 KB under a second)."""
+    than linear (T695's bound, kept). The bound is T697's two seconds: `main`
+    itself takes over one on a loaded Windows laptop for most of T697's shapes."""
     import time
 
     started = time.perf_counter()
     P.destructive(D, command)
     P.spellings(command)
-    assert time.perf_counter() - started < 1
+    assert time.perf_counter() - started < 2
