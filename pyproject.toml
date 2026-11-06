@@ -1,6 +1,6 @@
 [project]
 name = "sdlc-harness"
-version = "0.1.0"
+version = "1.0.0"
 description = "Zyroflo - a generic, human-gated SDLC harness: one governed lifecycle for any repo, any AI tool, any model"
 readme = "README.md"
 license = { text = "MIT" }
