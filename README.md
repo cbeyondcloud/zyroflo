@@ -256,6 +256,7 @@ sdlc-project.toml                 # what this repo IS - you fill it once, before
 .sdlc/pipeline.md                 # the resolved pipeline as a Mermaid diagram - generated, committed
 .sdlc/review-rubric.md
 .sdlc/plan-template.md
+.sdlc/harness-version             # the harness release that installed this - one line, tracked
 .sdlc/plans/                      # per-run plan + tracker docs (durable, resumable state)
 .sdlc/runs/<run-id>/              # one folder per run: state.json + the hash-chained approvals.jsonl and events.jsonl
 .sdlc/metrics/                    # written on demand by metrics.py; audit.db and export/ are derived and gitignored
@@ -325,6 +326,9 @@ The per-event schema is [`sdlc_templates/schemas/events.schema.json`](sdlc_templ
 | `--no-graph` | Scaffold only — skip the chained graph build |
 | `--bundle OUT` | Emit a single self-contained script (templates base64-embedded) |
 | `--dump-templates DIR` | Write the templates out for editing |
+| `--manifest` | With `--target` only: print one JSON object saying what this installer owns in the target - its version, the installed one (`.sdlc/harness-version`), a digest per owned path present (the harness clone's path masked, line endings normalised; for a file it merges into, only the harness block or its own `settings.json` entries), with the files whose content depends on the repository by design (`profile.yml`, `pipeline.md`, `settings.json`) under `per_repo`, the owned paths missing or present but unreadable, any `.new` copy a re-install staged beside an edited file, the `policy.yml` digest, and whether `profile.yml` changed since this machine's install (null when unknown or unreadable). Each file is masked only with the harness path its own installer-written text records, so adopter text never moves another file's digest, and the set of paths is the same whatever the reading clone ships. Writes nothing; exit `1` when the target has no `.sdlc/`, `2` when combined with an install flag |
+
+Every install also writes `.sdlc/harness-version`, a tracked one-line record of the harness release it came from.
 
 Exit status: `0` = scaffold written (graph built, skipped, or honestly absent); `3` = scaffold written but the chained graph build failed (the scaffold is usable; re-run just the build with the command the output prints); `4` = the scaffold is incomplete: a file could not be written after others were (each is named, and nothing is built on it; re-run once it can be); `1` = nothing was installed (bad input, or a file it must write cannot be written - each is named); `2` = bad command line, or INIT stopped for `sdlc-project.toml` (nothing was installed).
 
