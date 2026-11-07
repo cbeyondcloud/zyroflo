@@ -449,6 +449,7 @@ def test_a_no_record_manifest_is_t704s_plus_two_entries(tmp_path):
     before = json.loads(proc.stdout.decode("utf-8"))
     after = _manifest(t)
     assert after.pop("options") is None
+    after.pop("expected_missing")          # T706's key, which T704 never printed
     after["missing"].remove(REL)
     assert after == before
 
@@ -482,7 +483,7 @@ def test_the_manifest_help_names_every_key(tmp_path):
                           timeout=120, env={**__import__("os").environ, "COLUMNS": "4000"})
     out = " ".join(proc.stdout.decode("utf-8").split())
     keys = ("installer", "installed", "files", "per_repo", "missing", "unreadable",
-            "staged", "policy", "profile_changed", "options")
+            "staged", "policy", "profile_changed", "options", "expected_missing")
     assert printed == set(keys), printed
     for key in keys:
         assert f"`{key}`" in out, key

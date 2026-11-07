@@ -25,9 +25,11 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import contextlib
 import errno
 import glob
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -2259,18 +2261,23 @@ def config_tool_files(tool: str, body: str, description: str) -> list[tuple[str,
 
 
 def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
-                *, with_graph: bool, extras_on: bool) -> list[dict]:
+                *, with_graph: bool, extras_on: bool,
+                harness_side: bool = True) -> list[dict]:
     """Every per-tool entry point plus the instruction-file blocks, as plan_ops.
 
     One function, called once when the graph is already there and twice when it
     arrives during this run (see install): the surfaces that teach a graph must
-    not be written before the build that produces it has succeeded."""
+    not be written before the build that produces it has succeeded.
+
+    `harness_side=False` (T706, paths only): the config skill is planned whether or
+    not this clone ships its engine, with empty text, as an install from a full clone
+    would plan it."""
     ops: list[dict] = []
     g_desc = g_body = addendum = ""
     if with_graph:
         g_desc, g_body = graph_skill(harness_root())
         addendum = graph_addendum(harness_root())
-    config = config_skill(harness_root())
+    config = config_skill(harness_root()) or (None if harness_side else ("", ""))
     codex_body = ""
     for tool in tools:
         body = skill_body
@@ -3520,8 +3527,12 @@ LEDGER_WORKFLOW_REL = ".github/workflows/sdlc-ledger.yml"
 
 
 def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
-                          github_planned: bool = False) -> str | None:
+                          github_planned: bool = False,
+                          harness_side: bool = True) -> str | None:
     """Why this install ships no CI ledger gate, or None when it does.
+
+    `harness_side=False` asks the repository's side alone (T706): whether an install
+    from a full harness clone ships it, whatever clone is asking.
 
     Split from the doing of it for `no_chain_reason`'s reason: a dry run has to be able
     to report the same decision, and a gate that silently fails to install is the exact
@@ -3532,7 +3543,7 @@ def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
     as found installed the gate only on the second run.
     """
     harness = Path(harness) if harness is not None else harness_root()
-    if not (harness / LEDGER_EMITTER).is_file():
+    if harness_side and not (harness / LEDGER_EMITTER).is_file():
         return (f"this is a standalone sdlc-init.py with no {LEDGER_EMITTER.as_posix()} "
                 f"beside it, and the check is generated from that source")
     if not github_planned and not (root / ".github").is_dir():
@@ -3775,14 +3786,15 @@ def _root_outside_checkout_reason(root: Path, workspace: Path, flag: str,
 
 def no_snapshot_job_reason(root: Path, workspace: Path | None,
                            harness: Path | None = None, *,
-                           github_planned: bool = False) -> str | None:
+                           github_planned: bool = False,
+                           harness_side: bool = True) -> str | None:
     """Why this install ships no weekly snapshot, or None when it does.
 
     The same three conditions the replay job needs, and for the same reasons -
     stated here rather than shared, because a future divergence between the two
     jobs would otherwise be silent. What differs is the last one's wording: this
     job BUILDS, so a workspace it cannot name is a job that fails every week.
-    `github_planned` is `no_ledger_gate_reason`'s (T518).
+    `github_planned` and `harness_side` are `no_ledger_gate_reason`'s (T518, T706).
     """
     if not github_planned and not (root / ".github").is_dir():
         # Batch-6 review B6-3: asked for by name, this job never lands however often
@@ -3790,7 +3802,7 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
         return (f"{root} has no .github/ - the snapshot is a GitHub Actions workflow. "
                 f"If this repository runs GitHub Actions, create .github/ at its root "
                 f"and re-run.")
-    if not harness_repo_slug(harness):
+    if harness_side and not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
                 "written into the template would name one machine's fork in "
@@ -3805,10 +3817,12 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
 
 def snapshot_job_ops(root: Path, workspace: Path | None,
                      harness: Path | None = None, *,
-                     github_planned: bool = False) -> list[dict]:
+                     github_planned: bool = False,
+                     harness_side: bool = True) -> list[dict]:
     """The weekly snapshot workflow, or one blocked op carrying the reason."""
     reason = no_snapshot_job_reason(root, workspace, harness,
-                                    github_planned=github_planned)
+                                    github_planned=github_planned,
+                                    harness_side=harness_side)
     if reason:
         return [{"rel": SNAPSHOT_WORKFLOW_REL, "status": "blocked",
                  "path": root / SNAPSHOT_WORKFLOW_REL, "content": None,
@@ -3822,20 +3836,21 @@ def snapshot_job_ops(root: Path, workspace: Path | None,
 
 def no_replay_job_reason(root: Path, workspace: Path | None,
                          harness: Path | None = None, *,
-                         github_planned: bool = False) -> str | None:
+                         github_planned: bool = False,
+                         harness_side: bool = True) -> str | None:
     """Why this install ships no nightly replay, or None when it does.
 
     Split from the doing of it for `no_ledger_gate_reason`'s reason: a dry run
     must report the same decision, and a job that silently fails to install is
     the shape of failure this repository keeps finding in its own tools.
-    `github_planned` is that function's too (T518).
+    `github_planned` and `harness_side` are that function's too (T518, T706).
     """
     if not github_planned and not (root / ".github").is_dir():
         # Batch-6 review B6-3, as for the snapshot.
         return (f"{root} has no .github/ - the replay is a GitHub Actions workflow. "
                 f"If this repository runs GitHub Actions, create .github/ at its root "
                 f"and re-run.")
-    if not harness_repo_slug(harness):
+    if harness_side and not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
                 "written into the template would name one machine's fork in "
@@ -3850,10 +3865,12 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
 
 def replay_job_ops(root: Path, workspace: Path | None,
                    harness: Path | None = None, *,
-                   github_planned: bool = False) -> list[dict]:
+                   github_planned: bool = False,
+                   harness_side: bool = True) -> list[dict]:
     """The nightly replay workflow, or one blocked op carrying the reason."""
     reason = no_replay_job_reason(root, workspace, harness,
-                                  github_planned=github_planned)
+                                  github_planned=github_planned,
+                                  harness_side=harness_side)
     if reason:
         return [{"rel": REPLAY_WORKFLOW_REL, "status": "blocked",
                  "path": root / REPLAY_WORKFLOW_REL, "content": None,
@@ -4729,7 +4746,9 @@ def layer_paths(root: Path) -> dict[str, list[str]]:
     """For each recorded switch, the whole-file paths ONLY that switch plans (T705, the
     owner's ruling F2): `plan_install_ops` - the planner an install uses - run with
     every switch off and then with that one on, every tool and the graph surfaces on.
-    Merged files (a block, settings.json) are left out: an adopter may own those."""
+    Merged files (a block, settings.json) are left out: an adopter may own those.
+    `paths_only` (T706 review F1): a path query, so the four plans never generate the
+    ledger check; the reader-side paths cancel in the diff, so the sets are the same."""
     body, description = _planner_inputs()
 
     def plan(**on: bool) -> dict[str, str]:
@@ -4739,7 +4758,7 @@ def layer_paths(root: Path) -> dict[str, list[str]]:
             extras_on=on.get("claude-extras", False),
             corpus_replay=on.get(FLAG_CORPUS_REPLAY[2:], False),
             snapshot_cadence=on.get(FLAG_SNAPSHOT_CADENCE[2:], False),
-            installed_digests={})
+            installed_digests={}, paths_only=True)
         return {op["rel"]: op.get("kind", "file") for op in ops}
 
     base = plan()
@@ -4761,6 +4780,40 @@ def infer_install_options(root: Path) -> tuple[list[tuple[str, list[str]]],
         elif any(os.path.lexists(root / rel) for rel in rels):
             partial.append((key, present))
     return found, partial
+
+
+def applied_layers(root: Path, loaded: tuple[dict, dict[str, int]] | None,
+                   given: dict[str, bool]) -> tuple[dict[str, bool], list[str],
+                                                    list[tuple[str, list[str]]],
+                                                    list[tuple[str, list[str]]]]:
+    """(each recorded switch's value for this run, the switches re-applied from the
+    record, (switch, its files) for each one inferred, (switch, its files present) for
+    each one NOT inferred because only some of its files are there). `loaded` is
+    `load_install_options(root)`, `given` the switches the command line set. The ONE
+    union of given, recorded and inferred layers: `main` applies it and `--manifest`
+    plans with it (T706), so the two cannot disagree about which layers a run applies.
+
+    The owner's ruling F2: a target with no record - every install before T705 - recorded
+    its layers nowhere, and "none" would be an unknown written down as a fact. Each switch
+    whose own files the planner names are all there is inferred; one with only some of
+    them is said, not guessed. Only where the harness is already installed (review N2):
+    a target with no .sdlc/ has no earlier layer, and a brand-new install skips the four
+    plans."""
+    recorded = loaded[0] if loaded is not None else {}
+    on = {key: bool(given.get(key)) for key in RECORDED_SWITCHES}
+    reapplied = [key for key in RECORDED_SWITCHES if recorded.get(key) and not on[key]]
+    for key in reapplied:
+        on[key] = True
+    inferred: list[tuple[str, list[str]]] = []
+    not_inferred: list[tuple[str, list[str]]] = []
+    if loaded is None and (root / ".sdlc").is_dir():
+        found, partial = infer_install_options(root)
+        for key, rels in found:
+            if not on[key]:
+                on[key] = True
+                inferred.append((key, rels))
+        not_inferred = [(key, present) for key, present in partial if not on[key]]
+    return on, reapplied, inferred, not_inferred
 
 
 def install_options_for(root: Path, *, claude_extras: bool, corpus_replay: bool,
@@ -4803,13 +4856,19 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
                      workspace_path: Path | None, with_graph: bool, extras_on: bool,
                      corpus_replay: bool, snapshot_cadence: bool,
                      installed_digests: dict[str, str],
-                     install_options: dict | None = None) -> tuple[list[dict], str | None]:
+                     install_options: dict | None = None,
+                     paths_only: bool = False) -> tuple[list[dict], str | None]:
     """(every write an install owes, why there is no ledger gate or None).
 
     The ONE computation of what an install owns (T704): `install` - a dry run
     included - and `--manifest` both call it, so the manifest's list of owned paths
     cannot drift from what an install writes. Pure: it reads the target and writes
-    nothing (the ledger check is generated in a temporary directory)."""
+    nothing (the ledger check is generated in a temporary directory).
+
+    `paths_only` (T706): the ops' PATHS as an install from a full harness clone plans
+    them, whatever clone this is - the conditions on the reading clone (the ledger
+    emitter, the config engine, a github.com `origin`) are not asked, and the ledger
+    check is not generated. Its content and statuses are not an install's."""
     ops: list[dict] = []
     # Shared harness data (.sdlc/)
     ops.append(plan_op(root, ".sdlc/profile.yml", render_profile(profile, tools),
@@ -4861,7 +4920,8 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
             record_op.update(status="update", content=record)
     ops.append(record_op)
     surfaces = surface_ops(root, tools, skill_body, description,
-                           with_graph=with_graph, extras_on=extras_on)
+                           with_graph=with_graph, extras_on=extras_on,
+                           harness_side=not paths_only)
     extras = claude_extras_ops(root, profile) if extras_on else []
     # T518: the three GitHub Actions jobs below are decided on the tree this run
     # LEAVES. Copilot's instructions live in `.github/`, so a run that writes them
@@ -4872,18 +4932,25 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
     # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
     # decision, because either alone is a lie - a check nothing runs, or a required job
     # whose script is absent.
-    ledger_skipped = no_ledger_gate_reason(root, github_planned=github_planned)
+    ledger_skipped = no_ledger_gate_reason(root, github_planned=github_planned,
+                                           harness_side=not paths_only)
     if not ledger_skipped:
-        ops.extend(ledger_gate_ops(root))
+        # Paths only (T706): the two rels, never the emitter's spawn, so a clone with
+        # no emitter plans what a full clone's install writes.
+        ops.extend([plan_op(root, rel, "") for rel in (LEDGER_CHECK_REL,
+                                                        LEDGER_WORKFLOW_REL)]
+                   if paths_only else ledger_gate_ops(root))
     # The nightly corpus replay (item 101), and ONLY when asked. A scheduled job
     # on a repository with no corpus goes red every night, and a recurring red is
     # how a real check gets switched off.
     if corpus_replay:
-        ops.extend(replay_job_ops(root, workspace_path, github_planned=github_planned))
+        ops.extend(replay_job_ops(root, workspace_path, github_planned=github_planned,
+                                  harness_side=not paths_only))
     # The weekly snapshot (item 58), and ONLY when asked - same reason.
     if snapshot_cadence:
         ops.extend(snapshot_job_ops(root, workspace_path,
-                                    github_planned=github_planned))
+                                    github_planned=github_planned,
+                                    harness_side=not paths_only))
     ops.extend(surfaces)
     ops.extend(extras)
     return ops, ledger_skipped
@@ -5681,6 +5748,59 @@ def _owned_settings(root: Path, text: str) -> str | None:
     return json.dumps(owned, sort_keys=True, separators=(",", ":"))
 
 
+def expected_rels(root: Path) -> set[str] | None:
+    """The paths a plain re-run of the installer at `root` writes (T706), or None when
+    that run writes none of them or is not known: a `.sdlc/install-options` it cannot
+    read, a recorded workspace whose file is not there or not a workspace, or a pre-INIT
+    gate (`project_gate`: `sdlc-project.toml` missing, blank or malformed) that stops it
+    - each a run that stops before it plans.
+
+    Planned by `plan_install_ops` with the inputs that run hands it: `--tools auto`'s
+    `detect_tools`, the layers `applied_layers` gives a run with no switch on its
+    command line (recorded, or inferred for a target with no record), the recorded
+    workspace, and the graph surfaces only where a graph is there - the first-pass plan
+    `install` writes, since a graph that arrives during the run is taught only after its
+    build succeeds. `paths_only`, so the set does not depend on the reading clone
+    (T704-R5): a standalone copy or a bundle names what a full clone's install writes,
+    the ledger gate, the config skill and the pipeline diagram (drawn after the plan)
+    included. A blocked op names a file the run cannot write, so it is left out. The
+    profile shapes no path, so `_MANIFEST_PROFILE` stands in for it."""
+    try:
+        loaded = load_install_options(root)
+    except InstallOptionsError:
+        return None
+    recorded = loaded[0] if loaded is not None else {}
+    on = applied_layers(root, loaded, {})[0]
+    workspace = workspace_path = None
+    if (rel := recorded.get(RECORDED_WORKSPACE)) is not None:
+        workspace_path = root / rel
+        if not workspace_path.is_file():
+            return None
+        try:
+            workspace = read_workspace(workspace_path)
+        except WorkspaceError:
+            return None
+    # Review F3: a re-run the pre-INIT gate stops writes none of the plan, so the answer
+    # is null. Asked of `project_gate` itself, as a dry run asks it (which writes nothing),
+    # with its message kept off the manifest's stdout.
+    with contextlib.redirect_stdout(io.StringIO()):
+        _, stop = project_gate(root, workspace, dry_run=True)
+    if stop:
+        return None
+    tools = detect_tools(root)
+    body, description = _planner_inputs()
+    ops, _ = plan_install_ops(
+        root, dict(_MANIFEST_PROFILE), tools, body, description, force=True,
+        workspace=workspace, workspace_path=workspace_path,
+        with_graph=(root / GRAPH_OUT / "graph.jsonl").is_file(),
+        extras_on=on["claude-extras"] and "claude" in tools,
+        corpus_replay=on[FLAG_CORPUS_REPLAY[2:]],
+        snapshot_cadence=on[FLAG_SNAPSHOT_CADENCE[2:]],
+        installed_digests={}, install_options=recorded, paths_only=True)
+    # The diagram is drawn after the plan, by every install from a full clone.
+    return {op["rel"] for op in ops if op["status"] != "blocked"} | {PIPELINE_DIAGRAM_REL}
+
+
 def manifest(root: Path) -> dict:
     """What `--manifest` prints for `root`: the installer's version, the installed one,
     and a digest for what the installer owns in each owned path present - the whole
@@ -5749,7 +5869,12 @@ def manifest(root: Path) -> dict:
             and ".sdlc/profile.yml" not in unreadable):
         profile = texts.get(".sdlc/profile.yml")
         profile_changed = profile is None or _content_digest(profile) != recorded
+    # T706: of `missing`, the paths this target's own re-run writes - a subset by
+    # construction, since every planned rel is an owned one.
+    expected = expected_rels(root)
     return {"installer": HARNESS_VERSION,
+            "expected_missing": (None if expected is None
+                                 else sorted(rel for rel in missing if rel in expected)),
             "installed": version.strip() if version is not None else None,
             "files": files,
             "per_repo": per_repo,
@@ -5879,7 +6004,16 @@ def main(argv: list[str] | None = None) -> int:
                          "of a file it merges into, only its own settings.json entries), "
                          "the files that depend on the repository by design (`per_repo`: "
                          "profile.yml, pipeline.md, settings.json, install-options), owned "
-                         "paths absent (`missing`) or present but not readable - not "
+                         "paths absent under any tools and layers (`missing`), the ones "
+                         "of those this target's own plain re-run writes - its detected "
+                         "tools, its recorded layers (inferred when there is no record), "
+                         "its recorded workspace, as a full harness clone installs them "
+                         "whatever clone reads (`expected_missing`; null, never a guess, "
+                         "when that re-run would stop before writing: "
+                         ".sdlc/install-options cannot be read, or names a workspace file "
+                         "that is not there or is not a workspace, or INIT would stop for "
+                         "sdlc-project.toml), owned paths present but "
+                         "not readable - not "
                          "text, unbalanced markers, a record that is not one, a dangling "
                          "link (`unreadable`), the <file>.new copies a re-install staged "
                          "beside an edited file (`staged`), the policy.yml digest "
@@ -5941,36 +6075,19 @@ def main(argv: list[str] | None = None) -> int:
               f"installed - fix that line to name the workspace file, or remove it, "
               f"then re-run.", file=sys.stderr)
         return 1
-    reapplied: list[str] = []
-    layer_notes: list[str] = []
-    inferred: list[tuple[str, list[str]]] = []
-    for key in RECORDED_SWITCHES:
-        dest = key.replace("-", "_")
-        if recorded.get(key) and not getattr(args, dest):
-            setattr(args, dest, True)
-            reapplied.append("--" + key)
+    given = {key: bool(getattr(args, key.replace("-", "_"))) for key in RECORDED_SWITCHES}
+    on, reapplied_keys, inferred, partial = applied_layers(root, loaded, given)
+    for key, value in on.items():
+        setattr(args, key.replace("-", "_"), value)
+    reapplied = ["--" + key for key in reapplied_keys]
     if recorded_ws is not None and not args.workspace:
         args.workspace = str(root / recorded_ws)
         reapplied.append(f'--workspace "{recorded_ws}"')
-    if loaded is None and (root / ".sdlc").is_dir():
-        # The owner's ruling F2: a target with no record - every install before T705 -
-        # recorded its layers nowhere, and "none" would be an unknown written down as a
-        # fact. Each switch whose own files the planner names are all there is inferred,
-        # applied and recorded, and said; one with only some of them is said, not guessed.
-        # Only where the harness is already installed (review N2): a target with no
-        # .sdlc/ has no earlier layer, and a brand-new install skips the four plans.
-        found, partial = infer_install_options(root)
-        for key, rels in found:
-            dest = key.replace("-", "_")
-            if not getattr(args, dest):
-                setattr(args, dest, True)
-                inferred.append((key, rels))
-        for key, present in partial:
-            if not getattr(args, key.replace("-", "_")):
-                layer_notes.append(
-                    f"{INSTALL_OPTIONS_REL} did not exist and only some of the files "
-                    f"--{key} installs are here ({', '.join(present) or 'none readable'}), "
-                    f"so it was not inferred - pass --{key} to keep that layer")
+    layer_notes = [
+        f"{INSTALL_OPTIONS_REL} did not exist and only some of the files "
+        f"--{key} installs are here ({', '.join(present) or 'none readable'}), "
+        f"so it was not inferred - pass --{key} to keep that layer"
+        for key, present in partial]
     if not (root / ".git").exists() and not args.workspace:
         print(f"warning: {root} has no .git - per-row commits & rollback will be unavailable.")
 
