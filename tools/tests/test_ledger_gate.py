@@ -1133,7 +1133,11 @@ def _signed_entry_repo(tmp_path):
         encoding="utf-8")
     entry = {"schema_version": 1, "kind": "approval", "run_id": "r1", "gate": "G3",
              "verdict": "approve", "approver": "a@b.invalid", "at": "2026-01-01T00:00:00+00:00",
-             "artifacts": {}, "prev": ""}
+             "artifacts": {}, "prev": "",
+             # As `record` writes it since T707: an entry recording no mode is
+             # counted as a separation-of-duties limit, which is not this
+             # fixture's subject (signatures).
+             "self_approval": "allow"}
     entry["hash"] = A.entry_hash(entry)
     entry["signature"] = {"dsse": {"payload": "e30=", "payloadType": "x",
                                    "signatures": []},

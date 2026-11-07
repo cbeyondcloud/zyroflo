@@ -10,7 +10,12 @@ could already make:
 
 **integrity** — every run's chain walks, every approved artifact still hashes
 to the bytes that were approved, and every entry says it is about the run
-whose folder it sits in. Local truth about the working tree.
+whose folder it sits in. Local truth about the working tree. And (T707) no
+live approval recorded under `self_approval: forbid` names its own approver as
+the author - judged by the mode the ENTRY records (the recording client's claim),
+never today's policy. Approvals that cannot be judged are counted by cause, and
+approvals recorded under a weaker mode than today's policy are counted, each on
+one stated-limit line.
 
 **append-only** — every entry that existed at the base ref is still there, at
 the same position, byte for byte. This is the check the chain cannot make for
@@ -212,13 +217,17 @@ def run_ids(target: Path) -> list[str]:
     return found
 
 
-def integrity(target: Path) -> list[str]:
-    """Every chain break and every approved artifact that has moved, named.
+def integrity(target: Path, sod: dict | None = None) -> list[str]:
+    """Every chain break and every approved artifact that has moved, named - and
+    (T707) every live approval recorded under `self_approval: forbid` whose
+    recorded author is its own approver (the entry's own mode, not today's policy).
 
     Signatures are not judged here - see `limits`, which states what this check
     could not verify without making it a failure.
     """
     problems = []
+    # Once for the whole call, not once per run (review N4).
+    sod = sod or separation(target)
     for run_id in run_ids(target):
         for problem in approvals.verify_chain(target, run_id):
             problems.append(f"{run_id}: {problem}")
@@ -252,6 +261,15 @@ def integrity(target: Path) -> list[str]:
         for entry in approvals.live_entries(target, run_id):
             for problem in approvals.verify_artifacts_for(target, run_id, entry):
                 problems.append(f"{run_id}: {problem}")
+        # T707: a live approval recorded under `self_approval: forbid` whose
+        # recorded author is its approver. One with no mode or author to judge is
+        # counted in `limits`, not here.
+        # A run the handed-in report does not cover (created since it was
+        # computed) is judged here, exactly - never a KeyError, never read as clean.
+        report = (sod["runs"].get(run_id)
+                  or approvals.separation_report(target, run_id, sod.get("mode")))
+        for problem in report["problems"]:
+            problems.append(f"{run_id}: {problem}")
         try:
             for problem in ledger.verify_artifacts(target, run_id):
                 problems.append(f"{run_id}: artifact {problem}")
@@ -441,12 +459,17 @@ def _patterns(target: Path) -> tuple[list[str], str]:
     profile = Path(target) / ".sdlc" / guardrails.PROFILE_NAME
     if not profile.is_file():
         return default, ""
+    # T707 (review R2-4): the note names the file that actually failed - the policy
+    # is read first, then the profile's components - now that `main` prints it.
+    reading = (found_policy.name if (found_policy := guardrails.locate(target))
+               else guardrails.POLICY_NAME)
     try:
         rules = guardrails.load(target)
+        reading = profile.name
         found = [guardrails.branch_pattern(rules, c.get("vcs"))
                  for c in guardrails.components(target)]
     except Exception as exc:
-        return default, (f"{profile.name} could not be read ({type(exc).__name__}: "
+        return default, (f"{reading} could not be read ({type(exc).__name__}: "
                          f"{exc}), so the merge question is being asked about "
                          f"{default[0]} - which may not be what this repository "
                          f"publishes runs to")
@@ -466,13 +489,17 @@ def run_of_branch(branch: str, patterns: list[str] | None = None) -> str:
     return ""
 
 
-def limits(target: Path, base: str = "") -> list[str]:
+def limits(target: Path, base: str = "", sod: dict | None = None) -> list[str]:
     """What this check did NOT verify. Printed loudly; never fatal.
 
-    Two things speak here, for one reason. The second is a ledger the base ref
-    has never seen: `append_only` walks what the base remembers, so a run whose
-    folder is first committed on the branch is not judged clean by it - it is
-    not judged at all. Reporting nothing would make the harness's own ordinary
+    These speak here, for one reason: DSSE signatures with no crypto library to
+    check them; three separation-of-duties lines (T707, `separation`), each ONE
+    line for the whole check - live approvals that could not be judged, counted by
+    cause; live approvals recorded under `allow` while today's policy sets
+    `forbid`; and a policy that could not be read for that comparison; and a
+    ledger the base ref has never seen. Of the last: `append_only` walks what the
+    base remembers, so a run whose folder is first committed on the branch is not
+    judged clean by it - it is not judged at all. Reporting nothing would make the harness's own ordinary
     merge look checked; making it a problem would block every first merge. So
     it is the same third channel, naming the run.
 
@@ -512,8 +539,47 @@ def limits(target: Path, base: str = "") -> list[str]:
                 f"chain and the artifact pins WERE checked. Run `tools/sdlc/approve.py "
                 f"--verify --run {run_id}` where the harness is installed to "
                 f"check the signatures themselves")
+    # T707: separation of duties - ONE line per kind for the whole check, a count
+    # and where each is named, never a problem. Per entry per run, an old ledger
+    # and its archive would add lines without bound on every pull request.
+    sod = sod or separation(target)
+    # A remedy an adopter can run (review N2): `--json` works from the installed
+    # check; `approve.py` only where the harness is installed, said as the DSSE
+    # line above says it.
+    where = ("run this check with `--json` to list each entry under {key}, or run "
+             "`tools/sdlc/approve.py --verify --run <run>` where the harness is "
+             "installed to name one run's entries")
+    if sod["not_judged"]:
+        said.append(approvals.not_judged_summary(
+            sod["not_judged_causes"],
+            where.format(key="not_judged")))
+    if sod["weaker"]:
+        said.append(approvals.weaker_summary(sod["weaker"], where.format(key="weaker")))
+    if sod["unreadable"]:
+        said.append(sod["unreadable"])
     said += unseen_at_base(target, base) if base else []
     return said
+
+
+def separation(target: Path) -> dict:
+    """Separation of duties for every run, computed ONCE per check (T707):
+    `runs` maps each run id to its `approve.separation_report`; `not_judged` and
+    `weaker` flatten them as `<run>: entry N (<gate>)...` lines for `--json`;
+    `not_judged_causes` keeps each line's cause; `mode` is today's policy mode (None
+    when unreadable), for judging a run created since; `unreadable` is the limit line
+    when today's policy could not be read - never a problem."""
+    mode, unreadable = approvals.current_mode(target)
+    runs = {run_id: approvals.separation_report(target, run_id, mode)
+            for run_id in run_ids(target)}
+    causes = [(cause, f"{run_id}: {line}") for run_id, rep in runs.items()
+              for cause, line in rep["not_judged"]]
+    return {"runs": runs, "mode": mode, "not_judged_causes": causes,
+            "not_judged": [line for _, line in causes],
+            "weaker": [f"{run_id}: {line}" for run_id, rep in runs.items()
+                       for line in rep["weaker"]],
+            # Only when there is an approval the comparison was for.
+            "unreadable": unreadable if any(rep["approvals"] for rep in runs.values())
+                          else ""}
 
 
 def unseen_at_base(target: Path, base: str) -> list[str]:
@@ -632,14 +698,19 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
     # One limits list, handed to `append_only` rather than copied: what it could
     # not READ - a git command that failed - is stated in the same channel as
     # what it could not verify, and never returned as an empty result.
-    said = limits(target, base)
+    sod = separation(target)            # once, handed to both readers below
+    said = limits(target, base, sod)
     grew = append_only(target, base, said) if base else []
     report = {
         "target": str(target), "base": base, "branch": branch, "run": run_id,
         "harness": ledger.harness_version(), "runs": len(run_ids(target)),
         "patterns": patterns, "pattern_note": note,
-        "integrity": integrity(target),
+        "integrity": integrity(target, sod),
         "limits": said,
+        # T707: each live approval the separation-of-duties judge could not judge,
+        # which `limits` summarises in one line.
+        "not_judged": sod["not_judged"],
+        "weaker": sod["weaker"],
         "append_only": grew,
         "merge_ready": merge_ready(target, run_id) if run_id else [],
         # The hard gates the merge check actually demanded, for the scope line —
@@ -929,8 +1000,10 @@ def emit_check(out: Path, here: Path | None = None, commit: str = "") -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Verify the approval ledger the way CI must: intact, "
-                    "append-only against the base, and approved for merge (item 44).")
+        description="Verify the approval ledger the way CI must: intact (including no "
+                    "live approval recorded under self_approval: forbid by its own "
+                    "author), append-only against the base, and approved for merge "
+                    "(item 44). What it could not check is printed as not checked.")
     ap.add_argument("--ledger", action="store_true",
                     help="run the ledger gate (the mode this CLI exists for)")
     ap.add_argument("--target", metavar="DIR", default=".")
@@ -989,6 +1062,10 @@ def main(argv: list[str] | None = None) -> int:
                         ("merge-ready", report["merge_ready"])):
         for row in rows:
             print(f"  !! [{group}] {row}")
+    if report["pattern_note"]:
+        # Counted in `problems` (an unreadable profile or policy); printed here so a
+        # failure never reaches stdout without its reason.
+        print(f"  !! [configuration] {report['pattern_note']}")
     for row in report.get("limits", []):
         print(f"  .. [not checked] {row}")
     if report["problems"]:

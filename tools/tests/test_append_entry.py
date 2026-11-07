@@ -133,23 +133,25 @@ GOLDEN = [
     {"approver": "dev@example.invalid", "artifacts": {
         "40-impl/": "sha256:0ce82933297fad87dd89715db23095ef3a30b49d27a21afe7460c74a8b4e4f91",
         "design.md": "sha256:aab8f06fecd1c041e9a3d5a86114f9e522b546918db8503a045fe4a423b3642a"},
-     "at": AT, "forced": False, "gate": "G3", "gate_profile": "solo", "gate_regime": "solo",
+     "at": AT, "author": "author@example.invalid", "author_source": "flag",
+     "forced": False, "gate": "G3", "gate_profile": "solo", "gate_regime": "solo",
      "hard_gates": ["G2", "G4"],
-     "hash": "sha256:3241feec7723f9d3db5441ff37439db281319b62a0fa07f6cd0c3a0e99ad64e1",
+     "hash": "sha256:a9d1ca39fac01a6da7ac7d8829208be164c458d6e004687d2a36644f6985b568",
      "kind": "approval", "notes": "golden", "owed": [], "phase": "P4",
      "policy_source": "defaults", "prev": "", "resolved_gates": {"G2": "P3", "G4": "P7"},
-     "run_id": "r-z6-golden", "schema_version": 1, "signing": "none", "verdict": "reject"},
+     "run_id": "r-z6-golden", "schema_version": 1, "self_approval": "allow", "signing": "none", "verdict": "reject"},
     {"approver": "dev@example.invalid", "artifacts": {
         "40-impl/": "sha256:0ce82933297fad87dd89715db23095ef3a30b49d27a21afe7460c74a8b4e4f91",
         "design.md": "sha256:aab8f06fecd1c041e9a3d5a86114f9e522b546918db8503a045fe4a423b3642a"},
-     "at": AT, "forced": False, "gate": "G3", "gate_profile": "solo", "gate_regime": "solo",
+     "at": AT, "author": "author@example.invalid", "author_source": "flag",
+     "forced": False, "gate": "G3", "gate_profile": "solo", "gate_regime": "solo",
      "hard_gates": ["G2", "G4"],
-     "hash": "sha256:caf508e475431eff1254727142803425d50387375ddc927f566365eebfa47dd7",
+     "hash": "sha256:37513780d5023a6c6f9ed49c0d2e71768f97f1eeaa72612212f89b2bb7cb118a",
      "kind": "approval", "notes": "golden", "owed": [], "phase": "P4",
      "policy_source": "defaults",
-     "prev": "sha256:3241feec7723f9d3db5441ff37439db281319b62a0fa07f6cd0c3a0e99ad64e1",
+     "prev": "sha256:a9d1ca39fac01a6da7ac7d8829208be164c458d6e004687d2a36644f6985b568",
      "resolved_gates": {"G2": "P3", "G4": "P7"}, "run_id": "r-z6-golden",
-     "schema_version": 1, "signing": "none", "verdict": "approve"},
+     "schema_version": 1, "self_approval": "allow", "signing": "none", "verdict": "approve"},
 ]
 
 
@@ -173,7 +175,12 @@ def _on_this_platform(written: list[dict]) -> list[dict]:
 def test_record_writes_exactly_what_it_wrote_before(repo, monkeypatch):
     """Captured from `record` on main (e436475) before the refactor, time and run id
     fixed: a reject then an approve. Every field and both hashes must match (see
-    `_on_this_platform` for the one digest that depends on the platform)."""
+    `_on_this_platform` for the one digest that depends on the platform).
+
+    T707 re-captured it DELIBERATELY: the three authorship keys (`author`,
+    `author_source`, `self_approval`) are new in the body, so both hashes moved; every
+    other field is the literal pre-T707 value. `append_entry` without `author` still
+    writes its pre-T707 bytes (`test_t707_ledger_author`)."""
     monkeypatch.setattr(A, "_now", lambda: AT)
     st = L.create(repo, "requirement", "a change worth gating", run_id="r-z6-golden",
                   now=datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc))
