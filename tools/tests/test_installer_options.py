@@ -20,8 +20,13 @@ from tools.tests import _project  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
 REL = ".sdlc/install-options"
-HEADER = (b"# Written by sdlc-init.py: the opt-in layers every re-run applies. "
-          b"Delete a line to drop that layer.\n")
+HEADER = (b"# Written by sdlc-init.py: the tools and opt-in layers every re-run "
+          b"applies. Delete a layer's line to drop that layer. To drop a tool, remove "
+          b"it from the tools line here and from the tools: line of .sdlc/profile.yml "
+          b"- a deleted tools line is read back from that profile line. The standalone "
+          b"line is rewritten from the installer copy on every run.\n")
+#: T708: every install records its resolved tools; the fixtures resolve to claude.
+TOOLS = b'tools = ["claude"]\n'
 REVIEWER = ".claude/agents/sdlc-reviewer.md"
 
 
@@ -68,7 +73,7 @@ def _manifest(target: Path) -> dict:
 def test_a_plain_rerun_keeps_the_extras_current(tmp_path):
     t = _fixture(tmp_path / "py")
     _install(t, "--claude-extras")
-    assert _record(t) == HEADER + b"claude-extras = true\n"
+    assert _record(t) == HEADER + b"claude-extras = true\n" + TOOLS
     current = (t / REVIEWER).read_bytes()
     # An older release's copy of an extras file: a plain re-run must bring it current.
     (t / REVIEWER).write_bytes(b"# an older release's reviewer\n")
@@ -77,7 +82,7 @@ def test_a_plain_rerun_keeps_the_extras_current(tmp_path):
     assert (t / REVIEWER).read_bytes() == current, _text(proc)
     assert (t / "CLAUDE.md").read_bytes() == claude, "the extras section was dropped"
     assert "re-applied" in _text(proc) and "--claude-extras" in _text(proc)
-    assert _record(t) == HEADER + b"claude-extras = true\n"
+    assert _record(t) == HEADER + b"claude-extras = true\n" + TOOLS
 
 
 def test_the_record_is_byte_stable_and_lf(tmp_path):
@@ -90,7 +95,8 @@ def test_the_record_is_byte_stable_and_lf(tmp_path):
     lines = one.decode("ascii").splitlines()
     assert lines[0].startswith("# ") and len([x for x in lines if x.startswith("#")]) == 1
     assert lines[1:] == sorted(lines[1:]) == [
-        "claude-extras = true", "corpus-replay = true", "snapshot-cadence = true"]
+        "claude-extras = true", "corpus-replay = true", "snapshot-cadence = true",
+        'tools = ["claude"]']           # T708 (by design): the tools are recorded too
     # .sdlc/harness-version is untouched by the new record: still exactly one line.
     assert (t / ".sdlc" / "harness-version").read_bytes().count(b"\n") == 1
 
@@ -98,14 +104,15 @@ def test_the_record_is_byte_stable_and_lf(tmp_path):
 def test_per_run_flags_are_never_recorded(tmp_path):
     t = _fixture(tmp_path / "py")
     _install(t, "--force", "--single-component", "--tools", "claude,gemini")
-    assert _record(t) == HEADER
+    # T708 (by design): --tools is recorded now, as the resolved list.
+    assert _record(t) == HEADER + b'tools = ["claude", "gemini"]\n'
 
 
 def test_the_record_is_the_union_of_recorded_and_given(tmp_path):
     t = _fixture(tmp_path / "py")
     _install(t, "--claude-extras")
     _install(t, "--snapshot-cadence")
-    assert _record(t) == HEADER + b"claude-extras = true\nsnapshot-cadence = true\n"
+    assert _record(t) == HEADER + b"claude-extras = true\nsnapshot-cadence = true\n" + TOOLS
     assert (t / REVIEWER).is_file()
 
 
@@ -167,19 +174,19 @@ def test_a_hand_edit_that_drops_a_line_drops_the_layer(tmp_path):
     (t / REL).write_bytes(HEADER + b"snapshot-cadence = true\r\n")   # a CRLF editor
     proc = _install(t)
     # Fix round 1, F7: rewritten in the canonical form, byte for byte.
-    assert _record(t) == HEADER + b"snapshot-cadence = true\n"
+    assert _record(t) == HEADER + b"snapshot-cadence = true\n" + TOOLS
     assert "--claude-extras" not in _text(proc).split("re-applied")[-1].split("\n")[0]
     assert "re-applied" in _text(proc) and "--snapshot-cadence" in _text(proc)
     (t / REL).write_bytes(HEADER)
     _install(t)
-    assert _record(t) == HEADER
+    assert _record(t) == HEADER + TOOLS
 
 
 def test_the_manifest_reports_options(tmp_path):
     t = _fixture(tmp_path / "py")
     _install(t, "--claude-extras")
     m = _manifest(t)
-    assert m["options"] == {"claude-extras": True}
+    assert m["options"] == {"claude-extras": True, "tools": ["claude"]}
     assert REL in m["per_repo"] and REL not in m["files"]
     (t / REL).write_bytes(HEADER)
     assert _manifest(t)["options"] == {}
@@ -205,7 +212,7 @@ def test_no_record_and_no_flags_is_todays_tree_plus_the_record(tmp_path):
     before = set(_snapshot(a))
     _install(a)
     _install(b)
-    assert _record(a) == HEADER
+    assert _record(a) == HEADER + TOOLS
     added = sorted(set(_snapshot(a)) - before)
     added = [r for r in added if (a / r).is_file()]
     assert added == NO_FLAG_TREE, added
@@ -246,7 +253,7 @@ def test_a_workspace_inside_the_target_is_recorded_and_reapplied(tmp_path):
     t = tmp_path / "ws"
     ws = _workspace(t)
     _install(t, "--workspace", str(ws))
-    assert _record(t) == HEADER + b'workspace = "conf/sdlc-workspace.toml"\n'
+    assert _record(t) == HEADER + TOOLS + b'workspace = "conf/sdlc-workspace.toml"\n'
     profile = (t / ".sdlc" / "profile.yml").read_bytes()
     assert b"orders" in profile
     proc = _install(t)
@@ -254,7 +261,8 @@ def test_a_workspace_inside_the_target_is_recorded_and_reapplied(tmp_path):
     assert "0 file(s) written" in out, out
     assert not (t / ".sdlc" / "profile.yml.new").exists()
     assert (t / ".sdlc" / "profile.yml").read_bytes() == profile
-    assert _manifest(t)["options"] == {"workspace": "conf/sdlc-workspace.toml"}
+    assert _manifest(t)["options"] == {"tools": ["claude"],
+                                       "workspace": "conf/sdlc-workspace.toml"}
 
 
 def test_a_workspace_outside_the_target_is_not_recorded_and_said(tmp_path):
@@ -265,7 +273,7 @@ def test_a_workspace_outside_the_target_is_not_recorded_and_said(tmp_path):
     outside.write_bytes(b'schema_version = 1\nroot = "../ws/repos"\nname = ""\n'
                         b'profile = ""\n')
     proc = _install(t, "--workspace", str(outside))
-    assert _record(t) == HEADER
+    assert _record(t) == HEADER + TOOLS
     out = _text(proc)
     assert "outside the target" in out and REL in out, out
 
@@ -293,7 +301,7 @@ def test_an_outside_workspace_never_changes_the_record(tmp_path):
     t = tmp_path / "ws"
     ws = _workspace(t)
     _install(t, "--workspace", str(ws))
-    recorded = HEADER + b'workspace = "conf/sdlc-workspace.toml"\n'
+    recorded = HEADER + TOOLS + b'workspace = "conf/sdlc-workspace.toml"\n'
     assert _record(t) == recorded
     proc = _install(t, "--workspace", str(_outside(tmp_path)))
     assert _record(t) == recorded
@@ -318,14 +326,14 @@ def test_a_pre_t705_extras_install_is_inferred_kept_and_recorded(tmp_path):
     claude = (t / "CLAUDE.md").read_bytes()
     proc = _install(t)
     out = _text(proc)
-    assert _record(t) == HEADER + b"claude-extras = true\n", out
+    assert _record(t) == HEADER + b"claude-extras = true\n" + TOOLS, out
     assert (t / REVIEWER).read_bytes() == current
     assert (t / "CLAUDE.md").read_bytes() == claude
     notes = [line for line in out.splitlines() if "was inferred" in line]
     assert len(notes) == 1 and "--claude-extras" in notes[0], out
     for rel in EXTRAS_ONLY:
         assert rel in notes[0], (rel, notes[0])
-    assert _manifest(t)["options"] == {"claude-extras": True}
+    assert _manifest(t)["options"] == {"claude-extras": True, "tools": ["claude"]}
 
 
 def test_a_pre_t705_plain_install_records_none(tmp_path):
@@ -333,7 +341,7 @@ def test_a_pre_t705_plain_install_records_none(tmp_path):
     _install(t)
     (t / REL).unlink()
     proc = _install(t)
-    assert _record(t) == HEADER
+    assert _record(t) == HEADER + TOOLS
     assert "inferred" not in _text(proc)
 
 
@@ -344,7 +352,7 @@ def test_a_partial_layer_is_named_not_inferred(tmp_path):
     (t / ".claude" / "agents" / "sdlc-security.md").unlink()
     proc = _install(t)
     out = " ".join(_text(proc).split())
-    assert _record(t) == HEADER
+    assert _record(t) == HEADER + TOOLS
     assert "only some of the files --claude-extras installs" in out, out
     assert "pass --claude-extras" in out
 
@@ -373,7 +381,8 @@ def test_a_recorded_workspace_that_is_gone_is_refused_by_the_record(tmp_path):
         proc = _run("--target", str(t), "--no-graph", *argv)
         err = proc.stderr.decode("utf-8", "replace")
         assert proc.returncode == 1, _text(proc)
-        assert f"{REL} line 2" in err and "conf/sdlc-workspace.toml" in err, err
+        # T708 (by design): the tools line sorts first, so the workspace is on line 3.
+        assert f"{REL} line 3" in err and "conf/sdlc-workspace.toml" in err, err
         assert "remove it" in err and len(err.strip().splitlines()) == 1, err
         assert "workspace.example.toml" not in err, err
     (t / REL).write_bytes(HEADER + b'workspace = "conf"\n')        # a directory
@@ -462,10 +471,10 @@ def test_hand_edits_round_trip_to_the_canonical_form(tmp_path):
     (t / REL).write_bytes(b"\n# my own note\n\n  snapshot-cadence   =   true   # weekly\n"
                           b"\n\tclaude-extras=true\n" + b"\n" * 5000)
     _install(t)
-    assert _record(t) == HEADER + b"claude-extras = true\nsnapshot-cadence = true\n"
+    assert _record(t) == HEADER + b"claude-extras = true\nsnapshot-cadence = true\n" + TOOLS
     (t / REL).write_bytes(HEADER + b"# claude-extras = true\nsnapshot-cadence = true\n")
     _install(t)
-    assert _record(t) == HEADER + b"snapshot-cadence = true\n"
+    assert _record(t) == HEADER + b"snapshot-cadence = true\n" + TOOLS
     for bad in (b"Claude-Extras = true\n", b"claude-extras = True\n",
                 b"claude-extras = true true\n", b'workspace = "a" "b"\n'):
         (t / REL).write_bytes(HEADER + bad)
@@ -506,7 +515,7 @@ def test_a_stale_recorded_workspace_yields_to_a_given_one(tmp_path):
     moved.write_bytes(ws.read_bytes().replace(b'"../repos"', b'"../repos"'))
     ws.unlink()
     _install(t, "--workspace", str(moved))
-    assert _record(t) == HEADER + b'workspace = "conf2/sdlc-workspace.toml"\n'
+    assert _record(t) == HEADER + TOOLS + b'workspace = "conf2/sdlc-workspace.toml"\n'
 
 
 def _extras_by_hand(t: Path) -> None:
@@ -520,7 +529,7 @@ def test_a_brand_new_install_never_infers(tmp_path):
     t = _fixture(tmp_path / "py")
     _extras_by_hand(t)
     proc = _install(t)
-    assert _record(t) == HEADER, _text(proc)
+    assert _record(t) == HEADER + TOOLS, _text(proc)
     assert "inferred" not in _text(proc)
 
 
@@ -548,7 +557,7 @@ def test_a_blocked_inferred_layer_says_recorded_not_applied(tmp_path):
     out = " ".join(_text(_install(t)).split())
     assert "--snapshot-cadence recorded, not applied (blocked)" in out, out
     assert "applied and recorded" not in out, out
-    assert _record(t) == HEADER + b"snapshot-cadence = true\n"
+    assert _record(t) == HEADER + b"snapshot-cadence = true\n" + TOOLS
 
 
 def test_a_stale_recorded_workspace_is_said_when_an_outside_one_is_given(tmp_path):
@@ -560,7 +569,7 @@ def test_a_stale_recorded_workspace_is_said_when_an_outside_one_is_given(tmp_pat
     ws.unlink()
     proc = _install(t, "--workspace", str(_outside(tmp_path)))
     out = " ".join(_text(proc).split())
-    assert _record(t) == HEADER + b'workspace = "conf/sdlc-workspace.toml"\n'
+    assert _record(t) == HEADER + TOOLS + b'workspace = "conf/sdlc-workspace.toml"\n'
     assert "which a run without --workspace applies" not in out, out
     assert ('still records workspace "conf/sdlc-workspace.toml", whose file is no longer '
             'there - fix that line to name the workspace file, or remove it') in out, out

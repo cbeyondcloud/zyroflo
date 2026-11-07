@@ -68,10 +68,17 @@ HARNESS_VERSION_REL = ".sdlc/harness-version"
 #: T705: the opt-in layers an install ran with, TRACKED beside the version record, so a
 #: later run - this repository's owner, or a caller upgrading many repositories - applies
 #: them without being told which to pass. Written by every install; `--manifest` reports
-#: it under `options`.
+#: it under `options`. T708: it records the install's resolved tools too, and whether
+#: the installer copy it ran from lacked the harness generators (`standalone`).
 INSTALL_OPTIONS_REL = ".sdlc/install-options"
-INSTALL_OPTIONS_HEADER = ("# Written by sdlc-init.py: the opt-in layers every re-run "
-                          "applies. Delete a line to drop that layer.")
+#: Review finding 2: each remedy it names is one that works - a deleted tools line is
+#: read back from the profile, and the standalone line is rewritten every run.
+INSTALL_OPTIONS_HEADER = ("# Written by sdlc-init.py: the tools and opt-in layers every "
+                          "re-run applies. Delete a layer's line to drop that layer. To "
+                          "drop a tool, remove it from the tools line here and from the "
+                          "tools: line of .sdlc/profile.yml - a deleted tools line is read "
+                          "back from that profile line. The standalone line is rewritten "
+                          "from the installer copy on every run.")
 #: What `--manifest` puts where an installed file names a harness clone's absolute
 #: path, so the same install digests the same from any clone on any machine.
 HARNESS_TOKEN = "<HARNESS>"
@@ -2262,7 +2269,7 @@ def config_tool_files(tool: str, body: str, description: str) -> list[tuple[str,
 
 def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
                 *, with_graph: bool, extras_on: bool,
-                harness_side: bool = True) -> list[dict]:
+                harness_side: bool = True, standalone: bool = False) -> list[dict]:
     """Every per-tool entry point plus the instruction-file blocks, as plan_ops.
 
     One function, called once when the graph is already there and twice when it
@@ -2271,13 +2278,15 @@ def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
 
     `harness_side=False` (T706, paths only): the config skill is planned whether or
     not this clone ships its engine, with empty text, as an install from a full clone
-    would plan it."""
+    would plan it. `standalone=True` (T708): not planned, as a copy without the engine
+    plans it, whatever clone this is."""
     ops: list[dict] = []
     g_desc = g_body = addendum = ""
     if with_graph:
         g_desc, g_body = graph_skill(harness_root())
         addendum = graph_addendum(harness_root())
-    config = config_skill(harness_root()) or (None if harness_side else ("", ""))
+    config = (None if standalone
+              else config_skill(harness_root()) or (None if harness_side else ("", "")))
     codex_body = ""
     for tool in tools:
         body = skill_body
@@ -3526,13 +3535,27 @@ LEDGER_CHECK_REL = ".sdlc/ledger_check.py"
 LEDGER_WORKFLOW_REL = ".github/workflows/sdlc-ledger.yml"
 
 
+def no_ledger_emitter_reason(harness: Path | None = None) -> str | None:
+    """Why `harness` cannot generate the ledger check, or None when it can: the harness
+    side of `no_ledger_gate_reason`, asked alone by `copy_is_standalone` (T708)."""
+    harness = Path(harness) if harness is not None else harness_root()
+    return None if (harness / LEDGER_EMITTER).is_file() else _NO_LEDGER_EMITTER
+
+
+_NO_LEDGER_EMITTER = (f"this is a standalone sdlc-init.py with no "
+                      f"{LEDGER_EMITTER.as_posix()} beside it, and the check is generated "
+                      f"from that source")
+
+
 def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
                           github_planned: bool = False,
-                          harness_side: bool = True) -> str | None:
+                          harness_side: bool = True,
+                          standalone: bool = False) -> str | None:
     """Why this install ships no CI ledger gate, or None when it does.
 
     `harness_side=False` asks the repository's side alone (T706): whether an install
-    from a full harness clone ships it, whatever clone is asking.
+    from a full harness clone ships it, whatever clone is asking. `standalone=True`
+    (T708): as an installer copy without the emitter answers, whatever clone is asking.
 
     Split from the doing of it for `no_chain_reason`'s reason: a dry run has to be able
     to report the same decision, and a gate that silently fails to install is the exact
@@ -3542,10 +3565,10 @@ def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
     one (T518). The same command run twice must leave one tree, and deciding on the tree
     as found installed the gate only on the second run.
     """
-    harness = Path(harness) if harness is not None else harness_root()
-    if harness_side and not (harness / LEDGER_EMITTER).is_file():
-        return (f"this is a standalone sdlc-init.py with no {LEDGER_EMITTER.as_posix()} "
-                f"beside it, and the check is generated from that source")
+    if harness_side and (reason := no_ledger_emitter_reason(harness)):
+        return reason
+    if standalone:
+        return _NO_LEDGER_EMITTER
     if not github_planned and not (root / ".github").is_dir():
         # The way through, in the cadence jobs' words (batch-6 review B6-3).
         return (f"{root} has no .github/ - the gate is a GitHub Actions workflow. If "
@@ -3605,6 +3628,25 @@ def no_pipeline_diagram_reason(harness: Path | None = None) -> str | None:
                 f"{PIPELINE_RENDERER.as_posix()} beside it, and the diagram is drawn "
                 f"by that tool")
     return None
+
+
+def copy_is_standalone(harness: Path | None = None) -> bool:
+    """Whether the installer copy at `harness` lacks all three harness generators (T708,
+    the owner's Q3 (a)) - the two shipped shapes: a standalone `sdlc-init.py` beside
+    `sdlc_templates/` (what `fetch_harness` copies), and a bundle. The ONE decision: an
+    install records it as `standalone = true` AND plans with it (`plan_install_ops`'s
+    `standalone`), and `expected_rels` plans with the recorded value, so the record never
+    states a skip its own run did not make (review finding 1).
+
+    Asked through the planner's own questions - the config skill's, the pipeline
+    diagram's and the ledger emitter's - so no second list of paths exists to drift from
+    them. A copy holding only some of them is not a shipped shape: it is not standalone,
+    so a reader plans it as a full clone and over-reports the paths it cannot generate,
+    never hiding a deleted file it does rewrite (the safe direction)."""
+    harness = Path(harness) if harness is not None else harness_root()
+    return (config_skill(harness) is None
+            and no_pipeline_diagram_reason(harness) is not None
+            and no_ledger_emitter_reason(harness) is not None)
 
 
 def write_pipeline_diagram(root: Path, harness: Path | None = None) -> str:
@@ -4609,11 +4651,25 @@ def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:
 #: The switches whose PRESENCE changes which files an install writes, measured on dry
 #: runs (T705): `--claude-extras` adds the agents, hooks and settings.json and the
 #: extras section of CLAUDE.md's block; each cadence flag adds its workflow. Every other
-#: switch is per-run or already recorded elsewhere: `--tools` is re-detected from the
-#: files an install leaves and the profile's `tools:`, `--single-component` is recorded
-#: in profile.yml (T244), and `--force`, `--no-graph`, `--estate`, `--from-snapshot` and
-#: `--dry-run` describe one run. Keys are the flags' own names, without the dashes.
+#: switch is per-run or already recorded elsewhere: `--tools` is recorded on its own line
+#: (`RECORDED_TOOLS`, T708), `--single-component` is recorded in profile.yml (T244), and
+#: `--force`, `--no-graph`, `--estate`, `--from-snapshot` and `--dry-run` describe one
+#: run. Keys are the flags' own names, without the dashes.
 RECORDED_SWITCHES = ("claude-extras", FLAG_CORPUS_REPLAY[2:], FLAG_SNAPSHOT_CADENCE[2:])
+#: T708: the tools the install resolved - never `auto` or `all` - as a JSON array of
+#: double-quoted strings (which is also a TOML array; the TOML-only spellings - single
+#: quotes, a trailing comma - are refused by name). Measured before T708: a plain re-run re-detected them, adding
+#: copilot to a `--tools claude` install as soon as a `.github/` directory appeared, and
+#: `--manifest`'s `expected_missing` planned with that detection. A plain run now uses
+#: exactly this list (`run_tools`).
+RECORDED_TOOLS = "tools"
+#: T708: `true` when the installer copy the install ran from lacked all three harness
+#: generators (`copy_is_standalone`) - a standalone `sdlc-init.py` with `sdlc_templates/`,
+#: or a bundle - so it skipped the config skill, the pipeline diagram and the ledger gate.
+#: A partial copy is not a shipped shape and records no such line.
+#: Written only when true, from the fact each run, never from a flag; `expected_missing`
+#: plans with it, so a reader does not expect what that copy could not generate.
+RECORDED_STANDALONE = "standalone"
 #: `--workspace` is recorded too: a re-run without it re-derives profile.yml and
 #: .sdlc/.gitignore for one repository and stages them as `.new` copies - a different set
 #: of files written. Stored relative to the target, posix, and only when inside it.
@@ -4624,6 +4680,7 @@ RECORDED_WORKSPACE = "workspace"
 _OPTION_LINE = re.compile(r"^([a-z][a-z-]*)[ \t]*=[ \t]*(.*)$")
 _SWITCH_VALUE = re.compile(r"true[ \t]*(?:#.*)?")
 _STRING_VALUE = re.compile(r'("(?:[^"\\\n]|\\.)*")[ \t]*(?:#.*)?')
+_LIST_VALUE = re.compile(r'(\[[^\]\n]*\])[ \t]*(?:#.*)?')
 
 
 class InstallOptionsError(Exception):
@@ -4674,6 +4731,36 @@ def _recorded_workspace(root: Path, value: str, where: str, n: int) -> str:
     return rel
 
 
+def _recorded_tools(value: str, where: str, n: int) -> list[str]:
+    """The tools line's list (T708): a JSON array of known tool names, each once. Any
+    other value is refused by its line - a list read past would install a different set
+    of tools in silence."""
+    m = _LIST_VALUE.fullmatch(value)
+    try:
+        tools = json.loads(m.group(1)) if m else None
+    except ValueError:
+        tools = None
+    problem = None
+    # Review finding 5a: two TOML spellings this record does not read, named as such.
+    if m and tools is None and "'" in m.group(1):
+        problem = "it quotes names in single quotes - write them in double quotes"
+    elif m and tools is None and re.search(r",\s*\]", m.group(1)):
+        problem = "it ends in a trailing comma - remove it"
+    elif not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+        problem = "it is not a list of double-quoted names"
+    elif not tools:
+        problem = "it lists no tools"
+    elif bad := [t for t in tools if t not in ALL_TOOLS]:
+        problem = f"{', '.join(map(repr, bad))} is not a tool this installer knows"
+    elif len(set(tools)) != len(tools):
+        problem = "it names a tool twice"
+    if problem:
+        raise InstallOptionsError(
+            f'{where}: tools takes a list of the tools to install, each once, from '
+            f'{", ".join(ALL_TOOLS)} - tools = ["claude"] - and {problem}', line=n)
+    return tools
+
+
 def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
     """(the options `text` records, the line each one is on). Anything that is not a
     record this installer writes - an unknown name, a value it never writes, a repeated
@@ -4681,7 +4768,8 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
     a layer unapplied in silence."""
     options: dict = {}
     lines: dict[str, int] = {}
-    known = sorted((*RECORDED_SWITCHES, RECORDED_WORKSPACE))
+    known = sorted((*RECORDED_SWITCHES, RECORDED_WORKSPACE, RECORDED_TOOLS,
+                    RECORDED_STANDALONE))
     for n, line in enumerate(text.removeprefix(_BOM).splitlines(), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -4700,6 +4788,14 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
             options[key] = True
         elif key == RECORDED_WORKSPACE:
             options[key] = _recorded_workspace(root, value, where, n)
+        elif key == RECORDED_TOOLS:
+            options[key] = _recorded_tools(value, where, n)
+        elif key == RECORDED_STANDALONE:
+            if not _SWITCH_VALUE.fullmatch(value):
+                raise InstallOptionsError(f"{where}: standalone takes only `true` - every "
+                                          f"run rewrites it from the installer copy it "
+                                          f"runs from", line=n)
+            options[key] = True
         else:
             raise InstallOptionsError(f"{where} names {key!r}, which this installer does "
                                       f"not record (it records {', '.join(known)})",
@@ -4816,15 +4912,61 @@ def applied_layers(root: Path, loaded: tuple[dict, dict[str, int]] | None,
     return on, reapplied, inferred, not_inferred
 
 
+def run_tools(root: Path, recorded: dict, given: str | None,
+              listed: list[str] | None = None) -> tuple[list[str], list[str], str | None]:
+    """(the tools a run installs, in ALL_TOOLS order; the detected tools it leaves out;
+    the file its base list came from, or None when detection gave it). The ONE decision
+    of a run's tools (T708): `main` applies it and `--manifest`'s `expected_missing`
+    plans with it, so the two cannot disagree about which tools a plain re-run installs.
+
+    `given` is `--tools` as passed: None (not given), "auto" or "all"; a list is passed
+    parsed and checked, as `listed` (review finding 5b: a raw list in `given` is refused
+    with ValueError, never read as an empty one). The base is the recorded tools line; for a record with none - every
+    install before T708 - the kept profile's `tools: [...]` line, which every installer
+    has written from its resolved list (the owner's ruling Q2). Then: not given -> exactly
+    the base, and detection only where there is no base; `auto` -> the base and the
+    detected tools; `all` -> every tool; a list -> the base and the list. A run never
+    drops a tool: to drop one, delete it from the line and re-run (its files stay)."""
+    base = recorded.get(RECORDED_TOOLS)
+    source: str | None = INSTALL_OPTIONS_REL
+    if base is None:
+        kept = _kept_tools(root)
+        base = [t for t in ALL_TOOLS if t in kept] or None
+        source = ".sdlc/profile.yml" if base else None
+    if listed is not None:
+        chosen = set(base or ()) | set(listed)
+    elif given == "all":
+        chosen = set(ALL_TOOLS)
+    elif given == "auto":
+        chosen = set(base or ()) | set(detect_tools(root))
+    elif given is None:
+        chosen = set(base) if base else set(detect_tools(root))
+    else:
+        raise ValueError(f"run_tools: --tools {given!r} must be passed parsed, as `listed`")
+    chosen.add("claude")                 # the baseline, as every --tools list has it
+    tools = [t for t in ALL_TOOLS if t in chosen]
+    unapplied = ([t for t in detect_tools(root) if t not in chosen]
+                 if given is None and listed is None and base else [])
+    return tools, unapplied, source
+
+
 def install_options_for(root: Path, *, claude_extras: bool, corpus_replay: bool,
                         snapshot_cadence: bool, workspace_path: Path | None,
-                        recorded_workspace: str | None = None) -> tuple[dict, str]:
+                        recorded_workspace: str | None = None,
+                        tools: list[str] | None = None,
+                        standalone: bool = False) -> tuple[dict, str]:
     """(the record an install with these layers writes, a NOTE or ""). A workspace file
     outside the target is applied for this run and never changes the record (the owner's
-    ruling F1): a recorded workspace line stays, and the NOTE says which."""
+    ruling F1): a recorded workspace line stays, and the NOTE says which. `tools` and
+    `standalone` (T708): the run's resolved tools, and whether its installer copy lacks
+    the harness generators - recorded as what this run used, never as asked."""
     on = {"claude-extras": claude_extras, FLAG_CORPUS_REPLAY[2:]: corpus_replay,
           FLAG_SNAPSHOT_CADENCE[2:]: snapshot_cadence}
     options: dict = {key: True for key, value in on.items() if value}
+    if tools:
+        options[RECORDED_TOOLS] = [t for t in ALL_TOOLS if t in tools]
+    if standalone:
+        options[RECORDED_STANDALONE] = True
     note = ""
     rel = workspace_record(root, workspace_path) if workspace_path is not None else None
     if workspace_path is not None and rel is None:
@@ -4857,7 +4999,8 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
                      corpus_replay: bool, snapshot_cadence: bool,
                      installed_digests: dict[str, str],
                      install_options: dict | None = None,
-                     paths_only: bool = False) -> tuple[list[dict], str | None]:
+                     paths_only: bool = False,
+                     standalone: bool = False) -> tuple[list[dict], str | None]:
     """(every write an install owes, why there is no ledger gate or None).
 
     The ONE computation of what an install owns (T704): `install` - a dry run
@@ -4868,7 +5011,11 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
     `paths_only` (T706): the ops' PATHS as an install from a full harness clone plans
     them, whatever clone this is - the conditions on the reading clone (the ledger
     emitter, the config engine, a github.com `origin`) are not asked, and the ledger
-    check is not generated. Its content and statuses are not an install's."""
+    check is not generated. Its content and statuses are not an install's.
+
+    `standalone` (T708): plan as an installer copy WITHOUT the harness generators plans -
+    no config skill, no ledger gate - whatever clone this is. `expected_rels` passes the
+    record's `standalone`, so a reader expects what the recorded copy wrote."""
     ops: list[dict] = []
     # Shared harness data (.sdlc/)
     ops.append(plan_op(root, ".sdlc/profile.yml", render_profile(profile, tools),
@@ -4921,7 +5068,7 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
     ops.append(record_op)
     surfaces = surface_ops(root, tools, skill_body, description,
                            with_graph=with_graph, extras_on=extras_on,
-                           harness_side=not paths_only)
+                           harness_side=not paths_only, standalone=standalone)
     extras = claude_extras_ops(root, profile) if extras_on else []
     # T518: the three GitHub Actions jobs below are decided on the tree this run
     # LEAVES. Copilot's instructions live in `.github/`, so a run that writes them
@@ -4933,7 +5080,8 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
     # decision, because either alone is a lie - a check nothing runs, or a required job
     # whose script is absent.
     ledger_skipped = no_ledger_gate_reason(root, github_planned=github_planned,
-                                           harness_side=not paths_only)
+                                           harness_side=not paths_only,
+                                           standalone=standalone)
     if not ledger_skipped:
         # Paths only (T706): the two rels, never the emitter's spawn, so a clone with
         # no emitter plans what a full clone's install writes.
@@ -4964,14 +5112,19 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             snapshot_cadence: bool = False, reapplied: list[str] | None = None,
             layer_notes: list[str] | None = None,
             recorded_workspace: str | None = None,
-            inferred: list[tuple[str, list[str]]] | None = None) -> int:
+            inferred: list[tuple[str, list[str]]] | None = None,
+            unapplied_tools: list[str] | None = None,
+            tools_source: str | None = None) -> int:
     """`reapplied`: the recorded layers `main` applied that the command line did not
     give (T705), named in a NOTE; `layer_notes`: one NOTE per layer NOT inferred for a
     target with no record because only some of its files are there; `inferred`: (switch, its
     files) for each layer `main` inferred, named in a NOTE whose verb says what this run
     did with it (review N3); `recorded_workspace`:
     the workspace line the record held, kept when the run's own workspace is outside the
-    target. The record this install writes is otherwise the layers it was handed."""
+    target. The record this install writes is otherwise the layers it was handed, with
+    `tools` and whether this installer copy lacks the harness generators (T708).
+    `unapplied_tools`: the detected tools a plain run left out because `tools_source`
+    records the tool set (`run_tools`), named in a NOTE with the remedy."""
     # T442: the pre-INIT prerequisite, FIRST - before any template is rendered or
     # any file is written, so a stopped INIT leaves nothing half-installed.
     project, stop = project_gate(root, workspace, dry_run)
@@ -5217,10 +5370,14 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     extras_skipped = claude_extras and "claude" not in tools
     # T705: recorded as asked, not as applied here - `--claude-extras` is a layer the
     # repository chose, and a run whose tool set lacks Claude Code does not unchoose it.
+    # T708: the copy this run is installed FROM - one decision, recorded and planned with,
+    # so a reader of the target expects what this copy generated. A partial copy is not
+    # standalone; its plan still asks each generator itself (`harness_side`).
+    standalone = copy_is_standalone()
     install_options, options_note = install_options_for(
         root, claude_extras=claude_extras, corpus_replay=corpus_replay,
         snapshot_cadence=snapshot_cadence, workspace_path=workspace_path,
-        recorded_workspace=recorded_workspace)
+        recorded_workspace=recorded_workspace, tools=tools, standalone=standalone)
     # A dry run plans them anyway and says when they land: it describes the whole
     # command, and hiding the graph surfaces would describe a smaller one.
     ops, ledger_skipped = plan_install_ops(
@@ -5228,7 +5385,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         workspace=workspace, workspace_path=workspace_path,
         with_graph=graph_on and (dry_run or not defer_graph), extras_on=extras_on,
         corpus_replay=corpus_replay, snapshot_cadence=snapshot_cadence,
-        installed_digests=installed_digests, install_options=install_options)
+        installed_digests=installed_digests, install_options=install_options,
+        standalone=standalone)
 
     # T517: every write this run owes is asked before the first is made. A write that
     # failed midway raised a traceback at exit 1 - the code kept for "nothing was
@@ -5335,6 +5493,15 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     if reapplied:
         print(f"\n  NOTE: re-applied what {INSTALL_OPTIONS_REL} records: "
               f"{', '.join(reapplied)}. To drop a layer, delete its line there and re-run.")
+    if unapplied_tools:
+        # T708, the owner's ruling Q1: a plain run installs exactly the recorded tools, and
+        # a tool the repository now looks like it uses is said, never dropped in silence.
+        names = ", ".join(unapplied_tools)
+        print(f"\n  NOTE: this repository now looks like it uses {names}, which "
+              f"the {'tools' if tools_source == INSTALL_OPTIONS_REL else 'tools:'} line "
+              f"of {tools_source} does not list, so this run did not install "
+              f"{'it' if len(unapplied_tools) == 1 else 'them'} - re-run with --tools auto "
+              f"to add every detected tool, or name it with --tools.")
     blocked_rels = {o["rel"] for o in ops if o["status"] == "blocked"}
     for key, rels in inferred or ():
         # Review N3: the verb is what happened. A layer whose own file this run could not
@@ -5508,7 +5675,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     if defer_graph:
         if (root / GRAPH_OUT / "graph.jsonl").is_file():
             late = [o for o in surface_ops(root, tools, skill_body, description,
-                                           with_graph=True, extras_on=extras_on)
+                                           with_graph=True, extras_on=extras_on,
+                                           standalone=standalone)
                     if o["status"] not in ("unchanged", "blocked")]
             if late:
                 print("\n  graph surfaces (written now the graph exists):")
@@ -5755,16 +5923,20 @@ def expected_rels(root: Path) -> set[str] | None:
     gate (`project_gate`: `sdlc-project.toml` missing, blank or malformed) that stops it
     - each a run that stops before it plans.
 
-    Planned by `plan_install_ops` with the inputs that run hands it: `--tools auto`'s
-    `detect_tools`, the layers `applied_layers` gives a run with no switch on its
-    command line (recorded, or inferred for a target with no record), the recorded
-    workspace, and the graph surfaces only where a graph is there - the first-pass plan
-    `install` writes, since a graph that arrives during the run is taught only after its
-    build succeeds. `paths_only`, so the set does not depend on the reading clone
-    (T704-R5): a standalone copy or a bundle names what a full clone's install writes,
-    the ledger gate, the config skill and the pipeline diagram (drawn after the plan)
-    included. A blocked op names a file the run cannot write, so it is left out. The
-    profile shapes no path, so `_MANIFEST_PROFILE` stands in for it."""
+    Planned by `plan_install_ops` with the inputs that run hands it: the tools
+    `run_tools` gives a run with no `--tools` (the recorded tools; for a record with none,
+    the kept profile's `tools:` line, and detection only where that cannot be read -
+    T708), the layers `applied_layers` gives a run with no switch on its command line
+    (recorded, or inferred for a target with no record), the recorded workspace, and the
+    graph surfaces only where a graph is there - the first-pass plan `install` writes,
+    since a graph that arrives during the run is taught only after its build succeeds.
+    `paths_only`, so the set does not depend on the reading clone (T704-R5): a standalone
+    copy or a bundle names what a full clone's install writes, the ledger gate, the config
+    skill and the pipeline diagram (drawn after the plan) included - unless the record
+    says `standalone` (T708): the install came from a copy that generates none of those
+    three, so none is expected, whoever reads. A blocked op names a file the run cannot
+    write, so it is left out. The profile shapes no path, so `_MANIFEST_PROFILE` stands
+    in for it."""
     try:
         loaded = load_install_options(root)
     except InstallOptionsError:
@@ -5787,7 +5959,9 @@ def expected_rels(root: Path) -> set[str] | None:
         _, stop = project_gate(root, workspace, dry_run=True)
     if stop:
         return None
-    tools = detect_tools(root)
+    # T708: the tools a plain run uses - `run_tools`, the one decision `main` applies.
+    tools = run_tools(root, recorded, None)[0]
+    standalone = recorded.get(RECORDED_STANDALONE) is True
     body, description = _planner_inputs()
     ops, _ = plan_install_ops(
         root, dict(_MANIFEST_PROFILE), tools, body, description, force=True,
@@ -5796,9 +5970,12 @@ def expected_rels(root: Path) -> set[str] | None:
         extras_on=on["claude-extras"] and "claude" in tools,
         corpus_replay=on[FLAG_CORPUS_REPLAY[2:]],
         snapshot_cadence=on[FLAG_SNAPSHOT_CADENCE[2:]],
-        installed_digests={}, install_options=recorded, paths_only=True)
-    # The diagram is drawn after the plan, by every install from a full clone.
-    return {op["rel"] for op in ops if op["status"] != "blocked"} | {PIPELINE_DIAGRAM_REL}
+        installed_digests={}, install_options=recorded, paths_only=True,
+        standalone=standalone)
+    # The diagram is drawn after the plan, by every install from a full clone - and by
+    # none from a copy the record says lacks the generators (T708).
+    return ({op["rel"] for op in ops if op["status"] != "blocked"}
+            | (set() if standalone else {PIPELINE_DIAGRAM_REL}))
 
 
 def manifest(root: Path) -> dict:
@@ -5950,8 +6127,22 @@ def main(argv: list[str] | None = None) -> int:
                "that file is inside the target - and every later run applies the "
                "recorded layers together with the ones it is given. A run never "
                "drops a layer: to drop one, delete its line from that file and "
-               "re-run. A record this installer cannot read is refused by name "
-               "(exit 1).")
+               "re-run. The same file records the tools the install resolved (`tools = "
+               "[...]`): a run without --tools installs exactly those, and names a "
+               "detected tool it leaves out; --tools auto adds the detected ones, and a "
+               "list or 'all' adds to them. To drop a tool, remove it from the tools "
+               "line and from the tools: line of .sdlc/profile.yml, then re-run (its "
+               "files stay); a deleted tools line is read back from that profile line. "
+               "An install from an installer copy that lacks all three harness "
+               "generators (the config engine, the pipeline renderer and the ledger "
+               "emitter: a standalone sdlc-init.py beside sdlc_templates/, or a bundle) "
+               "records `standalone = true`, rewritten from the copy every run; a "
+               "partial copy is not a shipped shape, records no such line and is read as "
+               "a full clone. A repository installed by a standalone copy before this "
+               "release has no such line, so --manifest expects the config skill and the "
+               "pipeline diagram there - and the ledger gate too, where the target has "
+               "a .github/ directory - until its next install. A "
+               "record this installer cannot read is refused by name (exit 1).")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
     ap.add_argument("--workspace", metavar="TOML",
                     help="install for a multi-component workspace described by a filled-in "
@@ -5959,8 +6150,12 @@ def main(argv: list[str] | None = None) -> int:
                          "Supplies WHICH components exist; --target still says where the "
                          "harness config is written. Recorded when the file is inside "
                          "the target, so later runs keep it")
-    ap.add_argument("--tools", default="auto",
-                    help="comma list of tools, 'auto' (detect), or 'all'")
+    ap.add_argument("--tools", default=None,
+                    help="comma list of tools, 'auto' (detect), or 'all'. Recorded in "
+                         ".sdlc/install-options: without --tools a run installs exactly "
+                         "the recorded tools (a first install, or one with none recorded "
+                         "and no profile tools: line, detects them); 'auto' adds the "
+                         "detected ones, and a list or 'all' adds to the recorded ones")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
     ap.add_argument("--single-component", action="store_true",
                     help="install a repository built from several units as ONE "
@@ -6005,10 +6200,15 @@ def main(argv: list[str] | None = None) -> int:
                          "the files that depend on the repository by design (`per_repo`: "
                          "profile.yml, pipeline.md, settings.json, install-options), owned "
                          "paths absent under any tools and layers (`missing`), the ones "
-                         "of those this target's own plain re-run writes - its detected "
-                         "tools, its recorded layers (inferred when there is no record), "
-                         "its recorded workspace, as a full harness clone installs them "
-                         "whatever clone reads (`expected_missing`; null, never a guess, "
+                         "of those this target's own plain re-run writes - its recorded "
+                         "tools (the profile's tools: line when none is recorded, "
+                         "detected only where that cannot be read), its recorded layers "
+                         "(inferred when there is no record), its recorded workspace, as "
+                         "a full harness clone installs them whatever clone reads, or as "
+                         "a copy that lacks all three harness generators does where the "
+                         "record says standalone - see the epilog for a partial copy and "
+                         "for a repository installed by a standalone copy before this "
+                         "release (`expected_missing`; null, never a guess, "
                          "when that re-run would stop before writing: "
                          ".sdlc/install-options cannot be read, or names a workspace file "
                          "that is not there or is not a workspace, or INIT would stop for "
@@ -6019,8 +6219,9 @@ def main(argv: list[str] | None = None) -> int:
                          "beside an edited file (`staged`), the policy.yml digest "
                          "(`policy`), whether profile.yml changed since this machine's "
                          "install (`profile_changed`; null when the sidecar has no record "
-                         "or profile.yml could not be read) and the layers "
-                         ".sdlc/install-options records (`options`; null when it is "
+                         "or profile.yml could not be read) and the tools, layers and "
+                         "standalone line .sdlc/install-options records (`options`; null "
+                         "when it is "
                          "missing or unreadable). Writes "
                          "nothing; exit 1 when the target has no .sdlc/, 2 when any other "
                          "flag is given, a default spelled out included")
@@ -6110,11 +6311,8 @@ def main(argv: list[str] | None = None) -> int:
         except WorkspaceError as exc:
             sys.exit(f"error: {exc}")
 
-    if args.tools == "auto":
-        tools = detect_tools(root)
-    elif args.tools == "all":
-        tools = ALL_TOOLS
-    else:
+    listed: list[str] | None = None
+    if args.tools not in (None, "auto", "all"):
         tools = [t.strip() for t in args.tools.split(",") if t.strip()]
         # Refuse an explicitly empty list BY NAME. An empty/whitespace/all-separator
         # --tools ("", " ", ",,,") parsed to [] and the `claude` insert below then
@@ -6134,6 +6332,11 @@ def main(argv: list[str] | None = None) -> int:
         bad = [t for t in tools if t not in ALL_TOOLS]
         if bad:
             sys.exit(f"error: unknown tool(s): {', '.join(bad)} (valid: {', '.join(ALL_TOOLS)})")
+        listed = tools
+    # T708: the recorded tools with what this run was given - exactly the record on a run
+    # with no --tools, which names a detected tool it leaves out (the owner's ruling Q1).
+    tools, unapplied_tools, tools_source = run_tools(
+        root, recorded, None if listed is not None else args.tools, listed)
 
     try:
         return install(root, tools, force=args.force, dry_run=args.dry_run,
@@ -6145,7 +6348,8 @@ def main(argv: list[str] | None = None) -> int:
                        corpus_replay=args.corpus_replay,
                        snapshot_cadence=args.snapshot_cadence, reapplied=reapplied,
                        layer_notes=layer_notes, recorded_workspace=recorded_ws,
-                       inferred=inferred)
+                       inferred=inferred, unapplied_tools=unapplied_tools,
+                       tools_source=tools_source)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 
