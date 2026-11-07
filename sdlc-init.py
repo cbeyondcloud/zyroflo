@@ -63,6 +63,13 @@ CODEX_FILE = "AGENTS.md"
 #: `HARNESS_VERSION_REL` in the target, and `--manifest` reports both.
 HARNESS_VERSION = "1.0.0"
 HARNESS_VERSION_REL = ".sdlc/harness-version"
+#: T705: the opt-in layers an install ran with, TRACKED beside the version record, so a
+#: later run - this repository's owner, or a caller upgrading many repositories - applies
+#: them without being told which to pass. Written by every install; `--manifest` reports
+#: it under `options`.
+INSTALL_OPTIONS_REL = ".sdlc/install-options"
+INSTALL_OPTIONS_HEADER = ("# Written by sdlc-init.py: the opt-in layers every re-run "
+                          "applies. Delete a line to drop that layer.")
 #: What `--manifest` puts where an installed file names a harness clone's absolute
 #: path, so the same install digests the same from any clone on any machine.
 HARNESS_TOKEN = "<HARNESS>"
@@ -4581,11 +4588,222 @@ def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:
     return (m.group(1) == "true", int(m.group(2)))
 
 
+# ── the recorded opt-in layers (T705) ────────────────────────────────────────
+#: The switches whose PRESENCE changes which files an install writes, measured on dry
+#: runs (T705): `--claude-extras` adds the agents, hooks and settings.json and the
+#: extras section of CLAUDE.md's block; each cadence flag adds its workflow. Every other
+#: switch is per-run or already recorded elsewhere: `--tools` is re-detected from the
+#: files an install leaves and the profile's `tools:`, `--single-component` is recorded
+#: in profile.yml (T244), and `--force`, `--no-graph`, `--estate`, `--from-snapshot` and
+#: `--dry-run` describe one run. Keys are the flags' own names, without the dashes.
+RECORDED_SWITCHES = ("claude-extras", FLAG_CORPUS_REPLAY[2:], FLAG_SNAPSHOT_CADENCE[2:])
+#: `--workspace` is recorded too: a re-run without it re-derives profile.yml and
+#: .sdlc/.gitignore for one repository and stages them as `.new` copies - a different set
+#: of files written. Stored relative to the target, posix, and only when inside it.
+RECORDED_WORKSPACE = "workspace"
+#: One line of the record. Read leniently in what a hand edit plausibly does - blank
+#: lines, comments, spaces around the name, the `=` and the value, a trailing comment,
+#: any order - and strictly in everything else; the next run writes the canonical form.
+_OPTION_LINE = re.compile(r"^([a-z][a-z-]*)[ \t]*=[ \t]*(.*)$")
+_SWITCH_VALUE = re.compile(r"true[ \t]*(?:#.*)?")
+_STRING_VALUE = re.compile(r'("(?:[^"\\\n]|\\.)*")[ \t]*(?:#.*)?')
+
+
+class InstallOptionsError(Exception):
+    """A `.sdlc/install-options` this installer cannot read as a record (T705). The
+    message names the file, and the line when there is one (`line`). `unreadable` is
+    True when the bytes could not be read as text at all - T704's unreadable class."""
+
+    def __init__(self, message: str, *, line: int | None = None,
+                 unreadable: bool = False):
+        super().__init__(message)
+        self.line = line
+        self.unreadable = unreadable
+
+
+def render_install_options(options: dict) -> str:
+    """The record's canonical text: the header, then one `name = value` line per option,
+    sorted, LF. A switch is `true`; the workspace a JSON (and TOML) basic string."""
+    lines = [INSTALL_OPTIONS_HEADER]
+    for key in sorted(options):
+        value = options[key]
+        lines.append(f"{key} = " + ("true" if value is True else json.dumps(value)))
+    return "\n".join(lines) + "\n"
+
+
+def workspace_record(root: Path, workspace: Path) -> str | None:
+    """`workspace` relative to `root`, posix, or None when it is not inside `root` - a
+    tracked file cannot name a path on one machine."""
+    try:
+        return workspace.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _recorded_workspace(root: Path, value: str, where: str, n: int) -> str:
+    m = _STRING_VALUE.fullmatch(value)
+    try:
+        rel = json.loads(m.group(1)) if m else None
+    except ValueError:
+        rel = None
+    if not isinstance(rel, str) or not rel:
+        raise InstallOptionsError(f'{where}: workspace takes a quoted path, '
+                                  f'workspace = "<path inside the target>"', line=n)
+    pure = PurePosixPath(rel)
+    if ("\\" in rel or "\x00" in rel or pure.is_absolute() or PureWindowsPath(rel).drive
+            or ".." in pure.parts or workspace_record(root, root / rel) is None):
+        raise InstallOptionsError(f"{where}: workspace {rel!r} is not a posix path inside "
+                                  f"the target, relative to it", line=n)
+    return rel
+
+
+def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
+    """(the options `text` records, the line each one is on). Anything that is not a
+    record this installer writes - an unknown name, a value it never writes, a repeated
+    name - raises `InstallOptionsError` naming the line: a record read past would leave
+    a layer unapplied in silence."""
+    options: dict = {}
+    lines: dict[str, int] = {}
+    known = sorted((*RECORDED_SWITCHES, RECORDED_WORKSPACE))
+    for n, line in enumerate(text.removeprefix(_BOM).splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        where = f"{INSTALL_OPTIONS_REL} line {n}"
+        m = _OPTION_LINE.match(stripped)
+        if not m:
+            raise InstallOptionsError(f"{where} is not a `name = value` line", line=n)
+        key, value = m.groups()
+        if key in options:
+            raise InstallOptionsError(f"{where} records {key} a second time", line=n)
+        if key in RECORDED_SWITCHES:
+            if not _SWITCH_VALUE.fullmatch(value):
+                raise InstallOptionsError(f"{where}: {key} takes only `true` - remove "
+                                          f"the line to drop that layer", line=n)
+            options[key] = True
+        elif key == RECORDED_WORKSPACE:
+            options[key] = _recorded_workspace(root, value, where, n)
+        else:
+            raise InstallOptionsError(f"{where} names {key!r}, which this installer does "
+                                      f"not record (it records {', '.join(known)})",
+                                      line=n)
+        lines[key] = n
+    return options, lines
+
+
+def load_install_options(root: Path) -> tuple[dict, dict[str, int]] | None:
+    """`parse_install_options` over `root/.sdlc/install-options`, or None when there is
+    no such file. A file that cannot be read as UTF-8 text raises `InstallOptionsError`
+    with `unreadable` set."""
+    path = root / INSTALL_OPTIONS_REL
+    if not os.path.lexists(path):
+        return None
+    try:
+        text = _read(path)
+    except FileUnreadableError as exc:
+        raise InstallOptionsError(f"{INSTALL_OPTIONS_REL} could not be read as text "
+                                  f"({exc})", unreadable=True) from None
+    if text is None:            # a dangling link: there, and nothing to read
+        raise InstallOptionsError(f"{INSTALL_OPTIONS_REL} is a link to nothing",
+                                  unreadable=True)
+    return parse_install_options(root, text)
+
+
+def read_install_options(root: Path) -> dict | None:
+    """The options the record holds, or None when there is none."""
+    loaded = load_install_options(root)
+    return None if loaded is None else loaded[0]
+
+
+def _planner_inputs() -> tuple[str, str]:
+    """(the rendered skill body, its description), for a plan that reads only PATHS."""
+    meta, body = parse_frontmatter(load_template("SKILL.md"))
+    try:
+        body, _ = render_skill_body(body)
+    except ValueError:
+        pass                # the paths do not depend on the body; install refuses it
+    return body, meta.get("description", "")
+
+
+def layer_paths(root: Path) -> dict[str, list[str]]:
+    """For each recorded switch, the whole-file paths ONLY that switch plans (T705, the
+    owner's ruling F2): `plan_install_ops` - the planner an install uses - run with
+    every switch off and then with that one on, every tool and the graph surfaces on.
+    Merged files (a block, settings.json) are left out: an adopter may own those."""
+    body, description = _planner_inputs()
+
+    def plan(**on: bool) -> dict[str, str]:
+        ops, _ = plan_install_ops(
+            root, dict(_MANIFEST_PROFILE), list(ALL_TOOLS), body, description,
+            force=True, workspace=None, workspace_path=None, with_graph=True,
+            extras_on=on.get("claude-extras", False),
+            corpus_replay=on.get(FLAG_CORPUS_REPLAY[2:], False),
+            snapshot_cadence=on.get(FLAG_SNAPSHOT_CADENCE[2:], False),
+            installed_digests={})
+        return {op["rel"]: op.get("kind", "file") for op in ops}
+
+    base = plan()
+    return {key: sorted(rel for rel, kind in plan(**{key: True}).items()
+                        if rel not in base and kind == "file")
+            for key in RECORDED_SWITCHES}
+
+
+def infer_install_options(root: Path) -> tuple[list[tuple[str, list[str]]],
+                                               list[tuple[str, list[str]]]]:
+    """(the layers a target with NO record evidently has - every path only that switch
+    plans is a file there -, the layers it has some but not all of those files for). For
+    a repository installed before T705, whose layers were recorded nowhere."""
+    found, partial = [], []
+    for key, rels in layer_paths(root).items():
+        present = [rel for rel in rels if (root / rel).is_file()]
+        if rels and present == rels:
+            found.append((key, rels))
+        elif any(os.path.lexists(root / rel) for rel in rels):
+            partial.append((key, present))
+    return found, partial
+
+
+def install_options_for(root: Path, *, claude_extras: bool, corpus_replay: bool,
+                        snapshot_cadence: bool, workspace_path: Path | None,
+                        recorded_workspace: str | None = None) -> tuple[dict, str]:
+    """(the record an install with these layers writes, a NOTE or ""). A workspace file
+    outside the target is applied for this run and never changes the record (the owner's
+    ruling F1): a recorded workspace line stays, and the NOTE says which."""
+    on = {"claude-extras": claude_extras, FLAG_CORPUS_REPLAY[2:]: corpus_replay,
+          FLAG_SNAPSHOT_CADENCE[2:]: snapshot_cadence}
+    options: dict = {key: True for key, value in on.items() if value}
+    note = ""
+    rel = workspace_record(root, workspace_path) if workspace_path is not None else None
+    if workspace_path is not None and rel is None:
+        note = (f'--workspace "{workspace_path}" is outside the target, so it was applied '
+                f"for this run and not recorded - a tracked file cannot name a path on "
+                f"one machine. ")
+        if recorded_workspace is not None and not (root / recorded_workspace).is_file():
+            # Review N5: a run without --workspace is refused over this line (F4), so the
+            # NOTE says the file is gone and names that refusal's remedy.
+            note += (f'{INSTALL_OPTIONS_REL} still records workspace '
+                     f'"{recorded_workspace}", whose file is no longer there - fix that '
+                     f"line to name the workspace file, or remove it, before a run "
+                     f"without --workspace")
+        elif recorded_workspace is not None:
+            note += (f'{INSTALL_OPTIONS_REL} still records workspace '
+                     f'"{recorded_workspace}", which a run without --workspace applies')
+        else:
+            note += ("A re-run must pass --workspace again, or it re-derives "
+                     ".sdlc/profile.yml and .sdlc/.gitignore for one repository and "
+                     "stages them as .new copies")
+        rel = recorded_workspace
+    if rel is not None:
+        options[RECORDED_WORKSPACE] = rel
+    return options, note
+
+
 def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: str,
                      description: str, *, force: bool, workspace: dict | None,
                      workspace_path: Path | None, with_graph: bool, extras_on: bool,
                      corpus_replay: bool, snapshot_cadence: bool,
-                     installed_digests: dict[str, str]) -> tuple[list[dict], str | None]:
+                     installed_digests: dict[str, str],
+                     install_options: dict | None = None) -> tuple[list[dict], str | None]:
     """(every write an install owes, why there is no ledger gate or None).
 
     The ONE computation of what an install owns (T704): `install` - a dry run
@@ -4627,6 +4845,21 @@ def plan_install_ops(root: Path, profile: dict, tools: list[str], skill_body: st
     # .gitignore names nothing that matches it), so a fresh clone can say which
     # installer its .sdlc/ was written by. Installer-owned: rewritten every run.
     ops.append(plan_op(root, HARNESS_VERSION_REL, HARNESS_VERSION + "\n"))
+    # T705: the opt-in layers this run applies, TRACKED, so the next run applies them
+    # too. Installer-owned, rewritten every run; a hand edit is read before it is.
+    record = render_install_options(install_options or {})
+    record_op = plan_op(root, INSTALL_OPTIONS_REL, record)
+    if record_op["status"] == "unchanged":
+        # Canonical form, byte for byte (the owner's ruling F7): `plan_op` reads a file
+        # differing only in line endings or trailing blank lines as unchanged, and a
+        # hand-edited record is rewritten to the form this function renders.
+        try:
+            canonical = record_op["path"].read_bytes() == record.encode("utf-8")
+        except OSError:
+            canonical = True        # the write would meet the same error; plan_op's call
+        if not canonical:
+            record_op.update(status="update", content=record)
+    ops.append(record_op)
     surfaces = surface_ops(root, tools, skill_body, description,
                            with_graph=with_graph, extras_on=extras_on)
     extras = claude_extras_ops(root, profile) if extras_on else []
@@ -4661,7 +4894,17 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             graph: bool = True, estate: bool = False,
             workspace_path: Path | None = None, from_snapshot: bool = False,
             single_component: bool = False, corpus_replay: bool = False,
-            snapshot_cadence: bool = False) -> int:
+            snapshot_cadence: bool = False, reapplied: list[str] | None = None,
+            layer_notes: list[str] | None = None,
+            recorded_workspace: str | None = None,
+            inferred: list[tuple[str, list[str]]] | None = None) -> int:
+    """`reapplied`: the recorded layers `main` applied that the command line did not
+    give (T705), named in a NOTE; `layer_notes`: one NOTE per layer NOT inferred for a
+    target with no record because only some of its files are there; `inferred`: (switch, its
+    files) for each layer `main` inferred, named in a NOTE whose verb says what this run
+    did with it (review N3); `recorded_workspace`:
+    the workspace line the record held, kept when the run's own workspace is outside the
+    target. The record this install writes is otherwise the layers it was handed."""
     # T442: the pre-INIT prerequisite, FIRST - before any template is rendered or
     # any file is written, so a stopped INIT leaves nothing half-installed.
     project, stop = project_gate(root, workspace, dry_run)
@@ -4905,6 +5148,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     extras_on = claude_extras and "claude" in tools
     # Optional Claude Code power layer
     extras_skipped = claude_extras and "claude" not in tools
+    # T705: recorded as asked, not as applied here - `--claude-extras` is a layer the
+    # repository chose, and a run whose tool set lacks Claude Code does not unchoose it.
+    install_options, options_note = install_options_for(
+        root, claude_extras=claude_extras, corpus_replay=corpus_replay,
+        snapshot_cadence=snapshot_cadence, workspace_path=workspace_path,
+        recorded_workspace=recorded_workspace)
     # A dry run plans them anyway and says when they land: it describes the whole
     # command, and hiding the graph surfaces would describe a smaller one.
     ops, ledger_skipped = plan_install_ops(
@@ -4912,7 +5161,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         workspace=workspace, workspace_path=workspace_path,
         with_graph=graph_on and (dry_run or not defer_graph), extras_on=extras_on,
         corpus_replay=corpus_replay, snapshot_cadence=snapshot_cadence,
-        installed_digests=installed_digests)
+        installed_digests=installed_digests, install_options=install_options)
 
     # T517: every write this run owes is asked before the first is made. A write that
     # failed midway raised a traceback at exit 1 - the code kept for "nothing was
@@ -5015,6 +5264,25 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     for note in ws_notes:
         print(f"\n  NOTE: {note}")
+
+    if reapplied:
+        print(f"\n  NOTE: re-applied what {INSTALL_OPTIONS_REL} records: "
+              f"{', '.join(reapplied)}. To drop a layer, delete its line there and re-run.")
+    blocked_rels = {o["rel"] for o in ops if o["status"] == "blocked"}
+    for key, rels in inferred or ():
+        # Review N3: the verb is what happened. A layer whose own file this run could not
+        # write (a cadence job with no workspace) is recorded, not applied; a dry run
+        # writes nothing, so it "would be".
+        did = ("recorded, not applied (blocked)" if blocked_rels & set(rels)
+               else "applied and recorded")
+        if dry_run:
+            did = "would be " + did
+        print(f"\n  NOTE: {INSTALL_OPTIONS_REL} did not exist, so --{key} was inferred "
+              f"from the files only it installs ({', '.join(rels)}): --{key} {did}.")
+    for note in layer_notes or ():
+        print(f"\n  NOTE: {note}.")
+    if options_note:
+        print(f"\n  NOTE: {options_note}.")
 
     if withheld_note:
         print(f"\n  NOTE: {withheld_note}")
@@ -5313,7 +5581,10 @@ def owned_ops(root: Path) -> tuple[dict[str, str], set[str]]:
 #: Their digests go under `per_repo`, so a comparison across repositories never reads
 #: them as drift. None of them is masked: none carries a harness path, and their text is
 #: where an adopter writes (T704-R4).
-PER_REPO_RELS = frozenset({".sdlc/profile.yml", PIPELINE_DIAGRAM_REL, CLAUDE_SETTINGS_REL})
+#: `.sdlc/install-options` (T705) is per repository too: which layers a repository chose
+#: is its own decision, and a recorded workspace is a path in that repository.
+PER_REPO_RELS = frozenset({".sdlc/profile.yml", PIPELINE_DIAGRAM_REL, CLAUDE_SETTINGS_REL,
+                           INSTALL_OPTIONS_REL})
 
 
 def _absolute_path_like(s: str) -> bool:
@@ -5454,6 +5725,17 @@ def manifest(root: Path) -> dict:
         else:
             owned = text
         texts[rel] = owned
+    # T705: the record is digested like any owned file; a record that reads as text but
+    # not as a record is unreadable, as unbalanced markers are (the owner's ruling F6).
+    # `options` is null whenever there is no record to read - `missing` or `unreadable`
+    # says which.
+    options = None
+    if INSTALL_OPTIONS_REL in texts:
+        try:
+            options = parse_install_options(root, texts[INSTALL_OPTIONS_REL])[0]
+        except InstallOptionsError:
+            del texts[INSTALL_OPTIONS_REL]
+            unreadable.append(INSTALL_OPTIONS_REL)
     digests = {rel: _content_digest(text if rel in PER_REPO_RELS else _mask_recorded(text))
                for rel, text in texts.items()}
     files = {r: d for r, d in digests.items() if r not in PER_REPO_RELS}
@@ -5475,7 +5757,8 @@ def manifest(root: Path) -> dict:
             "unreadable": sorted(unreadable),
             "staged": staged,
             "policy": files.get(".sdlc/policy.yml"),
-            "profile_changed": profile_changed}
+            "profile_changed": profile_changed,
+            "options": options}
 
 
 #: The flags `--manifest` refuses by name: each one shapes an install, and a manifest
@@ -5535,13 +5818,22 @@ def main(argv: list[str] | None = None) -> int:
                "absent); 3 = scaffold written but the chained graph build failed; "
                "4 = the scaffold is incomplete: a file could not be written after "
                "others were, and each is named; 1 = nothing was installed (bad input, "
-               "or a file it must write cannot be written); 2 = bad command line.")
+               "or a file it must write cannot be written); 2 = bad command line. "
+               f"Recorded layers: every install writes {INSTALL_OPTIONS_REL} (tracked), "
+               "one line per opt-in layer it applied - --claude-extras, "
+               f"{FLAG_CORPUS_REPLAY}, {FLAG_SNAPSHOT_CADENCE}, and --workspace when "
+               "that file is inside the target - and every later run applies the "
+               "recorded layers together with the ones it is given. A run never "
+               "drops a layer: to drop one, delete its line from that file and "
+               "re-run. A record this installer cannot read is refused by name "
+               "(exit 1).")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
     ap.add_argument("--workspace", metavar="TOML",
                     help="install for a multi-component workspace described by a filled-in "
                          "sdlc-workspace.toml (see sdlc_templates/workspace.example.toml). "
                          "Supplies WHICH components exist; --target still says where the "
-                         "harness config is written")
+                         "harness config is written. Recorded when the file is inside "
+                         "the target, so later runs keep it")
     ap.add_argument("--tools", default="auto",
                     help="comma list of tools, 'auto' (detect), or 'all'")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
@@ -5550,7 +5842,8 @@ def main(argv: list[str] | None = None) -> int:
                          "component anyway; the assertion is recorded in the profile")
     ap.add_argument("--claude-extras", action="store_true",
                     help="also install the Claude Code layer: reviewer subagents, a scoped "
-                         "permission allowlist, and automation hooks")
+                         "permission allowlist, and automation hooks. Recorded, so "
+                         "later runs keep it")
     ap.add_argument("--estate", action="store_true",
                     help="with --workspace: verify vendored binaries, report Neo4j "
                          "readiness and the attach census, and chain the workspace "
@@ -5563,11 +5856,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(FLAG_SNAPSHOT_CADENCE, action="store_true",
                     help="write a weekly graph-snapshot workflow; without it none "
                          "is written, because a scheduled build on a repository "
-                         "that cannot build one reddens every week")
+                         "that cannot build one reddens every week. Recorded, so later "
+                         "runs keep it")
     ap.add_argument(FLAG_CORPUS_REPLAY, action="store_true",
                     help="write a nightly corpus-replay workflow; without it "
                          "none is written, because a scheduled job on a "
-                         "repository with no corpus reddens every night")
+                         "repository with no corpus reddens every night. Recorded, so "
+                         "later runs keep it")
     ap.add_argument("--no-graph", action="store_true",
                     help="scaffold only. Without it, an install at a repository root also "
                          "builds that repository's graph into .sdlc/graph when the harness "
@@ -5583,13 +5878,16 @@ def main(argv: list[str] | None = None) -> int:
                          "path masked, line endings normalised; only the harness block "
                          "of a file it merges into, only its own settings.json entries), "
                          "the files that depend on the repository by design (`per_repo`: "
-                         "profile.yml, pipeline.md, settings.json), owned paths absent "
-                         "(`missing`) or present but not readable - not text, unbalanced "
-                         "markers, a dangling link (`unreadable`), the <file>.new copies "
-                         "a re-install staged beside an edited file (`staged`), the "
-                         "policy.yml digest (`policy`) and whether profile.yml changed "
-                         "since this machine's install (`profile_changed`; null when the "
-                         "sidecar has no record or profile.yml could not be read). Writes "
+                         "profile.yml, pipeline.md, settings.json, install-options), owned "
+                         "paths absent (`missing`) or present but not readable - not "
+                         "text, unbalanced markers, a record that is not one, a dangling "
+                         "link (`unreadable`), the <file>.new copies a re-install staged "
+                         "beside an edited file (`staged`), the policy.yml digest "
+                         "(`policy`), whether profile.yml changed since this machine's "
+                         "install (`profile_changed`; null when the sidecar has no record "
+                         "or profile.yml could not be read) and the layers "
+                         ".sdlc/install-options records (`options`; null when it is "
+                         "missing or unreadable). Writes "
                          "nothing; exit 1 when the target has no .sdlc/, 2 when any other "
                          "flag is given, a default spelled out included")
     args = ap.parse_args(argv)
@@ -5618,6 +5916,61 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.target).resolve()
     if not root.is_dir():
         sys.exit(f"error: target is not a directory: {root}")
+    # T705: the layers an earlier install recorded, applied together with the ones given
+    # (a union), BEFORE any check that reads them - `--estate` is satisfied by a recorded
+    # workspace. A record that cannot be read is refused, dry run included, since it
+    # describes the same command.
+    try:
+        loaded = load_install_options(root)
+    except InstallOptionsError as exc:
+        remedy = ("fix or remove that line" if exc.line is not None
+                  else "fix or delete the file")
+        print(f"error: {exc}. Nothing was installed - {remedy}, then re-run.",
+              file=sys.stderr)
+        return 1
+    recorded, recorded_lines = loaded if loaded is not None else ({}, {})
+    recorded_ws = recorded.get(RECORDED_WORKSPACE)
+    # Checked only where the recorded workspace is what this run would use (review N1): a
+    # run that names one itself replaces a stale line instead of being refused over it.
+    if (recorded_ws is not None and not args.workspace
+            and not (root / recorded_ws).is_file()):
+        # The owner's ruling F4: refused by the record's name, its line and the remedy -
+        # not by `read_workspace`'s text, which names a path the person never typed.
+        print(f"error: {INSTALL_OPTIONS_REL} line {recorded_lines[RECORDED_WORKSPACE]}: "
+              f'workspace "{recorded_ws}" names no file in the target. Nothing was '
+              f"installed - fix that line to name the workspace file, or remove it, "
+              f"then re-run.", file=sys.stderr)
+        return 1
+    reapplied: list[str] = []
+    layer_notes: list[str] = []
+    inferred: list[tuple[str, list[str]]] = []
+    for key in RECORDED_SWITCHES:
+        dest = key.replace("-", "_")
+        if recorded.get(key) and not getattr(args, dest):
+            setattr(args, dest, True)
+            reapplied.append("--" + key)
+    if recorded_ws is not None and not args.workspace:
+        args.workspace = str(root / recorded_ws)
+        reapplied.append(f'--workspace "{recorded_ws}"')
+    if loaded is None and (root / ".sdlc").is_dir():
+        # The owner's ruling F2: a target with no record - every install before T705 -
+        # recorded its layers nowhere, and "none" would be an unknown written down as a
+        # fact. Each switch whose own files the planner names are all there is inferred,
+        # applied and recorded, and said; one with only some of them is said, not guessed.
+        # Only where the harness is already installed (review N2): a target with no
+        # .sdlc/ has no earlier layer, and a brand-new install skips the four plans.
+        found, partial = infer_install_options(root)
+        for key, rels in found:
+            dest = key.replace("-", "_")
+            if not getattr(args, dest):
+                setattr(args, dest, True)
+                inferred.append((key, rels))
+        for key, present in partial:
+            if not getattr(args, key.replace("-", "_")):
+                layer_notes.append(
+                    f"{INSTALL_OPTIONS_REL} did not exist and only some of the files "
+                    f"--{key} installs are here ({', '.join(present) or 'none readable'}), "
+                    f"so it was not inferred - pass --{key} to keep that layer")
     if not (root / ".git").exists() and not args.workspace:
         print(f"warning: {root} has no .git - per-row commits & rollback will be unavailable.")
 
@@ -5673,7 +6026,9 @@ def main(argv: list[str] | None = None) -> int:
                        from_snapshot=args.from_snapshot,
                        single_component=args.single_component,
                        corpus_replay=args.corpus_replay,
-                       snapshot_cadence=args.snapshot_cadence)
+                       snapshot_cadence=args.snapshot_cadence, reapplied=reapplied,
+                       layer_notes=layer_notes, recorded_workspace=recorded_ws,
+                       inferred=inferred)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 
