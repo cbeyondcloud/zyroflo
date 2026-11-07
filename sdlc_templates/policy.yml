@@ -44,7 +44,24 @@ coverage_enforcement_floor: advisory
 # allow | forbid. `forbid` means the person who wrote the change may not be the
 # person who approves it. With no author recorded to compare against, a run
 # under `forbid` is REFUSED, never waved through: a control that cannot be
-# evaluated has not been satisfied.
+# evaluated has not been satisfied. Every ledger entry records the author it judged
+# (`author`), where that came from (`author_source`: flag = --author, git-head = the
+# HEAD commit's author email, none = no value) and this mode (`self_approval`), inside
+# the hashed and signed body. The author is a CLAIM, not proof: no commit signature is
+# checked, so a false one is not prevented - it is signed by the approver's key. A blank
+# author is unknown everywhere. `approve.py --verify` and the CI ledger check judge each
+# gate's live approval under the mode THAT ENTRY records, never this file's current
+# value: one recorded under `forbid` whose author is its approver fails; one recorded
+# under `allow` never fails later, so switching this key to `forbid` cannot turn the
+# committed history red. The recorded mode is the RECORDING CLIENT's claim (signed when
+# signing is on), like the author: an approval taken under a relaxed policy - a
+# working-tree edit, a modified client - is judged under that relaxed mode. This control
+# is enforced where a verdict is TAKEN; the checks only count, on one non-fatal "weaker
+# than policy" line, the live approvals recorded under `allow` while this file says
+# `forbid` (an unreadable policy file is a stated limit there, never a failure).
+# Approvals that cannot be judged - no mode recorded (written before entries recorded
+# one), no author, an unknown author, an unknown mode or verdict, no approver, or no
+# gate - are counted by cause on one "not judged" line - never a pass, never a failure.
 self_approval: allow
 
 # ── What an agent may not do ──────────────────────────────────────────────────

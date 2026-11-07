@@ -240,14 +240,28 @@ def live_entries(target: Path, run_id: str) -> list[dict]:
     supposed to replace. Measured on the first run to loop — an obsolete G3 held
     a correct change out of a merge.
     """
-    latest: dict[str, dict] = {}
-    for entry in read_chain(target, run_id):
+    return [entry for _, entry in live_positions(target, run_id)[0]]
+
+
+def live_positions(target: Path, run_id: str) -> tuple[list[tuple[int, dict]],
+                                                         list[tuple[int, dict]]]:
+    """THE live-entry rule, in one place (T707): `([(position, entry)] for the last
+    entry per gate in chain order, [(position, entry)] for every readable entry that
+    names no gate)`. Positions are 1-based, as `verify_chain` names them. An entry
+    with no gate is returned rather than dropped, so a caller can say it was not
+    judged; `live_entries` keeps its behaviour by ignoring the second list (such an
+    entry is no gate's verdict, and `gate_state` cannot be satisfied by it)."""
+    latest: dict[str, tuple[int, dict]] = {}
+    gateless: list[tuple[int, dict]] = []
+    for i, entry in enumerate(read_chain(target, run_id), 1):
         if "_unreadable" in entry:
             continue
         gate = entry.get("gate")
         if isinstance(gate, str) and gate:
-            latest[gate] = entry
-    return list(latest.values())
+            latest[gate] = (i, entry)
+        else:
+            gateless.append((i, entry))
+    return list(latest.values()), gateless
 
 
 def about(entry: dict) -> str:
@@ -491,14 +505,199 @@ def verify_signatures(target: Path, run_id: str) -> list[str]:
     return problems
 
 
+#: Where an entry's `author` came from (T707). `flag`: the caller named it (`--author`,
+#: or `append_entry(author=...)`); `git-head`: the HEAD commit's author email, which is
+#: what `record` judges when nothing was named; `none`: there was no value to record.
+AUTHOR_SOURCES = ("flag", "git-head", "none")
+
 #: The fields every entry carries itself; `append_entry`'s `extra` may not replace them.
+#: T707 added `author`, `author_source` and `self_approval`: an `extra` carrying any of
+#: them would be read by every verifier as a judged claim, which nothing judged.
 CORE_FIELDS = frozenset({"schema_version", "kind", "run_id", "gate", "verdict", "approver",
-                         "at", "artifacts", "notes", "prev", "hash", "signature"})
+                         "at", "artifacts", "notes", "prev", "hash", "signature",
+                         "author", "author_source", "self_approval"})
+
+#: The four answers `separation_of_duties` gives (T707).
+SOD_VERDICTS = ("ok", "self-approved", "not-judged", "not-applicable")
+
+
+def authorship(author: str | None, source: str) -> dict:
+    """The `author` and `author_source` keys an entry records (T707): the value
+    stripped, null when empty, and `none` as its source whenever there is no value -
+    so `author: null` always reads `author_source: none`, whoever passed it."""
+    if author is not None and not isinstance(author, str):
+        raise ValueError(f"an author is an identity string, not {author!r}")
+    if source not in AUTHOR_SOURCES:
+        raise ValueError(f"unknown author source {source!r} - one of "
+                         f"{', '.join(AUTHOR_SOURCES)}")
+    value = guardrails.known_identity(author) or None
+    return {"author": value, "author_source": source if value is not None else "none"}
+
+
+#: `separation_of_duties`'s default: judge under the mode the ENTRY records.
+ENTRY_MODE = object()
+
+
+#: Every cause an approval can go unjudged for, as the predicate the summary line
+#: counts it under ("2 record no self_approval mode"). Ordered as `_judge` tests them.
+NOT_JUDGED_CAUSES = {
+    "unknown-verdict": "carry a verdict this harness does not know",
+    "no-mode": "record no self_approval mode",
+    "unknown-mode": "record a self_approval mode this harness does not know",
+    "no-approver": "name no approver",
+    "no-author": "record no author",
+    "unknown-author": "record the author as unknown",
+    "no-gate": "name no gate",
+}
+
+
+def _judge(entry: dict, mode: object) -> tuple[str, str | None, str]:
+    """(verdict, the `NOT_JUDGED_CAUSES` key when not judged, why).
+
+    The verdict is asked FIRST (review N1): a rejection approves nothing under any
+    mode, and a verdict this harness does not know is not judged under any mode -
+    so it is reported even where the mode is `allow`, never read as a pass."""
+    verdict = entry.get("verdict")
+    if verdict == "reject":
+        return "not-applicable", None, "a rejection approves nothing"
+    if verdict != "approve":
+        return ("not-judged", "unknown-verdict",
+                f"verdict {verdict!r} is not one this harness knows")
+    if mode is ENTRY_MODE:
+        if "self_approval" not in entry:
+            return "not-judged", "no-mode", ("the entry records no self_approval mode "
+                                             "(written before entries recorded one)")
+        mode = entry["self_approval"]
+    if mode == "allow":
+        return "not-applicable", None, "taken under self_approval: allow"
+    if mode != "forbid":
+        return "not-judged", "unknown-mode", f"unknown self_approval mode {mode!r}"
+    approver = entry.get("approver")
+    if not guardrails.known_identity(approver):
+        return "not-judged", "no-approver", "the entry names no approver"
+    if "author" not in entry:
+        return "not-judged", "no-author", ("the entry records no author (written before "
+                                           "entries recorded one)")
+    author = entry.get("author")
+    if not guardrails.known_identity(author):
+        return "not-judged", "unknown-author", "the entry records the author as unknown"
+    if guardrails.same_person(approver, author):
+        return "self-approved", None, (
+            f"{approver} is recorded as the change's author "
+            f"({entry.get('author_source', 'source unrecorded')}) and approved it")
+    return "ok", None, f"approved by {approver}, authored by {author}"
+
+
+def separation_of_duties(entry: dict, mode: object = ENTRY_MODE) -> tuple[str, str]:
+    """Whether this entry's approver approved their own change (T707). Stdlib only:
+    it runs inside the emitted `.sdlc/ledger_check.py`.
+
+    **The rule is the entry's own.** By default it is judged under the
+    `self_approval` mode the entry itself RECORDS, never under today's policy file
+    (owner, 2026-11-07). An entry taken under `allow` is never failed later, however
+    the policy changes, so adopting `forbid` cannot turn committed, append-only
+    history red. `mode` is for a caller judging the entry under a policy of its own;
+    this harness never passes it.
+
+    **The recorded mode is the recording client's claim**, exactly as the author is:
+    it says which rule the client that wrote the entry enforced (signed with the rest
+    of the body when signing is on), not which rule the repository holds. An approval
+    taken under a relaxed policy - a working-tree edit, a modified client - is judged
+    under that relaxed mode here. The control is enforced where the verdict is TAKEN;
+    `weaker_than_policy` states, never fails, the approvals whose recorded mode is
+    weaker than today's policy.
+
+    `(verdict, why)`, verdict one of `SOD_VERDICTS`:
+
+    * `not-applicable` - the mode is `allow`, or the entry is a rejection (a "no"
+      cannot approve anything, one's own work included);
+    * `not-judged` - there is nothing honest to compare; the causes are
+      `NOT_JUDGED_CAUSES`. Never a pass and never a self-approval;
+    * `self-approved` - under `forbid`, `policy.same_person(approver, author)`;
+    * `ok` - under `forbid`, two different people.
+
+    **What `ok` proves, and what it does not.** That the identity the approver's
+    entry RECORDS as the author is not the approver. The author is a claim -
+    `author_source` says whose (a flag, or the HEAD commit's git metadata) - and the
+    free edition checks no commit signature, so a false author is not prevented. It
+    is made attributable: on a signed ledger, the approver's key signed it.
+    """
+    verdict, _, why = _judge(entry, mode)
+    return verdict, why
+
+
+def current_mode(target: Path) -> tuple[str | None, str]:
+    """(the `self_approval` mode today's policy sets, a limit line when it could not
+    be read). Read ONLY to state approvals recorded under a weaker mode - never to
+    judge one - so a policy that cannot be read is one stated line, never a failure."""
+    try:
+        return guardrails.load(target)["self_approval"], ""
+    except Exception as exc:                        # noqa: BLE001 - stated below
+        return None, (f"the policy could not be read ({type(exc).__name__}: {exc}), so "
+                      f"approvals recorded under a weaker self_approval mode than it "
+                      f"sets were not looked for")
+
+
+def separation_report(target: Path, run_id: str, policy_mode: str | None = None) -> dict:
+    """Separation of duties for the run's LIVE approvals - `live_positions`, the one
+    live-entry rule - each judged by `separation_of_duties` under the mode the entry
+    records (T707). One pass over the chain; callers that need it twice keep it.
+
+    `problems`: a `self-approved` entry, recorded under `forbid` with its approver as
+    its author - which `record` refuses, so it came from a modified client or an edit.
+    `not_judged`: `(cause, line)` for each approval with nothing honest to compare
+    (`NOT_JUDGED_CAUSES`), an approve entry naming no gate among them rather than
+    dropped. `weaker`: when `policy_mode` (today's policy, from `current_mode`) is
+    `forbid`, each live approval recorded under `allow` - stated, never a problem.
+    `approvals`: how many live approvals there were to judge."""
+    live, gateless = live_positions(target, run_id)
+    out: dict = {"problems": [], "not_judged": [], "weaker": [], "approvals": 0}
+    for i, entry in live:
+        # Only a rejection is skipped (review N1): a verdict this harness does not
+        # know is judged - as not judged, by cause - rather than filtered away.
+        if entry.get("verdict") == "reject":
+            continue
+        out["approvals"] += 1
+        verdict, cause, why = _judge(entry, ENTRY_MODE)
+        gate = entry.get("gate")
+        if verdict == "self-approved":
+            out["problems"].append(f"entry {i} ({gate}): recorded under self_approval: "
+                                   f"forbid, and {why} - a self-approval")
+        elif verdict == "not-judged":
+            out["not_judged"].append((cause, f"entry {i} ({gate}): {why}"))
+        if policy_mode == "forbid" and entry.get("self_approval") == "allow":
+            out["weaker"].append(f"entry {i} ({gate})")
+    for i, entry in gateless:
+        if entry.get("verdict") != "reject":
+            out["approvals"] += 1
+            out["not_judged"].append(("no-gate", f"entry {i}: an entry that names no "
+                                                 f"gate, so it is no gate's live approval"))
+    return out
+
+
+def not_judged_summary(pairs: list[tuple[str, str]], where: str) -> str:
+    """The ONE line a verify or check run prints for every live approval it could
+    not judge for separation of duties: the count, each cause's own count, and where
+    the entries are named - one line however long the history."""
+    counts = {c: sum(1 for k, _ in pairs if k == c) for c in NOT_JUDGED_CAUSES}
+    causes = ", ".join(f"{n} {NOT_JUDGED_CAUSES[c]}" for c, n in counts.items() if n)
+    return (f"separation of duties not judged for {len(pairs)} live "
+            f"approval{'' if len(pairs) == 1 else 's'} ({causes}) - {where}")
+
+
+def weaker_summary(lines: list[str], where: str) -> str:
+    """The ONE line naming live approvals recorded under `self_approval: allow` while
+    today's policy sets `forbid`. Never a problem: the recorded mode judges them."""
+    return (f"{len(lines)} live approval{'' if len(lines) == 1 else 's'} "
+            f"{'was' if len(lines) == 1 else 'were'} recorded under self_approval: "
+            f"allow, weaker than the policy's forbid today; the recorded mode is the "
+            f"recording client's claim and judges them, so they were not failed - {where}")
 
 
 def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: str,
                  artifacts: dict, *, step: str = "", notes: str = "",
-                 extra: dict | None = None, signer=None, forced: bool = False) -> dict:
+                 extra: dict | None = None, signer=None, forced: bool = False,
+                 author: str | None = None) -> dict:
     """Append one hash-chained entry for ANY gate id, pinning the given artifacts,
     and emit `gate_decided` (T688, Z6).
 
@@ -516,7 +715,21 @@ def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: s
     as `state.sha256_of` / `digest_of` write it). `extra` adds fields of the
     caller's own (they are hashed and signed with the rest) and may not replace
     the entry's own fields. `step` names the event's step.
+
+    `author` (T707) is who wrote the change, as the CALLER claims it, recorded with
+    `author_source: flag`. This function judges nothing, so it records no
+    `self_approval` mode either - and the verifiers judge an entry only under the
+    mode it records, so `approve.py --verify` and the ledger check count such an
+    entry as not judged; a caller that enforces its own rule can judge it with
+    `separation_of_duties(entry, mode)`. Not given, no author key is written at
+    all, so a caller that never passes it writes the bytes it wrote before T707. An
+    author smuggled in through `extra` is refused by name: unmarked, it would read
+    as a judged one.
     """
+    if "author" in (extra or {}):
+        raise ValueError("extra cannot carry 'author' - pass it as the author= keyword, "
+                         "which records where it came from")
+    own = {} if author is None else authorship(author, "flag")
     if not isinstance(gate, str) or not gate.strip():
         raise ValueError("an approval names its gate; '' is not one")
     if verdict not in VERDICTS:
@@ -535,7 +748,8 @@ def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: s
         raise RuntimeError(f"no run folder for run {run_id} - an approval is about a run "
                            f"that exists")
     return _append_entry(target, run_id, gate, verdict, approver, pins, step=step,
-                         notes=notes, extra=dict(extra or {}), signer=signer, forced=forced)
+                         notes=notes, extra={**dict(extra or {}), **own}, signer=signer,
+                         forced=forced)
 
 
 def _append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: str,
@@ -642,8 +856,13 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         raise RuntimeError("the profile loosens the repository's policy, so this "
                            "approval would be taken under rules nobody agreed to: "
                            + "; ".join(loosened))
-    who_wrote = author if author is not None else guardrails.head_author(target)
-    if refused := guardrails.self_approval(rules, approver, who_wrote):
+    # T707: the author judged here is the author RECORDED below - one value, one git
+    # call, stripped before it is judged so a blank one is unknown in both places.
+    # It used to be judged and thrown away, which left separation of duties
+    # enforced at this door and provable from nowhere.
+    who_wrote = authorship(author if author is not None else guardrails.head_author(target),
+                           "flag" if author is not None else "git-head")
+    if refused := guardrails.self_approval(rules, approver, who_wrote["author"] or ""):
         raise RuntimeError(refused[0])
 
     declared = signing_mode(target)
@@ -695,7 +914,8 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # T688 (Z6): `record` builds the fields that are ITS OWN - phase, regime,
     # resolved gates, the override flags - and hands them to the one writer it
     # now shares with `append_entry`. Entries are serialised with sorted keys, so
-    # the bytes and the hash are exactly what this function wrote before;
+    # the bytes and the hash are exactly what this function wrote before - plus,
+    # by design, T707's three authorship keys;
     # `test_append_entry.test_record_writes_exactly_what_it_wrote_before` pins it.
     extra = {
         "phase": st.get("phase"), "gate_profile":
@@ -726,6 +946,13 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         "forced": bool(force and (
             reached < ledger.PHASES.index(gate_phase) or owed)),
         "owed": owed,
+        # T707: who wrote the change, as judged above, and where that came from -
+        # inside the body, so the hash and any signature cover it - and the
+        # `self_approval` mode that judged it, so an auditor need not read the
+        # policy file as it stood that day. A claim, not proof: see
+        # `separation_of_duties`.
+        **who_wrote,
+        "self_approval": rules["self_approval"],
     }
     # The artifacts THIS GATE is a verdict about, not the whole run. A gate
     # stands at the end of a phase and approves the work up to it; it has no
@@ -781,11 +1008,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force", action="store_true",
                     help="approve a gate the run has not reached; recorded as forced")
     ap.add_argument("--author", default=None,
-                    help="who wrote the change, for policy self_approval "
-                         "(default: the target's HEAD author)")
+                    help="who wrote the change, for policy self_approval, recorded "
+                         "in the entry with author_source: flag (default: the "
+                         "target's HEAD author, recorded as git-head)")
     ap.add_argument("--verify", action="store_true",
-                    help="walk the chain and re-hash approved artifacts; exit 1 on "
-                         "any problem")
+                    help="walk the chain, check signatures, re-hash approved artifacts "
+                         "and judge each gate's live approval for separation of "
+                         "duties under the self_approval mode THAT ENTRY records (a "
+                         "self-approval recorded under forbid fails; today's policy "
+                         "file does not judge; the recorded mode is the recording "
+                         "client's claim); exit 1 on any problem. Approvals that cannot "
+                         "be judged are counted by cause on one 'not judged' line, and "
+                         "approvals recorded under allow while the policy now says "
+                         "forbid on one 'weaker than policy' line - neither is a problem, "
+                         "and an unreadable policy is a stated limit, never a failure")
     args = ap.parse_args(argv)
     target = Path(args.target).resolve()
     if not target.is_dir():
@@ -812,8 +1048,24 @@ def main(argv: list[str] | None = None) -> int:
         # `live_entries` for why a superseded pin is not a problem.
         for e in live_entries(target, args.run):
             problems += verify_artifacts_for(target, args.run, e)
+        # T707: separation of duties, for the live approvals, each under the
+        # self_approval mode its own entry records. A self-approval recorded under
+        # `forbid` fails; what could not be judged is ONE line, never a failure.
+        # Today's policy is read only to STATE approvals recorded under a weaker
+        # mode; it never fails this run, readable or not.
+        mode, unreadable = current_mode(target)
+        sod = separation_report(target, args.run, mode)
+        problems += sod["problems"]
         for p in problems:
             print(f"  !! {p}")
+        if sod["not_judged"]:
+            print("  .. [not judged] " + not_judged_summary(
+                sod["not_judged"], "; ".join(line for _, line in sod["not_judged"])))
+        if sod["weaker"]:
+            print("  .. [weaker than policy] " + weaker_summary(
+                sod["weaker"], "; ".join(sod["weaker"])))
+        if unreadable and sod["approvals"]:
+            print(f"  .. [not checked] {unreadable}")
         n = len(read_chain(target, args.run))
         print(f"ledger: {n} entr{'y' if n == 1 else 'ies'}, "
               + ("intact" if not problems else f"{len(problems)} problem(s)"))

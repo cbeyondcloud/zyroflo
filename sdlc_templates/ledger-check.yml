@@ -9,7 +9,16 @@
 # remembers the previous file can see that, so this job compares the ledger
 # against the pull request's base commit and requires it to have been APPENDED
 # to, never rewritten. That is the difference between a tampered ledger being
-# detectable and being unmergeable.
+# detectable and being unmergeable. It also fails a gate's live approval that was
+# recorded under `self_approval: forbid` with its own approver as the change's
+# author - judged by the mode that ENTRY records, never the policy file as it is
+# today. That mode is the recording client's claim (signed when signing is on):
+# an approval taken under a relaxed policy is judged under that relaxed mode, so
+# the control is enforced where a verdict is taken. One "not checked" line counts
+# live approvals recorded under `allow` while the policy now says `forbid`, and
+# one counts, by cause, approvals that could not be judged (no mode or no author
+# recorded, an unknown author, mode or verdict, no approver, no gate). Neither fails the
+# job, nor does a policy file this comparison could not read.
 #
 # IT RUNS ON EVERY PULL REQUEST, ON PURPOSE. The lifecycle pushes `sdlc/*`
 # branches, but a tamper check you can dodge by naming your branch something

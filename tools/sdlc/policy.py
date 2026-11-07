@@ -5317,13 +5317,35 @@ def self_approval(policy: dict, approver: str, author: str) -> list[str]:
     """
     if policy["self_approval"] != "forbid":
         return []
-    if not author:
+    # T707: blank is unknown, by `known_identity` - the one helper `record`, the
+    # ledger's judge and `policy.py --author` all reach - so a whitespace author
+    # cannot be read as a known, different person at one door and nobody at another.
+    if not known_identity(author):
         return ["policy sets self_approval: forbid, and there is no recorded author "
                 "to compare against - pass --author, or commit the work first"]
-    if approver.strip().lower() == author.strip().lower():
+    if same_person(approver, author):
         return [f"policy sets self_approval: forbid - {approver} wrote this change "
                 f"and may not also approve it"]
     return []
+
+
+def same_person(a: object, b: object) -> bool:
+    """Whether two recorded identities name one person, by THE rule `self_approval`
+    applies: surrounding whitespace dropped, case ignored. T707: the ledger's
+    `approve.separation_of_duties` judges a recorded entry by this same function,
+    so the refusal at record time and the verdict read back later cannot drift
+    apart. Anything but two non-empty strings is not a match - an unknown is never
+    read as the same person, nor, by the callers, as a different one."""
+    a, b = known_identity(a).lower(), known_identity(b).lower()
+    return bool(a) and a == b
+
+
+def known_identity(value: object) -> str:
+    """A recorded identity as the rule reads it, or "" for UNKNOWN (T707): a string
+    with its surrounding whitespace dropped. Blank, None and anything not a string
+    are all unknown - one answer for `self_approval`, `same_person`, the value
+    `approve.record` records and `approve.separation_of_duties` judges."""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _readers_refuse(target: Path) -> None:
