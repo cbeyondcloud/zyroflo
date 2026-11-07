@@ -179,6 +179,25 @@ Approval is an append-only ledger entry in every mode — one format, one code p
 are hash-chained with stdlib `hashlib`, so **tamper-evidence costs no dependencies**;
 `signing: dsse` adds in-toto envelopes when cross-person attribution is needed.
 
+**An entry records the change's author it was judged against**: `author` (the value the
+`self_approval` rule judged - `--author`, else the HEAD commit's author email - or null when
+unknown; a blank one is unknown), `author_source` (`flag`, `git-head` or `none`) and the
+`self_approval` mode in force, all inside the hashed and signed body. It is a claim, not proof
+of who wrote the code: the free edition checks no commit signature, so a false author is not
+prevented, only signed by the approver's key. `approve.py --verify` and the CI ledger check
+judge each gate's live approval under **the mode that entry records**, never the policy file
+as it stands today: one recorded under `forbid` whose author is its approver is a problem; one
+recorded under `allow` is never failed later, so adopting `forbid` cannot turn committed
+history red. **The recorded mode is the recording client's claim** (signed when signing is
+on), just as the author is: an approval taken under a relaxed policy - a working-tree edit, a
+modified client - is judged under that relaxed mode, so the control is enforced where a
+verdict is taken, not where it is read. The checks state, on one non-fatal line, the live
+approvals recorded under `allow` while today's policy says `forbid`; a policy that cannot be
+read there is a stated limit, never a failure. Approvals that cannot be judged - no mode
+recorded (written before entries recorded one), no author, an unknown author, an unknown
+mode or verdict, no approver, or no gate - are **not judged**: counted by cause on one line per verify
+or check run, never a failure.
+
 **Improving an artifact before approving it is the ordinary case, not a violation.** A gate
 pins the bytes that exist when the verdict is recorded, so a reviewer who rewrites the
 rollback step and then approves is approving their own version; a later edit still voids the
