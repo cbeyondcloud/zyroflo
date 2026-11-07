@@ -593,10 +593,10 @@ def test_every_not_judged_cause_is_one_a_verifier_reports():
     assert reached == set(A.NOT_JUDGED_CAUSES)
 
 
-def test_integrity_judges_separation_once_and_states_an_uncovered_run(repo, monkeypatch):
+def test_integrity_judges_separation_once_and_judges_an_uncovered_run(repo, monkeypatch):
     """N4: `integrity` with no report computes separation once for the call (one
-    report per run), and a report handed in that does not cover a run is a stated
-    line, not a KeyError."""
+    report per run); a run the handed-in report does not cover (created since) is
+    judged on the spot - never a KeyError, never read as clean (round 4, nit 2)."""
     runs = [_approval(repo, DEV, "forbid") for _ in range(3)]
     calls = []
     real = A.separation_report
@@ -605,8 +605,26 @@ def test_integrity_judges_separation_once_and_states_an_uncovered_run(repo, monk
     V.integrity(repo)
     assert sorted(calls) == sorted(runs)
     sod = V.separation(repo)
-    late = _approval(repo, DEV, "forbid")
-    said = V.integrity(repo, sod)
-    assert [p for p in said if late in p] == [
-        f"{late}: separation of duties was not judged - the report handed to this check "
-        f"does not cover this run"]
+    late = _approval(repo, LEAD, "forbid")
+    said = [p for p in V.integrity(repo, sod) if late in p]
+    assert len(said) == 1 and "a self-approval" in said[0], said
+
+
+# ── fix round 4 ──────────────────────────────────────────────────────────────
+
+
+def test_an_unjudged_entry_is_never_also_counted_as_weaker(repo, tmp_path):
+    """O1: an unknown verdict recorded under `allow` while the policy says `forbid`
+    is stated ONCE, on the not-judged line - not also on the weaker line, whose
+    'the recorded mode judges them' would be untrue for it."""
+    rid = _approval(repo, LEAD, "allow")
+    _restamp(repo, rid, verdict="maybe")
+    forbid(repo)
+    for done in (verify(repo, rid), _ledger_check(repo, tmp_path)):
+        assert done.returncode == 0, done.stdout
+        assert "carry a verdict this harness does not know" in done.stdout, done.stdout
+        assert "weaker" not in done.stdout, done.stdout
+    bundle = tmp_path / "bundle" / "ledger_check.py"
+    doc = json.loads(_spawn([str(bundle), "--ledger", "--target", str(repo), "--json"],
+                            cwd=bundle.parent).stdout)
+    assert doc["weaker"] == [] and len(doc["not_judged"]) == 1, doc

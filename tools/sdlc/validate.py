@@ -264,13 +264,11 @@ def integrity(target: Path, sod: dict | None = None) -> list[str]:
         # T707: a live approval recorded under `self_approval: forbid` whose
         # recorded author is its approver. One with no mode or author to judge is
         # counted in `limits`, not here.
-        report = sod["runs"].get(run_id)
-        if report is None:
-            # A report handed in that does not cover this run (one created since it
-            # was computed): said, never a KeyError, and never read as clean.
-            problems.append(f"{run_id}: separation of duties was not judged - the "
-                            f"report handed to this check does not cover this run")
-        for problem in (report or {}).get("problems", []):
+        # A run the handed-in report does not cover (created since it was
+        # computed) is judged here, exactly - never a KeyError, never read as clean.
+        report = (sod["runs"].get(run_id)
+                  or approvals.separation_report(target, run_id, sod.get("mode")))
+        for problem in report["problems"]:
             problems.append(f"{run_id}: {problem}")
         try:
             for problem in ledger.verify_artifacts(target, run_id):
@@ -501,8 +499,7 @@ def limits(target: Path, base: str = "", sod: dict | None = None) -> list[str]:
     `forbid`; and a policy that could not be read for that comparison; and a
     ledger the base ref has never seen. Of the last: `append_only` walks what the
     base remembers, so a run whose folder is first committed on the branch is not
-    judged clean by it - it is
-    not judged at all. Reporting nothing would make the harness's own ordinary
+    judged clean by it - it is not judged at all. Reporting nothing would make the harness's own ordinary
     merge look checked; making it a problem would block every first merge. So
     it is the same third channel, naming the run.
 
@@ -568,14 +565,15 @@ def separation(target: Path) -> dict:
     """Separation of duties for every run, computed ONCE per check (T707):
     `runs` maps each run id to its `approve.separation_report`; `not_judged` and
     `weaker` flatten them as `<run>: entry N (<gate>)...` lines for `--json`;
-    `not_judged_causes` keeps each line's cause; `unreadable` is the limit line
+    `not_judged_causes` keeps each line's cause; `mode` is today's policy mode (None
+    when unreadable), for judging a run created since; `unreadable` is the limit line
     when today's policy could not be read - never a problem."""
     mode, unreadable = approvals.current_mode(target)
     runs = {run_id: approvals.separation_report(target, run_id, mode)
             for run_id in run_ids(target)}
     causes = [(cause, f"{run_id}: {line}") for run_id, rep in runs.items()
               for cause, line in rep["not_judged"]]
-    return {"runs": runs, "not_judged_causes": causes,
+    return {"runs": runs, "mode": mode, "not_judged_causes": causes,
             "not_judged": [line for _, line in causes],
             "weaker": [f"{run_id}: {line}" for run_id, rep in runs.items()
                        for line in rep["weaker"]],

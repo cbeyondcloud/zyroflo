@@ -665,13 +665,16 @@ def separation_report(target: Path, run_id: str, policy_mode: str | None = None)
                                    f"forbid, and {why} - a self-approval")
         elif verdict == "not-judged":
             out["not_judged"].append((cause, f"entry {i} ({gate}): {why}"))
-        if policy_mode == "forbid" and entry.get("self_approval") == "allow":
+        # O1: an entry already stated as not judged is not also "judged by its
+        # recorded mode" on the weaker line - one entry, one line, every door.
+        if (verdict != "not-judged" and policy_mode == "forbid"
+                and entry.get("self_approval") == "allow"):
             out["weaker"].append(f"entry {i} ({gate})")
     for i, entry in gateless:
         if entry.get("verdict") != "reject":
             out["approvals"] += 1
-            out["not_judged"].append(("no-gate", f"entry {i}: an entry that names no "
-                                                 f"gate, so it is no gate's live approval"))
+            out["not_judged"].append(("no-gate", f"entry {i}: an approval that names no "
+                                                 f"gate, so it stands for no gate"))
     return out
 
 
