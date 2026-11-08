@@ -115,13 +115,34 @@ def test_standalone_and_workspace_are_recorded_but_not_layers(tmp_path):
     assert m["layers"] == ["claude-extras"], m["layers"]
 
 
+#: The record's fields that are not layers (T711): the README's "never" half names them.
+NOT_LAYERS = ("tools", "declined-tools", "standalone", "workspace")
+
+
+def _misplaced(readme: str) -> list[str]:
+    """Every key the README's layers sentence names on the wrong side of "never
+    `tools`" (T712 3b): a switch that is not in the layers half or is in the never half,
+    and a non-layer field that is not in the never half or is in the layers half."""
+    text = " ".join(readme.split())
+    start = text.index("and `layers` (")
+    split = text.index("never `tools`", start)
+    layers, never = text[start:split], text[split:text.index(")", split)]
+    return ([k for k in SWITCHES if f"`{k}`" not in layers or f"`{k}`" in never]
+            + [k for k in NOT_LAYERS if f"`{k}`" not in never or f"`{k}`" in layers])
+
+
 def test_the_readme_layers_sentence_names_every_recorded_switch():
-    """Review F4: the README spells the switches out; a later switch must reach it."""
-    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
-    start = readme.index("and `layers` (")
-    sentence = readme[start:readme.index(")", readme.index("never `tools`", start))]
-    for key in SWITCHES:
-        assert f"`{key}`" in sentence, key
+    """Review F4: the README spells the switches out; a later switch must reach it - on
+    the layers side of the sentence (T712 3b: the slice spanned both halves, so a switch
+    named after "never `tools`" passed)."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert _misplaced(readme) == []
+    # Positive control: the same check, over the README with `snapshot-cadence` moved
+    # into the never half, flags it - the blind spot the one-slice guard had.
+    moved = readme.replace(" and `snapshot-cadence`, never `tools`,",
+                           ", never `tools`, `snapshot-cadence`,", 1)
+    assert moved != readme, "the control's mutation no longer applies to the README"
+    assert _misplaced(moved) == ["snapshot-cadence"]
 
 
 def test_layers_is_empty_for_tools_alone_and_null_without_a_record(tmp_path):

@@ -78,7 +78,12 @@ INSTALL_OPTIONS_HEADER = ("# Written by sdlc-init.py: the tools and opt-in layer
                           "drop a tool, remove it from the tools line here and from the "
                           "tools: line of .sdlc/profile.yml - a deleted tools line is read "
                           "back from that profile line. The standalone line is rewritten "
-                          "from the installer copy on every run.")
+                          "from the installer copy on every run. A detected tool this "
+                          "repository does not use is declined in a declined-tools = "
+                          "[...] line here; a declined tool that the tools: line of "
+                          ".sdlc/profile.yml still names comes off that line too, or the "
+                          "next run stages .sdlc/profile.yml.new with the shorter line, "
+                          "and moving it over .sdlc/profile.yml settles it.")
 #: What `--manifest` puts where an installed file names a harness clone's absolute
 #: path, so the same install digests the same from any clone on any machine.
 HARNESS_TOKEN = "<HARNESS>"
@@ -4675,10 +4680,11 @@ RECORDED_STANDALONE = "standalone"
 #: of files written. Stored relative to the target, posix, and only when inside it.
 RECORDED_WORKSPACE = "workspace"
 #: T710: the detected tools this repository does not use, added by hand (the owner's
-#: ruling Q1), in the same form as `tools`. Detection leaves them out everywhere it
-#: decides - a plain run's NOTE, `--tools auto` and the no-base fallback (`run_tools`) -
-#: while an explicit list or `all` still installs one, and that run drops it from this
-#: line. `claude`, the baseline, cannot be declined; a tool on both lines is refused. Not
+#: ruling Q1), in the same form as `tools`. Detection and every base leave them out - a
+#: plain run's NOTE, `--tools auto`, the no-base fallback and the kept profile's `tools:`
+#: line read where the record has no tools line (`run_tools`) - while an explicit list or
+#: `all` still installs one, and that run drops it from this line and says so in a NOTE.
+#: `claude`, the baseline, cannot be declined; a tool on both lines is refused. Not
 #: a layer (T711): a reader finds it in `--manifest`'s `options`, never in `layers`.
 RECORDED_DECLINED = "declined-tools"
 #: One line of the record. Read leniently in what a hand edit plausibly does - blank
@@ -4827,7 +4833,11 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
         raise InstallOptionsError(
             f"{INSTALL_OPTIONS_REL} line {n}: {', '.join(both)} "
             f"{'is' if len(both) == 1 else 'are'} both installed (tools) and declined "
-            f"(declined-tools) - remove {'it' if len(both) == 1 else 'them'} from one",
+            f"(declined-tools) - remove {'it' if len(both) == 1 else 'them'} from one "
+            f"(a declined tool that the tools: line of .sdlc/profile.yml still names "
+            f"comes off that line too, or the next run stages .sdlc/profile.yml.new "
+            f"with the shorter line, and moving it over .sdlc/profile.yml settles "
+            f"it)",
             line=n)
     return options, lines
 
@@ -6211,7 +6221,10 @@ def main(argv: list[str] | None = None) -> int:
                "declined-tools = [...] line of .sdlc/install-options: a plain run's NOTE "
                "no longer names it, and neither --tools auto nor the profile's tools: "
                "line adds it, while a list or 'all' installs it, drops it from that "
-               "line and says so. "
+               "line and says so; a declined tool that the tools: line of "
+               ".sdlc/profile.yml still names comes off that line too, or the next run "
+               "stages .sdlc/profile.yml.new with the shorter line, and moving it over "
+               ".sdlc/profile.yml settles it. "
                "An install from an installer copy that lacks all three harness "
                "generators (the config engine, the pipeline renderer and the ledger "
                "emitter: a standalone sdlc-init.py beside sdlc_templates/, or a bundle) "
@@ -6237,7 +6250,11 @@ def main(argv: list[str] | None = None) -> int:
                          "detected ones, and a list or 'all' adds to the recorded ones. A "
                          "tool listed in a declined-tools = [...] line of "
                          ".sdlc/install-options is never detected: only a list or 'all' "
-                         "installs it, drops it from that line and says so")
+                         "installs it, drops it from that line and says so; a declined "
+                         "tool that the tools: line of .sdlc/profile.yml still names "
+                         "comes off that line too, or the next run stages "
+                         ".sdlc/profile.yml.new with the shorter line, and moving it "
+                         "over .sdlc/profile.yml settles it")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
     ap.add_argument("--single-component", action="store_true",
                     help="install a repository built from several units as ONE "

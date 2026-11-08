@@ -24,7 +24,11 @@ HEADER = (b"# Written by sdlc-init.py: the tools and opt-in layers every re-run 
           b"applies. Delete a layer's line to drop that layer. To drop a tool, remove "
           b"it from the tools line here and from the tools: line of .sdlc/profile.yml "
           b"- a deleted tools line is read back from that profile line. The standalone "
-          b"line is rewritten from the installer copy on every run.\n")
+          b"line is rewritten from the installer copy on every run. A detected tool this "
+          b"repository does not use is declined in a declined-tools = [...] line here; a "
+          b"declined tool that the tools: line of .sdlc/profile.yml still names comes off "
+          b"that line too, or the next run stages .sdlc/profile.yml.new with the shorter "
+          b"line, and moving it over .sdlc/profile.yml settles it.\n")    # T712
 #: T708: every install records its resolved tools; the fixtures resolve to claude.
 TOOLS = b'tools = ["claude"]\n'
 REVIEWER = ".claude/agents/sdlc-reviewer.md"

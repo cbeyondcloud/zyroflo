@@ -981,14 +981,21 @@ def pseudonym(identity: str) -> str:
 
 def _identified(target: Path, rows: list[dict]) -> list[dict]:
     """The rows an export writes, with `approver` pseudonymised when the
-    constitution says `identity: hash`. The ledger itself is never touched."""
+    constitution says `identity: hash`. The ledger itself is never touched.
+
+    T712: the pseudonym is of the identity the judge reads (`known_identity`: its
+    surrounding whitespace dropped), so an approver recorded padded before T712
+    exports as the same person as the stripped one. A value with no such identity
+    (blank, or not a string) is hashed as it was before. Case is not folded."""
     try:
         mode = guardrails.load(target).get("identity", "email")
     except guardrails.PolicyError as exc:
         raise MetricsError(f"policy.yml could not be read for identity: {exc}") from None
     if mode != "hash":
         return rows
-    return [{**r, "approver": pseudonym(str(r["approver"]))} if r.get("approver") else r
+    return [{**r, "approver": pseudonym(guardrails.known_identity(r["approver"])
+                                        or str(r["approver"]))}
+            if r.get("approver") else r
             for r in rows]
 
 
@@ -1037,7 +1044,9 @@ def export(target: Path, fmt: str, out: Path, *, since: str = "",
                if path.is_file() and path.read_text(encoding="utf-8") != body]
     if clobber and not force:
         raise MetricsError(f"{len(clobber)} export file(s) already hold different bytes - "
-                           f"e.g. {clobber[0]} - a run grew since it was exported. "
+                           f"e.g. {clobber[0]} - the run's exported rows changed since it was "
+                           f"exported (it grew, or what an export writes for it "
+                           f"changed). "
                            f"Re-run with --force to replace them (an ETL keyed on the "
                            f"event hash re-loads them idempotently)")
     written = []
@@ -1245,7 +1254,11 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", metavar="YYYY-MM-DD", default="",
                     help="with --export ndjson|csv: only runs with an event on or after it")
     ap.add_argument("--force", action="store_true",
-                    help="with --export: replace export files that hold different bytes")
+                    help="with --export ndjson|csv: replace export files that hold "
+                         "different bytes. --force never reaches a sqlite store: a sqlite "
+                         "re-export adds rows and fills a run's closure into its runs row, "
+                         "and never changes a row's exported values, an approver's token "
+                         "included - delete the store and export again to re-derive them")
     ap.add_argument("--merge", nargs="+", metavar="AUDIT_DB",
                     help="fold these repositories' audit.db stores into --into (T452)")
     ap.add_argument("--into", metavar="DB", help="with --merge: the org's combined store")

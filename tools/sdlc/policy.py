@@ -208,9 +208,10 @@ DEFAULTS: dict = {
     "metrics_out": "",
     # T452: how an EXPORT names the people in it. `email` (the default) writes
     # the approver's git identity as recorded; `hash` writes a stable
-    # pseudonym instead, for an org that does not want personal identifiers in
-    # an analytics store. The local ledger is untouched either way - this is
-    # about what leaves the repository, not what the chain records.
+    # pseudonym instead (of the approver with its surrounding whitespace dropped,
+    # T712), for an org that does not want personal identifiers in an analytics
+    # store. The local ledger is untouched either way - this is about what leaves
+    # the repository, not what the chain records.
     "identity": "email",
 }
 
