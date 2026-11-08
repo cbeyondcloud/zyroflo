@@ -428,3 +428,211 @@ def test_the_unapplied_note_names_the_profile_key(tmp_path):
     (t / ".cursor").mkdir()
     out = _written(_install(t))
     assert "the tools: line of .sdlc/profile.yml does not list" in out, out
+
+
+# ── T710: a repository can decline a detected tool ───────────────────────────
+# A `declined-tools = [...]` line, added by hand, silences the NOTE for those tools and
+# keeps `--tools auto` and the detection fallback from adding them; an explicit list or
+# `all` still installs one, and un-declines it. Each test failed before T710, whose
+# record refused the line as a name it does not record.
+
+DECLINED = 'declined-tools = ["cursor"]'
+
+
+def _decline(target: Path, line: bytes = DECLINED.encode() + b"\n") -> None:
+    with (target / REL).open("ab") as fh:
+        fh.write(line)
+
+
+def _declined_line(target: Path) -> str | None:
+    found = [line for line in _lines(target) if line.startswith("declined-tools")]
+    assert len(found) <= 1, found
+    return found[0] if found else None
+
+
+def _cursor_note(proc) -> list[str]:
+    return [line for line in _text(proc).splitlines() if "NOTE" in line and "cursor" in line]
+
+
+def test_a_declined_tool_is_not_named_and_the_record_settles(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    (t / ".cursor").mkdir()
+    _decline(t)
+    proc = _install(t)
+    assert not _cursor_note(proc), _text(proc)
+    assert not (t / CURSOR).exists()
+    assert _declined_line(t) == DECLINED, _lines(t)
+    assert _tools_line(t) == 'tools = ["claude"]', _lines(t)
+    again = _install(t)
+    assert "0 file(s) written" in _written(again), _written(again)
+    assert not _cursor_note(again) and _declined_line(t) == DECLINED
+
+
+def test_the_note_names_the_declined_tools_remedy(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    (t / ".cursor").mkdir()
+    proc = _install(t)
+    note = " ".join(" ".join(_cursor_note(proc)).split())
+    assert note and "--tools auto" in note, _text(proc)          # T708's NOTE, as before
+    out = _written(proc)
+    assert "declined-tools = [...]" in out and "to stop this note" in out, out
+
+
+def test_auto_does_not_add_a_declined_tool(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    (t / ".cursor").mkdir()
+    (t / ".github").mkdir()
+    _decline(t)
+    _install(t, "--tools", "auto")
+    assert not (t / CURSOR).exists()
+    assert (t / COPILOT).is_file()                   # a detected tool not declined is added
+    assert _declined_line(t) == DECLINED, _lines(t)
+    assert _tools_line(t) == 'tools = ["claude", "copilot"]', _lines(t)
+
+
+def test_an_explicit_list_installs_and_undeclines_a_tool(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    (t / ".cursor").mkdir()
+    _decline(t, b'declined-tools = ["cursor", "gemini"]\n')
+    _install(t, "--tools", "claude,cursor")
+    assert (t / CURSOR).is_file()
+    assert _tools_line(t) == 'tools = ["claude", "cursor"]', _lines(t)
+    assert _declined_line(t) == 'declined-tools = ["gemini"]', _lines(t)
+    # `all` installs every tool, so nothing is left declined and the line goes.
+    _install(t, "--tools", "all")
+    assert _declined_line(t) is None, _lines(t)
+
+
+def test_a_tool_both_installed_and_declined_is_refused_by_line(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude,cursor")
+    _decline(t)
+    proc = _run("--target", str(t), "--no-graph")
+    err = " ".join(proc.stderr.decode("utf-8", "replace").split())
+    assert proc.returncode == 1, _text(proc)
+    assert f"{REL} line 3" in err and "both installed" in err and "cursor" in err, err
+    assert "remove that line" in err and "Traceback" not in err, err
+    m = _manifest(t)
+    assert m["options"] is None and REL in m["unreadable"], m
+
+
+BAD_DECLINED = {
+    "baseline": (b'declined-tools = ["claude"]\n', "cannot be declined"),
+    "empty": (b"declined-tools = []\n", "it lists no tools"),
+    "unknown": (b'declined-tools = ["nope"]\n', "'nope' is not a tool"),
+    "repeat": (b'declined-tools = ["cursor", "cursor"]\n', "names a tool twice"),
+}
+
+
+def test_a_bad_declined_tools_line_is_refused_by_its_own_cause(tmp_path):
+    for name, (body, cause) in BAD_DECLINED.items():
+        t = _fixture(tmp_path / name)
+        _install(t, "--tools", "claude")
+        _decline(t, body)
+        proc = _run("--target", str(t), "--no-graph")
+        err = " ".join(proc.stderr.decode("utf-8", "replace").split())
+        assert proc.returncode == 1, (name, _text(proc))
+        assert f"{REL} line 3: declined-tools" in err and cause in err, (name, err)
+        assert "Traceback" not in err, (name, err)
+        m = _manifest(t)
+        assert m["options"] is None and REL in m["unreadable"], (name, m)
+
+
+def test_the_detection_fallback_leaves_out_a_declined_tool(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    (t / REL).write_bytes(T708_HEADER + DECLINED.encode() + b"\n")    # no tools line
+    (t / ".sdlc" / "profile.yml").unlink()                           # no profile line
+    (t / ".cursor").mkdir()
+    assert CURSOR not in _manifest(t)["expected_missing"]
+    _install(t)
+    assert not (t / CURSOR).exists()
+    assert _declined_line(t) == DECLINED, _lines(t)
+
+
+def test_the_manifest_carries_declined_tools_and_it_is_not_a_layer(tmp_path):
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude", "--claude-extras")
+    (t / ".cursor").mkdir()
+    _decline(t)
+    m = _manifest(t)
+    assert m["options"]["declined-tools"] == ["cursor"], m["options"]
+    assert m["expected_missing"] == [], m["expected_missing"]
+    assert m["layers"] == ["claude-extras"], m["layers"]               # T711
+
+
+#: T710's door text, at --help (the --tools option and the epilog, each), in the README and
+#: in docs/bootstrap.md (review F2).
+DECLINED_DOOR = "declined-tools = [...] line of .sdlc/install-options"
+
+
+def _help_doors() -> tuple[str, str]:
+    """(the --tools option's help, the epilog) of the wide `--help` - review F3: the
+    whole text held the phrase twice, so deleting either sentence left a test green."""
+    help_text = _wide_help()
+    epilog = help_text[help_text.index("exit status:"):]
+    options = help_text[:help_text.index("exit status:")]
+    start = options.rindex("--tools TOOLS")         # the option block, not the usage line
+    end = options.index("--force", start)
+    assert "comma list of tools" in options[start:end], options[start:end]
+    return options[start:end], epilog
+
+
+def test_the_doors_name_the_declined_tools_line():
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    assert DECLINED_DOOR in readme.replace("`", ""), "README"
+    guide = " ".join((ROOT / "docs" / "bootstrap.md").read_text(encoding="utf-8").split())
+    assert DECLINED_DOOR in guide.replace("`", ""), "docs/bootstrap.md"
+    tools_help, epilog = _help_doors()
+    assert DECLINED_DOOR in tools_help, ("--tools help", tools_help)
+    assert DECLINED_DOOR in epilog, "epilog"
+
+
+# ── T710 fix round 1 ──────────────────────────────────────────────────────────
+
+def _profile_base_declined(target: Path) -> None:
+    """Review F1's chain: an install that wired cursor, its record replaced by one with
+    no tools line and cursor declined, and `.cursor/` gone - the base is the profile's
+    `tools: [claude, cursor]` line."""
+    _install(target, "--tools", "claude,cursor")
+    assert b"tools: [claude, cursor]" in (target / ".sdlc" / "profile.yml").read_bytes()
+    (target / REL).write_bytes(T705_HEADER + DECLINED.encode() + b"\n")
+    shutil.rmtree(target / ".cursor")
+
+
+def test_a_profile_base_never_reinstalls_a_declined_tool(tmp_path):
+    """Review F1 (P2): with no tools line, the profile's tools: line was the base and was
+    not filtered, so a plain run reinstalled the declined tool and deleted the line."""
+    plain = _fixture(tmp_path / "plain")
+    _profile_base_declined(plain)
+    m = _manifest(plain)
+    assert not any(rel.startswith(".cursor/") for rel in m["expected_missing"]), m
+    proc = _install(plain)
+    assert not (plain / CURSOR).exists(), _text(proc)
+    assert _declined_line(plain) == DECLINED, _lines(plain)
+    assert _tools_line(plain) == 'tools = ["claude"]', _lines(plain)
+    auto = _fixture(tmp_path / "auto")
+    _profile_base_declined(auto)
+    _install(auto, "--tools", "auto")
+    assert not (auto / CURSOR).exists()
+    assert _declined_line(auto) == DECLINED, _lines(auto)
+
+
+def test_a_run_that_undeclines_a_tool_says_so(tmp_path):
+    """Review F6: an explicit list or `all` dropped a hand-written declaration in silence."""
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    _decline(t)
+    proc = _install(t, "--tools", "claude,cursor")
+    notes = [line for line in _text(proc).splitlines()
+             if "NOTE" in line and "declined-tools" in line]
+    assert len(notes) == 1 and "cursor" in notes[0], _text(proc)
+    assert _declined_line(t) is None
+    # A plain run after it un-declines nothing and says nothing of the kind.
+    again = _install(t)
+    assert not [line for line in _text(again).splitlines()
+                if "NOTE" in line and "declined-tools" in line], _text(again)
