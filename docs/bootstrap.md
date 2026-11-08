@@ -68,6 +68,11 @@ tracked). A later run without `--tools` installs exactly those, and names in a N
 tool it now detects but leaves out; `--tools auto` adds the detected ones, and a list
 or `all` adds to the recorded ones. To drop a tool, remove it from that line and from
 the `tools:` line of `.sdlc/profile.yml`, then re-run.
+A detected tool the repository does not use is declined by hand, in a
+`declined-tools = [...]` line of `.sdlc/install-options`: a run without `--tools`
+no longer names it in that NOTE, and neither `--tools auto` nor the profile's
+`tools:` line adds it, while a list or `all` installs it, drops it from that line
+and says so.
 
 Exit codes matter here, and `0` is not the only good one — read what it prints. An
 install can succeed while the graph is honestly absent, which is a fact about your

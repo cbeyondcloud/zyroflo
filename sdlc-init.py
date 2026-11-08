@@ -4674,6 +4674,13 @@ RECORDED_STANDALONE = "standalone"
 #: .sdlc/.gitignore for one repository and stages them as `.new` copies - a different set
 #: of files written. Stored relative to the target, posix, and only when inside it.
 RECORDED_WORKSPACE = "workspace"
+#: T710: the detected tools this repository does not use, added by hand (the owner's
+#: ruling Q1), in the same form as `tools`. Detection leaves them out everywhere it
+#: decides - a plain run's NOTE, `--tools auto` and the no-base fallback (`run_tools`) -
+#: while an explicit list or `all` still installs one, and that run drops it from this
+#: line. `claude`, the baseline, cannot be declined; a tool on both lines is refused. Not
+#: a layer (T711): a reader finds it in `--manifest`'s `options`, never in `layers`.
+RECORDED_DECLINED = "declined-tools"
 #: One line of the record. Read leniently in what a hand edit plausibly does - blank
 #: lines, comments, spaces around the name, the `=` and the value, a trailing comment,
 #: any order - and strictly in everything else; the next run writes the canonical form.
@@ -4731,10 +4738,12 @@ def _recorded_workspace(root: Path, value: str, where: str, n: int) -> str:
     return rel
 
 
-def _recorded_tools(value: str, where: str, n: int) -> list[str]:
+def _recorded_tools(value: str, where: str, n: int,
+                    key: str = RECORDED_TOOLS) -> list[str]:
     """The tools line's list (T708): a JSON array of known tool names, each once. Any
     other value is refused by its line - a list read past would install a different set
-    of tools in silence."""
+    of tools in silence. T710: the `declined-tools` line (`key`) is read the same way,
+    and names neither `claude`, the baseline, nor an empty list."""
     m = _LIST_VALUE.fullmatch(value)
     try:
         tools = json.loads(m.group(1)) if m else None
@@ -4754,6 +4763,14 @@ def _recorded_tools(value: str, where: str, n: int) -> list[str]:
         problem = f"{', '.join(map(repr, bad))} is not a tool this installer knows"
     elif len(set(tools)) != len(tools):
         problem = "it names a tool twice"
+    elif key == RECORDED_DECLINED and "claude" in tools:
+        problem = "'claude' is the baseline every install has, so it cannot be declined"
+    if problem and key == RECORDED_DECLINED:
+        raise InstallOptionsError(
+            f'{where}: declined-tools takes a list of the detected tools this repository '
+            f'does not use, each once, from '
+            f'{", ".join(t for t in ALL_TOOLS if t != "claude")} - '
+            f'declined-tools = ["cursor"] - and {problem}', line=n)
     if problem:
         raise InstallOptionsError(
             f'{where}: tools takes a list of the tools to install, each once, from '
@@ -4769,7 +4786,7 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
     options: dict = {}
     lines: dict[str, int] = {}
     known = sorted((*RECORDED_SWITCHES, RECORDED_WORKSPACE, RECORDED_TOOLS,
-                    RECORDED_STANDALONE))
+                    RECORDED_STANDALONE, RECORDED_DECLINED))
     for n, line in enumerate(text.removeprefix(_BOM).splitlines(), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -4788,8 +4805,8 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
             options[key] = True
         elif key == RECORDED_WORKSPACE:
             options[key] = _recorded_workspace(root, value, where, n)
-        elif key == RECORDED_TOOLS:
-            options[key] = _recorded_tools(value, where, n)
+        elif key in (RECORDED_TOOLS, RECORDED_DECLINED):
+            options[key] = _recorded_tools(value, where, n, key)
         elif key == RECORDED_STANDALONE:
             if not _SWITCH_VALUE.fullmatch(value):
                 raise InstallOptionsError(f"{where}: standalone takes only `true` - every "
@@ -4801,6 +4818,17 @@ def parse_install_options(root: Path, text: str) -> tuple[dict, dict[str, int]]:
                                       f"not record (it records {', '.join(known)})",
                                       line=n)
         lines[key] = n
+    # T710, the owner's ruling Q3: a tool on both lines is a contradiction, named by the
+    # later of the two lines and never read past.
+    both = [t for t in options.get(RECORDED_TOOLS, ())
+            if t in options.get(RECORDED_DECLINED, ())]
+    if both:
+        n = max(lines[RECORDED_TOOLS], lines[RECORDED_DECLINED])
+        raise InstallOptionsError(
+            f"{INSTALL_OPTIONS_REL} line {n}: {', '.join(both)} "
+            f"{'is' if len(both) == 1 else 'are'} both installed (tools) and declined "
+            f"(declined-tools) - remove {'it' if len(both) == 1 else 'them'} from one",
+            line=n)
     return options, lines
 
 
@@ -4926,27 +4954,38 @@ def run_tools(root: Path, recorded: dict, given: str | None,
     has written from its resolved list (the owner's ruling Q2). Then: not given -> exactly
     the base, and detection only where there is no base; `auto` -> the base and the
     detected tools; `all` -> every tool; a list -> the base and the list. A run never
-    drops a tool: to drop one, delete it from the line and re-run (its files stay)."""
+    drops a tool: to drop one, delete it from the line and re-run (its files stay).
+    T710: a tool the record declines (`declined-tools`) is left out of every base and of
+    detection - the NOTE's list, `auto`, the no-base fallback (the owner's ruling Q2) and
+    the profile's `tools:` line where the record has no tools line (review F1) - and only
+    a list or `all` installs it."""
+    declined = set(recorded.get(RECORDED_DECLINED) or ())
+    detected = [t for t in detect_tools(root) if t not in declined]
     base = recorded.get(RECORDED_TOOLS)
     source: str | None = INSTALL_OPTIONS_REL
     if base is None:
         kept = _kept_tools(root)
         base = [t for t in ALL_TOOLS if t in kept] or None
         source = ".sdlc/profile.yml" if base else None
+    # The ONE subtraction point for every base (review F1): the record's own tools line
+    # never names a declined tool (`parse_install_options` refuses that), so this is the
+    # profile line's filter in effect - and a base it empties is still a base.
+    if base is not None:
+        base = [t for t in ALL_TOOLS if t in base and t not in declined]
     if listed is not None:
         chosen = set(base or ()) | set(listed)
     elif given == "all":
         chosen = set(ALL_TOOLS)
     elif given == "auto":
-        chosen = set(base or ()) | set(detect_tools(root))
+        chosen = set(base or ()) | set(detected)
     elif given is None:
-        chosen = set(base) if base else set(detect_tools(root))
+        chosen = set(base) if base is not None else set(detected)
     else:
         raise ValueError(f"run_tools: --tools {given!r} must be passed parsed, as `listed`")
     chosen.add("claude")                 # the baseline, as every --tools list has it
     tools = [t for t in ALL_TOOLS if t in chosen]
-    unapplied = ([t for t in detect_tools(root) if t not in chosen]
-                 if given is None and listed is None and base else [])
+    unapplied = ([t for t in detected if t not in chosen]
+                 if given is None and listed is None and base is not None else [])
     return tools, unapplied, source
 
 
@@ -4954,17 +4993,22 @@ def install_options_for(root: Path, *, claude_extras: bool, corpus_replay: bool,
                         snapshot_cadence: bool, workspace_path: Path | None,
                         recorded_workspace: str | None = None,
                         tools: list[str] | None = None,
-                        standalone: bool = False) -> tuple[dict, str]:
+                        standalone: bool = False,
+                        declined: list[str] | None = None) -> tuple[dict, str]:
     """(the record an install with these layers writes, a NOTE or ""). A workspace file
     outside the target is applied for this run and never changes the record (the owner's
     ruling F1): a recorded workspace line stays, and the NOTE says which. `tools` and
     `standalone` (T708): the run's resolved tools, and whether its installer copy lacks
-    the harness generators - recorded as what this run used, never as asked."""
+    the harness generators - recorded as what this run used, never as asked. `declined`
+    (T710): the record's `declined-tools`, carried minus this run's tools, so a run never
+    leaves a tool both installed and declined; written only when non-empty."""
     on = {"claude-extras": claude_extras, FLAG_CORPUS_REPLAY[2:]: corpus_replay,
           FLAG_SNAPSHOT_CADENCE[2:]: snapshot_cadence}
     options: dict = {key: True for key, value in on.items() if value}
     if tools:
         options[RECORDED_TOOLS] = [t for t in ALL_TOOLS if t in tools]
+    if still := [t for t in ALL_TOOLS if t in (declined or ()) and t not in (tools or ())]:
+        options[RECORDED_DECLINED] = still
     if standalone:
         options[RECORDED_STANDALONE] = True
     note = ""
@@ -5114,7 +5158,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             recorded_workspace: str | None = None,
             inferred: list[tuple[str, list[str]]] | None = None,
             unapplied_tools: list[str] | None = None,
-            tools_source: str | None = None) -> int:
+            tools_source: str | None = None,
+            declined_tools: list[str] | None = None) -> int:
     """`reapplied`: the recorded layers `main` applied that the command line did not
     give (T705), named in a NOTE; `layer_notes`: one NOTE per layer NOT inferred for a
     target with no record because only some of its files are there; `inferred`: (switch, its
@@ -5124,7 +5169,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     target. The record this install writes is otherwise the layers it was handed, with
     `tools` and whether this installer copy lacks the harness generators (T708).
     `unapplied_tools`: the detected tools a plain run left out because `tools_source`
-    records the tool set (`run_tools`), named in a NOTE with the remedy."""
+    records the tool set (`run_tools`), named in a NOTE with the remedy.
+    `declined_tools` (T710): the record's `declined-tools` line, carried into the record
+    minus this run's tools; a tool this run installs from it is named in a NOTE (review
+    F6)."""
     # T442: the pre-INIT prerequisite, FIRST - before any template is rendered or
     # any file is written, so a stopped INIT leaves nothing half-installed.
     project, stop = project_gate(root, workspace, dry_run)
@@ -5377,7 +5425,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     install_options, options_note = install_options_for(
         root, claude_extras=claude_extras, corpus_replay=corpus_replay,
         snapshot_cadence=snapshot_cadence, workspace_path=workspace_path,
-        recorded_workspace=recorded_workspace, tools=tools, standalone=standalone)
+        recorded_workspace=recorded_workspace, tools=tools, standalone=standalone,
+        declined=declined_tools)
     # A dry run plans them anyway and says when they land: it describes the whole
     # command, and hiding the graph surfaces would describe a smaller one.
     ops, ledger_skipped = plan_install_ops(
@@ -5501,7 +5550,19 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
               f"the {'tools' if tools_source == INSTALL_OPTIONS_REL else 'tools:'} line "
               f"of {tools_source} does not list, so this run did not install "
               f"{'it' if len(unapplied_tools) == 1 else 'them'} - re-run with --tools auto "
-              f"to add every detected tool, or name it with --tools.")
+              f"to add every detected tool, or name it with --tools - or, if this "
+              f"repository does not use {'it' if len(unapplied_tools) == 1 else 'them'}, "
+              f"add {'it' if len(unapplied_tools) == 1 else 'them'} to a "
+              f"`declined-tools = [...]` line in {INSTALL_OPTIONS_REL} to stop this "
+              f"note.")
+    # Review F6: an explicit list or `all` un-declines a tool; a hand-written declaration
+    # removed from the record is said, as every other record change a run makes is.
+    if undeclined := [t for t in ALL_TOOLS if t in (declined_tools or ()) and t in tools]:
+        names = ", ".join(undeclined)
+        verb = "would no longer decline" if dry_run else "no longer declines"
+        print(f"\n  NOTE: this run installs {names}, so the declined-tools line of "
+              f"{INSTALL_OPTIONS_REL} {verb} "
+              f"{'it' if len(undeclined) == 1 else 'them'}.")
     blocked_rels = {o["rel"] for o in ops if o["status"] == "blocked"}
     for key, rels in inferred or ():
         # Review N3: the verb is what happened. A layer whose own file this run could not
@@ -6060,7 +6121,20 @@ def manifest(root: Path) -> dict:
             "staged": staged,
             "policy": files.get(".sdlc/policy.yml"),
             "profile_changed": profile_changed,
-            "options": options}
+            "options": options,
+            "layers": recorded_layers(options)}
+
+
+def recorded_layers(options: dict | None) -> list[str] | None:
+    """T711: the opt-in layers a record sets - the `RECORDED_SWITCHES` keys it holds,
+    sorted - or None exactly when there is no readable record (`options` is None). Derived
+    from `RECORDED_SWITCHES`, so a recorded field that is not a switch (`tools`,
+    `standalone`, `workspace`, T710's `declined-tools`) is never one, and a later switch is
+    without a change here. Recorded, never inferred: inference stays in the run's NOTE and
+    in `expected_missing`."""
+    if options is None:
+        return None
+    return sorted(key for key in RECORDED_SWITCHES if options.get(key) is True)
 
 
 #: The flags `--manifest` refuses by name: each one shapes an install, and a manifest
@@ -6133,6 +6207,11 @@ def main(argv: list[str] | None = None) -> int:
                "list or 'all' adds to them. To drop a tool, remove it from the tools "
                "line and from the tools: line of .sdlc/profile.yml, then re-run (its "
                "files stay); a deleted tools line is read back from that profile line. "
+               "A detected tool this repository does not use is declined by hand, in a "
+               "declined-tools = [...] line of .sdlc/install-options: a plain run's NOTE "
+               "no longer names it, and neither --tools auto nor the profile's tools: "
+               "line adds it, while a list or 'all' installs it, drops it from that "
+               "line and says so. "
                "An install from an installer copy that lacks all three harness "
                "generators (the config engine, the pipeline renderer and the ledger "
                "emitter: a standalone sdlc-init.py beside sdlc_templates/, or a bundle) "
@@ -6155,7 +6234,10 @@ def main(argv: list[str] | None = None) -> int:
                          ".sdlc/install-options: without --tools a run installs exactly "
                          "the recorded tools (a first install, or one with none recorded "
                          "and no profile tools: line, detects them); 'auto' adds the "
-                         "detected ones, and a list or 'all' adds to the recorded ones")
+                         "detected ones, and a list or 'all' adds to the recorded ones. A "
+                         "tool listed in a declined-tools = [...] line of "
+                         ".sdlc/install-options is never detected: only a list or 'all' "
+                         "installs it, drops it from that line and says so")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
     ap.add_argument("--single-component", action="store_true",
                     help="install a repository built from several units as ONE "
@@ -6219,10 +6301,12 @@ def main(argv: list[str] | None = None) -> int:
                          "beside an edited file (`staged`), the policy.yml digest "
                          "(`policy`), whether profile.yml changed since this machine's "
                          "install (`profile_changed`; null when the sidecar has no record "
-                         "or profile.yml could not be read) and the tools, layers and "
-                         "standalone line .sdlc/install-options records (`options`; null "
-                         "when it is "
-                         "missing or unreadable). Writes "
+                         "or profile.yml could not be read), every line "
+                         ".sdlc/install-options records - the tools, the declined tools, "
+                         "the layers, the workspace and the standalone line (`options`; null when it is "
+                         "missing or unreadable) - and, of those, the opt-in layers alone, "
+                         "sorted (`layers`: the recorded switches; [] when none is "
+                         "recorded, null exactly when `options` is). Writes "
                          "nothing; exit 1 when the target has no .sdlc/, 2 when any other "
                          "flag is given, a default spelled out included")
     args = ap.parse_args(argv)
@@ -6349,7 +6433,8 @@ def main(argv: list[str] | None = None) -> int:
                        snapshot_cadence=args.snapshot_cadence, reapplied=reapplied,
                        layer_notes=layer_notes, recorded_workspace=recorded_ws,
                        inferred=inferred, unapplied_tools=unapplied_tools,
-                       tools_source=tools_source)
+                       tools_source=tools_source,
+                       declined_tools=recorded.get(RECORDED_DECLINED))
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 

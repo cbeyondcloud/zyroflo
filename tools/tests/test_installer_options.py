@@ -459,6 +459,7 @@ def test_a_no_record_manifest_is_t704s_plus_two_entries(tmp_path):
     after = _manifest(t)
     assert after.pop("options") is None
     after.pop("expected_missing")          # T706's key, which T704 never printed
+    assert after.pop("layers") is None     # T711's key: null with no record, as options
     after["missing"].remove(REL)
     assert after == before
 
@@ -492,7 +493,8 @@ def test_the_manifest_help_names_every_key(tmp_path):
                           timeout=120, env={**__import__("os").environ, "COLUMNS": "4000"})
     out = " ".join(proc.stdout.decode("utf-8").split())
     keys = ("installer", "installed", "files", "per_repo", "missing", "unreadable",
-            "staged", "policy", "profile_changed", "options", "expected_missing")
+            "staged", "policy", "profile_changed", "options", "expected_missing",
+            "layers")                                   # T711: the twelfth key
     assert printed == set(keys), printed
     for key in keys:
         assert f"`{key}`" in out, key
@@ -501,6 +503,7 @@ def test_the_manifest_help_names_every_key(tmp_path):
     for key in keys:
         assert f"`{key}`" in readme, key
     assert "`settings.json`, `install-options`" in readme
+    assert "with twelve keys" in readme                 # T711: the count, from the list
 
 
 # ── fix round 2 ───────────────────────────────────────────────────────────────
