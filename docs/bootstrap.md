@@ -63,6 +63,12 @@ uv run python sdlc-init.py --target /path/to/repo --tools auto
 a surface for each. Nothing about the lifecycle depends on which one you use: the
 tool-specific files are pointers to the same SOPs.
 
+The install records the tools it resolved in `.sdlc/install-options` (`tools = [...]`,
+tracked). A later run without `--tools` installs exactly those, and names in a NOTE a
+tool it now detects but leaves out; `--tools auto` adds the detected ones, and a list
+or `all` adds to the recorded ones. To drop a tool, remove it from that line and from
+the `tools:` line of `.sdlc/profile.yml`, then re-run.
+
 Exit codes matter here, and `0` is not the only good one — read what it prints. An
 install can succeed while the graph is honestly absent, which is a fact about your
 stack rather than a failure. **A repository whose language has no extractor yet gets
