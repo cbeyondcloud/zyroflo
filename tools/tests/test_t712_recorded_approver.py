@@ -250,7 +250,12 @@ def test_a_derived_store_keeps_its_token_until_it_is_rebuilt_as_the_doors_say(re
     assert remedy in readme, "README"
     assert remedy in guide, "docs/warehouse-loading.md"
     helped = _spawn([str(METRICS), "--help"], COLUMNS="4000")
-    assert "--force with --export ndjson|csv: replace" in _flat(helped.stdout), helped.stdout
+    helped = _flat(helped.stdout)
+    assert "--force with --export ndjson|csv: replace" in helped, helped
+    # Fix round 2, R2: what a re-export does to a store, listed - not "never rewritten".
+    assert ("a sqlite re-export adds rows and fills a run's closure into its runs row, and "
+            "never changes a row's exported values, an approver's token included") in helped
+    assert "never rewritten" not in helped, helped
 
 
 def test_the_re_export_refusal_names_a_cause_true_for_a_changed_export(repo, tmp_path):
@@ -276,9 +281,10 @@ def test_the_re_export_refusal_names_a_cause_true_for_a_changed_export(repo, tmp
     assert "whose exported rows changed" in guide, "docs/warehouse-loading.md"
 
 
-def test_the_installed_policy_says_what_the_pseudonym_is_of():
-    """F3: the comment a person reads where `identity: hash` is switched on."""
-    text = _flat(" ".join(line.lstrip("# ") for line in (
-        ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8").splitlines()))
-    at = text.index("How an EXPORT names the people in it")
-    assert "surrounding whitespace dropped" in text[at:text.index("identity: email", at)]
+def test_what_the_pseudonym_is_of_is_said_beside_the_policy_defaults():
+    # Fix round 2, ruling R1: said here, the README and docs/warehouse-loading.md - not in the
+    # installed sdlc_templates/policy.yml, whose change would stage `.sdlc/policy.yml.new` on
+    # every run of every existing install for one comment. (No byte pin on the template: a
+    # later, deliberate template change must not fail this test.)
+    assert "surrounding whitespace dropped" in (
+        ROOT / "tools" / "sdlc" / "policy.py").read_text(encoding="utf-8")

@@ -1255,8 +1255,10 @@ def _main(argv: list[str] | None = None) -> int:
                     help="with --export ndjson|csv: only runs with an event on or after it")
     ap.add_argument("--force", action="store_true",
                     help="with --export ndjson|csv: replace export files that hold "
-                         "different bytes (a sqlite store is never rewritten: delete "
-                         "it and export again to re-derive it)")
+                         "different bytes. --force never reaches a sqlite store: a sqlite "
+                         "re-export adds rows and fills a run's closure into its runs row, "
+                         "and never changes a row's exported values, an approver's token "
+                         "included - delete the store and export again to re-derive them")
     ap.add_argument("--merge", nargs="+", metavar="AUDIT_DB",
                     help="fold these repositories' audit.db stores into --into (T452)")
     ap.add_argument("--into", metavar="DB", help="with --merge: the org's combined store")

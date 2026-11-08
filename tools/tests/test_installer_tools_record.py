@@ -745,9 +745,14 @@ def test_route_1_hand_editing_the_profile_line_settles_with_nothing_staged(tmp_p
     assert body.count(b"tools: [claude, cursor]") == 1
     profile.write_bytes(body.replace(b"tools: [claude, cursor]", b"tools: [claude]"))
     first = _install(t)
-    assert "= unchanged" in _text(first) and not staged.exists(), _text(first)
+    # Fix round 2, R3: the profile itself - a run prints a dozen `= unchanged` lines.
+    import re
+    assert re.search(r"= unchanged +\.sdlc/profile\.yml\r?$", _text(first), re.M), _text(first)
+    assert not staged.exists(), _text(first)
+    assert b"\ntools: [claude] " in profile.read_bytes()
     again = _install(t)
     assert "Done. 0 file(s) written" in _text(again) and not staged.exists(), _text(again)
+    assert b"\ntools: [claude] " in profile.read_bytes()
     assert _declined_line(t) == DECLINED, _lines(t)
     assert CURSOR not in _text(again), _text(again)
 

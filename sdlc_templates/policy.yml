@@ -241,9 +241,7 @@ metrics_out: ""       # e.g. "reports/sdlc"  (blank = the default)
 # How an EXPORT names the people in it (T452). `email` writes each approver's git
 # identity as the ledger records it; `hash` writes a stable pseudonym instead
 # (`person-<16 hex>`, the same person the same token in every repository's export,
-# so an org roll-up still counts per person), of the approver with its
-# surrounding whitespace dropped, as the self-approval rule reads it. The local
-# ledger is never changed.
+# so an org roll-up still counts per person). The local ledger is never changed.
 # This is PSEUDONYMISATION, not anonymity: a hash of a guessable email can be
 # recovered by guessing, so treat a hashed export as still personal data.
 identity: email       # email | hash
