@@ -513,6 +513,8 @@ AUTHOR_SOURCES = ("flag", "git-head", "none")
 #: The fields every entry carries itself; `append_entry`'s `extra` may not replace them.
 #: T707 added `author`, `author_source` and `self_approval`: an `extra` carrying any of
 #: them would be read by every verifier as a judged claim, which nothing judged.
+#: T709: `author` and `self_approval` have keywords of their own (`author=`,
+#: `self_approval=`); the mode is the caller's claim of the rule it enforced.
 CORE_FIELDS = frozenset({"schema_version", "kind", "run_id", "gate", "verdict", "approver",
                          "at", "artifacts", "notes", "prev", "hash", "signature",
                          "author", "author_source", "self_approval"})
@@ -565,8 +567,11 @@ def _judge(entry: dict, mode: object) -> tuple[str, str | None, str]:
                 f"verdict {verdict!r} is not one this harness knows")
     if mode is ENTRY_MODE:
         if "self_approval" not in entry:
+            # T709: `append_entry` records a mode only when its caller passes one,
+            # so the cause is not always age.
             return "not-judged", "no-mode", ("the entry records no self_approval mode "
-                                             "(written before entries recorded one)")
+                                             "(written before entries recorded one, "
+                                             "or by a caller that passed none)")
         mode = entry["self_approval"]
     if mode == "allow":
         return "not-applicable", None, "taken under self_approval: allow"
@@ -576,8 +581,11 @@ def _judge(entry: dict, mode: object) -> tuple[str, str | None, str]:
     if not guardrails.known_identity(approver):
         return "not-judged", "no-approver", "the entry names no approver"
     if "author" not in entry:
+        # T709 (F4): `append_entry` under `allow` writes a mode with no author, so the
+        # cause is not always age here either.
         return "not-judged", "no-author", ("the entry records no author (written before "
-                                           "entries recorded one)")
+                                           "entries recorded one, or by a caller that "
+                                           "passed none)")
     author = entry.get("author")
     if not guardrails.known_identity(author):
         return "not-judged", "unknown-author", "the entry records the author as unknown"
@@ -700,7 +708,7 @@ def weaker_summary(lines: list[str], where: str) -> str:
 def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: str,
                  artifacts: dict, *, step: str = "", notes: str = "",
                  extra: dict | None = None, signer=None, forced: bool = False,
-                 author: str | None = None) -> dict:
+                 author: str | None = None, self_approval: str | None = None) -> dict:
     """Append one hash-chained entry for ANY gate id, pinning the given artifacts,
     and emit `gate_decided` (T688, Z6).
 
@@ -720,25 +728,54 @@ def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: s
     the entry's own fields. `step` names the event's step.
 
     `author` (T707) is who wrote the change, as the CALLER claims it, recorded with
-    `author_source: flag`. This function judges nothing, so it records no
-    `self_approval` mode either - and the verifiers judge an entry only under the
-    mode it records, so `approve.py --verify` and the ledger check count such an
-    entry as not judged; a caller that enforces its own rule can judge it with
-    `separation_of_duties(entry, mode)`. Not given, no author key is written at
-    all, so a caller that never passes it writes the bytes it wrote before T707. An
-    author smuggled in through `extra` is refused by name: unmarked, it would read
-    as a judged one.
+    `author_source: flag`. Not given, no author key is written at all, so a caller
+    that never passes it writes the bytes it wrote before T707.
+
+    `self_approval` (T709) is the rule the CALLER enforced, `allow` or `forbid`
+    (`policy.SELF_APPROVAL`): the caller's claim, recorded as the entry's
+    `self_approval` key inside the hashed body (and signed when a signer is passed),
+    and judged by the verifiers exactly like `record`'s. Under `forbid` the write
+    applies the rule `record` applies - `policy.self_approval`, the same call - for
+    any verdict, a rejection included, as `record` refuses it: an unknown or blank
+    author, or an author who is the approver, is refused and nothing is appended, so
+    a client cannot record that it enforced `forbid` over its own change. The refusal
+    names the `self_approval=` argument as the rule's source and `author=` as the
+    remedy. A blank approver is refused under any mode, by the judge's own helper. Not given, no mode key is written, so the bytes do not move, and
+    `approve.py --verify` and the ledger check count the entry as not judged.
+
+    An author or a mode smuggled in through `extra` is refused by name: unmarked, it
+    would read as a judged one.
     """
-    if "author" in (extra or {}):
-        raise ValueError("extra cannot carry 'author' - pass it as the author= keyword, "
-                         "which records where it came from")
+    for key in ("author", "self_approval"):
+        if key in (extra or {}):
+            raise ValueError(f"extra cannot carry {key!r} - pass it as the {key}= "
+                             f"keyword" + (", which records where it came from"
+                                           if key == "author" else ""))
+    if self_approval is not None and (not isinstance(self_approval, str)
+                                      or self_approval not in guardrails.SELF_APPROVAL):
+        raise ValueError(f"unknown self_approval mode {self_approval!r} - one of "
+                         f"{', '.join(guardrails.SELF_APPROVAL)}")
     own = {} if author is None else authorship(author, "flag")
     if not isinstance(gate, str) or not gate.strip():
         raise ValueError("an approval names its gate; '' is not one")
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r} - one of {', '.join(VERDICTS)}")
-    if not approver:
+    # T709 (F3): blank is unknown by the judge's own helper, so a whitespace approver
+    # cannot write an entry - a `forbid` claim above all - that nothing can judge.
+    if not guardrails.known_identity(approver):
         raise RuntimeError("no approver - an approval attributed to nobody is not one")
+    if self_approval is not None:
+        # T709: the rule `record` applies, by the same call, before anything is
+        # written - one rule at both doors, never a contradiction in history - and
+        # for ANY verdict, a rejection included, as `record` refuses it (owner, Q2 A).
+        # Only the sentence is this door's: the `forbid` is the caller's argument,
+        # not the policy file's, and the remedy is `author=`.
+        if refused := guardrails.self_approval(
+                {"self_approval": self_approval}, approver, own.get("author") or "",
+                rule=f"self_approval={self_approval!r} was passed",
+                remedy="pass author= with the change's author", act="decide"):
+            raise RuntimeError(refused[0])
+        own["self_approval"] = self_approval
     pins = {}
     for rel, digest in dict(artifacts).items():
         key = ledger.artifact_key(rel)  # refuses absolute paths, '..', '' and NUL

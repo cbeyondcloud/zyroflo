@@ -450,7 +450,8 @@ def test_a_non_ascii_author_with_a_line_separator_round_trips(repo):
 @pytest.mark.parametrize(("extra", "expect"), [
     ({"author": DEV}, "author= keyword"),
     ({"author_source": "flag"}, "own fields"),
-    ({"self_approval": "forbid"}, "own fields"),
+    # T709, by design: the mode has a keyword of its own now, and the refusal names it.
+    ({"self_approval": "forbid"}, "self_approval= keyword"),
 ])
 def test_an_author_smuggled_through_extra_is_refused(repo, extra, expect):
     rid, pins = _handoff(repo)
