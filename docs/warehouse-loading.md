@@ -301,7 +301,9 @@ JSON Schema `sdlc_templates/schemas/events.schema.json`.
   A SQLite store (`audit.db`, or an `org.db` it was merged into) is keyed on the event
   hash, so a row already in it keeps the token it was first written with; to re-derive
   it, delete the store and export again (`metrics.py --export sqlite`), then merge again
-  into a fresh `org.db`. `--force` replaces export files, never a store's rows.
+  into a fresh `org.db`. `--force` reaches only `--export ndjson|csv` files; a
+  re-export into a store adds rows and fills a run's closure into its `runs` row, but never
+  changes a value already exported, an approver's token included.
 - To roll many repositories up, load each repository's export into the same tables. The
   hash keeps rows distinct, and `sdlc_run_opened.project` / `owner` (the pre-INIT project
   metadata) name the repository a run belongs to. Join other tables to it on `run_id`.

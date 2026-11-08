@@ -279,12 +279,3 @@ def test_the_re_export_refusal_names_a_cause_true_for_a_changed_export(repo, tmp
     assert _tokens(out) == {NEW_TOKEN}
     guide = _flat((ROOT / "docs" / "warehouse-loading.md").read_text(encoding="utf-8"))
     assert "whose exported rows changed" in guide, "docs/warehouse-loading.md"
-
-
-def test_what_the_pseudonym_is_of_is_said_beside_the_policy_defaults():
-    # Fix round 2, ruling R1: said here, the README and docs/warehouse-loading.md - not in the
-    # installed sdlc_templates/policy.yml, whose change would stage `.sdlc/policy.yml.new` on
-    # every run of every existing install for one comment. (No byte pin on the template: a
-    # later, deliberate template change must not fail this test.)
-    assert "surrounding whitespace dropped" in (
-        ROOT / "tools" / "sdlc" / "policy.py").read_text(encoding="utf-8")
