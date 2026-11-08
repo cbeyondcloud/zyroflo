@@ -72,7 +72,9 @@ A detected tool the repository does not use is declined by hand, in a
 `declined-tools = [...]` line of `.sdlc/install-options`: a run without `--tools`
 no longer names it in that NOTE, and neither `--tools auto` nor the profile's
 `tools:` line adds it, while a list or `all` installs it, drops it from that line
-and says so.
+and says so; a declined tool that the `tools:` line of `.sdlc/profile.yml` still
+names comes off that line too, or the next run stages `.sdlc/profile.yml.new`
+with the shorter line, and moving it over `.sdlc/profile.yml` settles it.
 
 Exit codes matter here, and `0` is not the only good one — read what it prints. An
 install can succeed while the graph is honestly absent, which is a fact about your

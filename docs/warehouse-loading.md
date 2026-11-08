@@ -288,14 +288,20 @@ JSON Schema `sdlc_templates/schemas/events.schema.json`.
   runs and across repositories. Key on it everywhere, and make every load an upsert that
   ignores a hash it already has. `audit.db` does the same with `INSERT OR IGNORE`.
 - **Incremental loads.** `--since YYYY-MM-DD` exports only runs touched on or after that
-  day, so a nightly job moves only what is new. A run that grew since its last export
-  changes its file, and the export refuses to overwrite it unless you pass `--force` - the
+  day, so a nightly job moves only what is new. A run that grew since its last export,
+  or whose exported rows changed (an upgrade can change what an export writes), changes
+  its file, and the export refuses to overwrite it unless you pass `--force` - the
   key above is what makes re-loading that file safe. An unchanged file is left alone.
 - **An org roll-up without a warehouse.** `metrics.py --merge <audit.db>... --into
   <org.db>` folds many repositories' SQLite stores into one with a `repo` column (T452),
   and `sdlc_templates/collector/nightly-sdlc-metrics.yml` is a sample nightly job doing
   exactly that. Set `identity: hash` in a repository's `policy.yml` to have every export
-  name approvers by a stable pseudonym instead of their email.
+  name approvers by a stable pseudonym instead of their email - a pseudonym of the
+  approver with its surrounding whitespace dropped, as the self-approval rule reads it.
+  A SQLite store (`audit.db`, or an `org.db` it was merged into) is keyed on the event
+  hash, so a row already in it keeps the token it was first written with; to re-derive
+  it, delete the store and export again (`metrics.py --export sqlite`), then merge again
+  into a fresh `org.db`. `--force` replaces export files, never a store's rows.
 - To roll many repositories up, load each repository's export into the same tables. The
   hash keeps rows distinct, and `sdlc_run_opened.project` / `owner` (the pre-INIT project
   metadata) name the repository a run belongs to. Join other tables to it on `run_id`.

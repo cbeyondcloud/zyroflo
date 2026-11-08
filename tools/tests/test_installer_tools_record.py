@@ -247,6 +247,12 @@ T708_HEADER = (b"# Written by sdlc-init.py: the tools and opt-in layers every re
                b"it from the tools line here and from the tools: line of .sdlc/profile.yml "
                b"- a deleted tools line is read back from that profile line. The standalone "
                b"line is rewritten from the installer copy on every run.\n")
+#: T712: the header every install writes now - T708's, plus the declined-tools door.
+T712_HEADER = (T708_HEADER[:-1] + b" A detected tool this repository does not use is "
+               b"declined in a declined-tools = [...] line here; a declined tool that the "
+               b"tools: line of .sdlc/profile.yml still names comes off that line too, or "
+               b"the next run stages .sdlc/profile.yml.new with the shorter line, and moving "
+               b"it over .sdlc/profile.yml settles it.\n")
 CONFIG_SKILL = ".claude/skills/sdlc-config/SKILL.md"
 
 
@@ -313,7 +319,7 @@ def test_the_header_names_remedies_that_work(tmp_path):
     at exit 0, with nothing said, while the header offered it as the way to drop one."""
     t = _fixture(tmp_path / "py")
     _install(t, "--tools", "claude,cursor,gemini")
-    assert (t / REL).read_bytes().split(b"\n")[0] + b"\n" == T708_HEADER
+    assert (t / REL).read_bytes().split(b"\n")[0] + b"\n" == T712_HEADER
     # What the header says a deleted tools line does: read back from the profile line.
     (t / REL).write_bytes(T708_HEADER)
     _install(t)
@@ -631,8 +637,135 @@ def test_a_run_that_undeclines_a_tool_says_so(tmp_path):
     notes = [line for line in _text(proc).splitlines()
              if "NOTE" in line and "declined-tools" in line]
     assert len(notes) == 1 and "cursor" in notes[0], _text(proc)
+    assert "no longer declines it" in notes[0], notes[0]      # T712 3c: the wet verb
     assert _declined_line(t) is None
     # A plain run after it un-declines nothing and says nothing of the kind.
     again = _install(t)
     assert not [line for line in _text(again).splitlines()
                 if "NOTE" in line and "declined-tools" in line], _text(again)
+
+
+# ── T712 (2, 3c): the profile step at every declined-tools door ──────────────
+
+#: The clause every declined-tools door carries (T712, owner Q4 A): a declined tool the
+#: profile's `tools:` line still names leaves `.sdlc/profile.yml.new` staged on every run
+#: until that line is settled - README:336's own drop-a-tool wording, reused.
+PROFILE_STEP = ("a declined tool that the tools: line of .sdlc/profile.yml still names "
+                "comes off that line too, or the next run stages .sdlc/profile.yml.new "
+                "with the shorter line, and moving it over .sdlc/profile.yml settles it")
+
+
+def _passage(text: str, start: str, end: str | None) -> str:
+    """The declined-tools passage of one door: from `start` to `end` (or the end), with
+    whitespace collapsed and backticks dropped, so the clause is asked of THIS passage
+    and not of the drop-a-tool sentence before it. "" when the door has no such passage."""
+    flat = " ".join(text.split()).replace("`", "")
+    if (at := flat.find(start)) < 0:
+        return ""
+    return flat[at:flat.index(end, at)] if end else flat[at:]
+
+
+def test_every_declined_tools_door_names_the_profile_step(tmp_path):
+    """Each door is asked on its own, and every door that lacks the clause is named."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "bootstrap.md").read_text(encoding="utf-8")
+    tools_help, epilog = _help_doors()
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    header = _lines(t)[0]
+    assert header.startswith("# Written by sdlc-init.py"), header
+    by_hand = "A detected tool the repository does not use is declined by hand"
+    doors = {
+        "README": _passage(readme, by_hand, "An install from an installer"),
+        "docs/bootstrap.md": _passage(guide, by_hand, "Exit codes matter here"),
+        "--tools help": _passage(tools_help, "declined-tools = [...]", None),
+        "epilog": _passage(epilog, "declined by hand", "An install from an installer"),
+        "the record's header": _passage(header, "declined-tools = [...]", None),
+    }
+    assert all(doors[d] for d in ("README", "docs/bootstrap.md", "--tools help",
+                                  "epilog")), doors
+    assert [door for door, text in doors.items() if PROFILE_STEP not in text] == []
+
+
+def _declined_profile_tool(target: Path) -> None:
+    """The item-2 chain: cursor detected and installed, then declined by the both-lines
+    refusal's own remedy - off the tools line, onto a declined-tools line - while the
+    profile's `tools:` line still names it."""
+    (target / ".cursor").mkdir()
+    _install(target, "--tools", "claude,cursor")
+    profile = target / ".sdlc" / "profile.yml"
+    assert b"tools: [claude, cursor]" in profile.read_bytes()
+    header = (target / REL).read_bytes().split(b"\n")[0] + b"\n"
+    (target / REL).write_bytes(header + b'tools = ["claude"]\n' + DECLINED.encode() + b"\n")
+
+
+def test_declining_a_profile_tool_settles_by_following_the_door(tmp_path):
+    """T712 (2): passes on the pre-T712 code by design - it is the "follow the remedy"
+    half of the door test above (its mutation is named in the T712 report)."""
+    t = _fixture(tmp_path / "py")
+    _declined_profile_tool(t)
+    profile, staged = t / ".sdlc" / "profile.yml", t / ".sdlc" / "profile.yml.new"
+    for _ in range(2):                   # staged again on every run until it is settled
+        proc = _install(t)
+        assert ".sdlc/profile.yml.new" in _text(proc), _text(proc)
+        assert b"\ntools: [claude] " in staged.read_bytes()
+    # Do what the door says: move the staged copy over the profile.
+    staged.replace(profile)
+    proc = _install(t)
+    assert "Done. 0 file(s) written" in _text(proc), _text(proc)
+    assert not staged.exists()
+    assert _declined_line(t) == DECLINED, _lines(t)
+    assert _tools_line(t) == 'tools = ["claude"]', _lines(t)
+    assert CURSOR not in _text(proc), _text(proc)
+
+
+def test_a_dry_run_that_would_undecline_says_would(tmp_path):
+    """T712 (3c): the dry-run verb had no test - passes on the pre-T712 code, red if the
+    verbs are swapped (the mutation named in the T712 report)."""
+    t = _fixture(tmp_path / "py")
+    _install(t, "--tools", "claude")
+    _decline(t)
+    before = (t / REL).read_bytes()
+    proc = _install(t, "--dry-run", "--tools", "claude,cursor")
+    notes = [line for line in _text(proc).splitlines()
+             if "NOTE" in line and "declined-tools" in line]
+    assert len(notes) == 1 and "would no longer decline it" in notes[0], _text(proc)
+    assert (t / REL).read_bytes() == before
+    assert not (t / CURSOR).exists()
+
+
+def test_route_1_hand_editing_the_profile_line_settles_with_nothing_staged(tmp_path):
+    """T712 fix round 1, F6: the clause's first route - take the declined tool off the
+    profile's `tools:` line by hand - settles at once: nothing staged, and the next run
+    writes nothing."""
+    t = _fixture(tmp_path / "py")
+    _declined_profile_tool(t)
+    profile, staged = t / ".sdlc" / "profile.yml", t / ".sdlc" / "profile.yml.new"
+    body = profile.read_bytes()
+    assert body.count(b"tools: [claude, cursor]") == 1
+    profile.write_bytes(body.replace(b"tools: [claude, cursor]", b"tools: [claude]"))
+    first = _install(t)
+    assert "= unchanged" in _text(first) and not staged.exists(), _text(first)
+    again = _install(t)
+    assert "Done. 0 file(s) written" in _text(again) and not staged.exists(), _text(again)
+    assert _declined_line(t) == DECLINED, _lines(t)
+    assert CURSOR not in _text(again), _text(again)
+
+
+def test_the_both_lines_refusal_names_the_profile_step(tmp_path):
+    """T712 fix round 1, F2: the refusal's remedy (take the tool off one line) is how a
+    repository reaches the state the clause is about, so the refusal carries it; then
+    the remedy is followed and accepted."""
+    t = _fixture(tmp_path / "py")
+    (t / ".cursor").mkdir()
+    _install(t, "--tools", "claude,cursor")
+    header = (t / REL).read_bytes().split(b"\n")[0] + b"\n"
+    (t / REL).write_bytes(header + b'tools = ["claude", "cursor"]\n'
+                          + DECLINED.encode() + b"\n")
+    refused = _run("--target", str(t), "--no-graph")
+    said = " ".join(_text(refused).split())
+    assert refused.returncode == 1 and "both installed" in said, said
+    assert PROFILE_STEP in said, said
+    (t / REL).write_bytes(header + b'tools = ["claude"]\n' + DECLINED.encode() + b"\n")
+    proc = _install(t)
+    assert ".sdlc/profile.yml.new" in _text(proc), _text(proc)

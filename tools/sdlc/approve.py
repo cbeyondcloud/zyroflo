@@ -740,8 +740,11 @@ def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: s
     author, or an author who is the approver, is refused and nothing is appended, so
     a client cannot record that it enforced `forbid` over its own change. The refusal
     names the `self_approval=` argument as the rule's source and `author=` as the
-    remedy. A blank approver is refused under any mode, by the judge's own helper. Not given, no mode key is written, so the bytes do not move, and
+    remedy. Not given, no mode key is written, so the bytes do not move, and
     `approve.py --verify` and the ledger check count the entry as not judged.
+
+    A blank APPROVER is refused under any mode, by the judge's own helper, and the
+    approver is recorded as judged: surrounding whitespace dropped (T712).
 
     An author or a mode smuggled in through `extra` is refused by name: unmarked, it
     would read as a judged one.
@@ -762,7 +765,10 @@ def append_entry(target: Path, run_id: str, gate: str, verdict: str, approver: s
         raise ValueError(f"unknown verdict {verdict!r} - one of {', '.join(VERDICTS)}")
     # T709 (F3): blank is unknown by the judge's own helper, so a whitespace approver
     # cannot write an entry - a `forbid` claim above all - that nothing can judge.
-    if not guardrails.known_identity(approver):
+    # T712: and the value judged is the value recorded - the entry, the event and the
+    # rule below all see the stripped approver, as `authorship` does for the author.
+    approver = guardrails.known_identity(approver)
+    if not approver:
         raise RuntimeError("no approver - an approval attributed to nobody is not one")
     if self_approval is not None:
         # T709: the rule `record` applies, by the same call, before anything is
@@ -846,6 +852,11 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     gate_phase = gate_phase_of(target, gate)
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r} - one of {', '.join(VERDICTS)}")
+    # T712: admitted and recorded by the judge's own helper, before the run is read
+    # or anything written - a library caller's padded approver is recorded stripped, and a
+    # blank or non-string one is unknown, so it is refused rather than recorded as a
+    # claim nothing can judge. The CLI door (`who`) already passed a stripped value.
+    approver = guardrails.known_identity(approver)
     if not approver:
         raise RuntimeError("no approver: pass --approver, or set git config user.email "
                            "in the target - an approval attributed to nobody is not one")
