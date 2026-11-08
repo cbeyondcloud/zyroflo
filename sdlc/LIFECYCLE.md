@@ -194,9 +194,9 @@ modified client - is judged under that relaxed mode, so the control is enforced 
 verdict is taken, not where it is read. The checks state, on one non-fatal line, the live
 approvals recorded under `allow` while today's policy says `forbid`; a policy that cannot be
 read there is a stated limit, never a failure. Approvals that cannot be judged - no mode
-recorded (written before entries recorded one), no author, an unknown author, an unknown
-mode or verdict, no approver, or no gate - are **not judged**: counted by cause on one line per verify
-or check run, never a failure.
+recorded (written before entries recorded one, or by a caller that passed none), no
+author, an unknown author, an unknown mode or verdict, no approver, or no gate - are **not
+judged**: counted by cause on one line per verify or check run, never a failure.
 
 **Improving an artifact before approving it is the ordinary case, not a violation.** A gate
 pins the bytes that exist when the verdict is recorded, so a reviewer who rewrites the

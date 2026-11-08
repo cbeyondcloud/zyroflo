@@ -5308,12 +5308,22 @@ def head_author(target: Path) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def self_approval(policy: dict, approver: str, author: str) -> list[str]:
+def self_approval(policy: dict, approver: str, author: str, *,
+                  rule: str = "policy sets self_approval: forbid",
+                  remedy: str = "pass --author, or commit the work first",
+                  act: str = "approve") -> list[str]:
     """Whether this person may approve this work.
 
     Under `forbid`, an unknown author is a REFUSAL. A control whose input is
     missing has not been satisfied — waving it through would make `forbid` mean
     "forbid, unless we could not tell", which is the state an attacker arranges.
+
+    T709: ONE rule serves every door; only the sentence is the door's own. `rule`
+    names where the `forbid` came from, `remedy` what the caller can do about an
+    unknown author, `act` what the approver may not also do. The defaults are the
+    CLI's (`record`, `policy.py --author`), whose `forbid` is the policy file's;
+    `approve.append_entry` passes its own, because its `forbid` is the caller's
+    `self_approval=` argument and its caller has `author=`, not `--author`.
     """
     if policy["self_approval"] != "forbid":
         return []
@@ -5321,11 +5331,9 @@ def self_approval(policy: dict, approver: str, author: str) -> list[str]:
     # ledger's judge and `policy.py --author` all reach - so a whitespace author
     # cannot be read as a known, different person at one door and nobody at another.
     if not known_identity(author):
-        return ["policy sets self_approval: forbid, and there is no recorded author "
-                "to compare against - pass --author, or commit the work first"]
+        return [f"{rule}, and there is no recorded author to compare against - {remedy}"]
     if same_person(approver, author):
-        return [f"policy sets self_approval: forbid - {approver} wrote this change "
-                f"and may not also approve it"]
+        return [f"{rule} - {approver} wrote this change and may not also {act} it"]
     return []
 
 
