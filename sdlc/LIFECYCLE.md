@@ -155,7 +155,8 @@ the run's *resolved* `block_on`, so an ungraded or blocking occurrence still fir
 verdict says why. A rejected finding is never filtered; it keeps its whole record under
 `rejected`. Its strictness order is `budget_exempt`'s: a subset is at least as strict.
 The learning audit now reads `policy.yml` to list these entries; when it cannot, it still
-judges the repository's own entries, names the problem and exits 3. The shipped
+judges the repository's own entries, names the problem and exits 3 (3 wins over 1; the owed
+lines are still printed). The shipped
 `policy.yml` template does not carry it (a changed template would stage
 `.sdlc/policy.yml.new` on every existing install), and a harness older than T716 refuses a
 policy that does — upgrade the harness first.

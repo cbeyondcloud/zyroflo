@@ -122,14 +122,23 @@ WHITESPACE = "".join(map(chr, (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0
 #: `org_review_suppress` pattern can refuse them with no backslash (T716, review
 #: Low 4). The reader refuses every "C" category; Cn (UNASSIGNED) is a
 #: documented residual here, because which code points are unassigned moves with
-#: each Unicode release and a committed schema cannot. A test holds this to
-#: `unicodedata` over all of Unicode, so a Python upgrade that moves Cf says so.
+#: each Unicode release and a committed schema cannot.
+#:
+#: **The version coupling.** The ranges are those of `OTHER_RANGES_UNICODE`, the
+#: NEWEST Unicode among the Pythons `requires-python` admits (taken from Python
+#: 3.14's `unicodedata`). On an older Python the extra code points are Cn, which
+#: the reader refuses too, so widening is always safe; narrowing is not - the
+#: Unicode 14 set this first shipped missed Cf U+13439..U+1343F, which Python
+#: 3.12 knows. A test holds every Cc/Cf/Cs/Co code point of the running Python
+#: inside these ranges, and nothing outside C/Cn; on a Python whose Unicode is
+#: NEWER than the recorded version it skips with what to regenerate.
+OTHER_RANGES_UNICODE = "16.0.0"
 OTHER_RANGES = (
     (0x0000, 0x001F), (0x007F, 0x009F), (0x00AD, 0x00AD), (0x0600, 0x0605),
     (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F), (0x0890, 0x0891),
     (0x08E2, 0x08E2), (0x180E, 0x180E), (0x200B, 0x200F), (0x202A, 0x202E),
     (0x2060, 0x2064), (0x2066, 0x206F), (0xD800, 0xF8FF), (0xFEFF, 0xFEFF),
-    (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD), (0x13430, 0x13438),
+    (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD), (0x13430, 0x1343F),
     (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001), (0xE0020, 0xE007F),
     (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
 OTHER = "".join(chr(lo) if lo == hi else f"{chr(lo)}-{chr(hi)}"
@@ -202,7 +211,9 @@ POLICY_UNTAUGHT = {
         "Policy-only. Not carried by " + TEACHES["policy"] + ", deliberately (a "
         "changed template would stage policy.yml.new on every existing install); "
         "taught in sdlc/LIFECYCLE.md under Org floors, sdlc/stages/P6-review.md "
-        "and the comment beside tools/sdlc/policy.py DEFAULTS."),
+        "and the comment beside tools/sdlc/policy.py DEFAULTS. Its item pattern "
+        "names code points beyond the BMP directly, so it needs a Unicode-aware "
+        "regex engine (for example JavaScript with the u flag)."),
 }
 
 

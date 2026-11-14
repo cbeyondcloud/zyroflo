@@ -372,13 +372,13 @@ def test_a_plain_list_still_means_the_repositorys_entries():
     # another is a decision nobody can read.
     (["(UNNAMED)"], "(unnamed)"),
     ([" (Unnamed) "], "(unnamed)"),
-    (["py/lint​"], "U+200B"),
-    (["a‮b"], "U+202E"),
+    (["py/lint\u200b"], "U+200B"),
+    (["a\u202eb"], "U+202E"),
     (["a\x00b"], "U+0000"),
-    (["﻿py/lint"], "U+FEFF"),
+    (["\ufeffpy/lint"], "U+FEFF"),
     (["py/lint\U000e0041"], "U+E0041"),
-    (["ab"], "U+E000"),
-    (["a͸b"], "U+0378"),
+    (["a\ue000b"], "U+E000"),
+    (["a\u0378b"], "U+0378"),
     (["a\tb"], "U+0009"),
 ])
 def test_the_validator_refuses_each_malformed_list_by_name(value, said):
@@ -387,24 +387,69 @@ def test_the_validator_refuses_each_malformed_list_by_name(value, said):
     assert any(said in p for p in problems), problems
 
 
-def test_the_schema_refuses_the_characters_the_reader_refuses():
-    """The schema's class is a written-down copy of the reader's rule, held to
-    `unicodedata` over every code point here - as `WHITESPACE` is held to
-    `str.isspace` - except unassigned code points (Cn), a documented residual:
-    which code points are unassigned moves with every Unicode release, and a
-    committed schema cannot. A drift in a Python upgrade fails this by name."""
+def _unicode(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def test_the_schema_ranges_hold_every_other_character_this_python_knows():
+    """The schema's class is a written-down copy of the reader's rule, written
+    for the NEWEST Unicode among the Pythons this project supports
+    (`OTHER_RANGES_UNICODE`), so it holds every Cc/Cf/Cs/Co code point of any
+    older one too - there, the extra code points are unassigned (Cn), which the
+    reader refuses anyway. Re-review Medium 1: the first cut was Unicode 14's
+    set exactly, and Python 3.12 (Unicode 15) added Cf U+13439..U+1343F.
+
+    A Python NEWER than the recorded version is skipped by name, not failed: an
+    interpreter upgrade must not break unrelated work, and the reason says what
+    to regenerate."""
     import unicodedata
 
     from tools.sdlc import schema as SC
 
+    held = {c for lo, hi in SC.OTHER_RANGES for c in range(lo, hi + 1)}
+    # Never wider than "Other": on every Python, each held code point is C or
+    # unassigned, so the schema refuses nothing the reader accepts.
+    outside = [hex(c) for c in sorted(held)
+               if unicodedata.category(chr(c))[0] != "C"]
+    assert outside == [], outside[:20]
+    running = unicodedata.unidata_version
+    if _unicode(running) > _unicode(SC.OTHER_RANGES_UNICODE):
+        pytest.skip(f"unicodedata {running} is newer than OTHER_RANGES_UNICODE "
+                    f"{SC.OTHER_RANGES_UNICODE}: regenerate tools/sdlc/schema.py "
+                    f"OTHER_RANGES from this Python's Cc/Cf/Cs/Co, raise "
+                    f"OTHER_RANGES_UNICODE, and run tools/sdlc/schema.py --write")
     wanted = {c for c in range(sys.maxunicode + 1)
               if unicodedata.category(chr(c)) in ("Cc", "Cf", "Cs", "Co")}
+    assert wanted <= held, [hex(c) for c in sorted(wanted - held)][:20]
+    if _unicode(running) == _unicode(SC.OTHER_RANGES_UNICODE):
+        assert held == wanted, [hex(c) for c in sorted(held ^ wanted)][:20]
+
+
+def test_the_schema_ranges_include_unicode_15s_new_format_controls():
+    """Pinned without needing a Python 3.12 to run it: U+13439..U+1343F became
+    Cf in Unicode 15 (Egyptian hieroglyph format controls)."""
+    from tools.sdlc import schema as SC
+
     held = {c for lo, hi in SC.OTHER_RANGES for c in range(lo, hi + 1)}
-    assert held == wanted, sorted(held ^ wanted)[:20]
+    assert set(range(0x13439, 0x13440)) <= held
+    assert _unicode(SC.OTHER_RANGES_UNICODE) >= (15,)
+
+
+def test_the_schema_refuses_the_characters_the_reader_refuses():
+    """The pattern built from those ranges refuses what the reader refuses,
+    except unassigned code points (Cn), a documented residual."""
+    from tools.sdlc import schema as SC
+
+    # Re-review Low 3: astral ranges are written as characters, which JSON
+    # escapes as surrogate pairs - a consumer must read the pattern with a
+    # Unicode-aware engine, and the schema says so.
+    described = SC.policy_schema()["properties"][KEY]["description"]
+    assert "Unicode-aware regex" in described, described
+
     import re
     pattern = re.compile(
         SC.policy_schema()["properties"][KEY]["items"]["pattern"])
-    for ch in ("​", "‮", "\x00", "﻿", "\U000e0041", ""):
+    for ch in ("\u200b", "\u202e", "\x00", "\ufeff", "\U000e0041", "\ue000"):
         assert not pattern.search(f"a{ch}b"), repr(ch)
     for entry in ("(UNNAMED)", " (Unnamed) "):
         assert not pattern.search(entry), entry
@@ -493,6 +538,12 @@ def test_learning_audit_on_a_malformed_policy_degrades_with_a_clear_refusal(repo
     assert "'MINE'" in out.stdout and "written by hand" in out.stdout, out.stdout
     assert "policy.yml" in out.stdout and "glob" in out.stdout, out.stdout
     assert "org-set entries could not be listed" in out.stdout, out.stdout
+    # Re-review Low 2: 3 wins over 1, deliberately - an audit that could not
+    # read the constitution is incomplete, and 1 would read as a whole answer -
+    # and the owed lines above are still printed. Said where a person looks.
+    helped = spawn([str(LEARNING_CLI), "--help"], repo)
+    assert "3 wins over 1" in " ".join(helped.stdout.split()), helped.stdout
+    assert "owed lines are still printed" in " ".join(helped.stdout.split())
 
 
 def test_learning_audit_without_the_key_prints_what_it_printed(repo):

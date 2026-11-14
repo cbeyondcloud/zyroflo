@@ -138,7 +138,8 @@ stranger's repository quietly gaining a `.venv`.
    and the learning loop's audit names them as org-set, not as written by hand.
    That audit now reads `policy.yml`: if the file cannot be read it still
    judges this repository's own entries, then says why it could not list the
-   organisation's, and exits 3.
+   organisation's, and exits 3 - 3 wins over 1, and the owed lines are still
+   printed.
 
 8. **A `block_on` severity cannot be deferred.** Deferral is honest below the
    line and is a hole at or above it: fix it, or reject it as not real and say

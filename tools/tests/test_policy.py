@@ -234,12 +234,12 @@ REJECTED = {
     # character, private use. (Unassigned code points are refused by both
     # validators and not by the schema: a documented residual.)
     "an upper-case (unnamed)": {"org_review_suppress": ["(UNNAMED)"]},
-    "a zero-width space in an org id": {"org_review_suppress": ["py/lint​"]},
-    "a bidi override in an org id": {"org_review_suppress": ["a‮b"]},
+    "a zero-width space in an org id": {"org_review_suppress": ["py/lint\u200b"]},
+    "a bidi override in an org id": {"org_review_suppress": ["a\u202eb"]},
     "a control in an org id": {"org_review_suppress": ["a\x07b"]},
-    "a BOM in an org id": {"org_review_suppress": ["﻿py/lint"]},
+    "a BOM in an org id": {"org_review_suppress": ["\ufeffpy/lint"]},
     "a tag character in an org id": {"org_review_suppress": ["a\U000e0041"]},
-    "private use in an org id": {"org_review_suppress": ["ab"]},
+    "private use in an org id": {"org_review_suppress": ["a\ue000b"]},
 }
 
 

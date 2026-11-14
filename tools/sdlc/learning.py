@@ -657,7 +657,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--audit", action="store_true",
                     help="suppressions the audit does not account for; also lists "
                          "policy.yml's org-set entries (T716), and exits 3 when "
-                         "policy.yml cannot be read")
+                         "policy.yml cannot be read: 3 wins over 1, because an "
+                         "audit that could not read the constitution is "
+                         "incomplete, and the owed lines are still printed")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
