@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 
 from tools import cli  # noqa: E402
 from tools.sdlc import feedback as record  # noqa: E402
+from tools.sdlc.policy import PolicyError  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -621,7 +622,9 @@ def unbacked(target: Path) -> list[str]:
     # The repository's entries only (T716): an org-set entry lives in
     # `policy.yml`, which a run cannot write, and was never learned here, so
     # calling it "written by hand" would be false. `--audit` names it apart.
-    declared = review.suppress_of(Path(target)).repository
+    # Read without `policy.yml`, so a malformed constitution cannot take this
+    # judgement down with it (review Low 7).
+    declared = review.repository_suppressions(Path(target))
     rows = history(Path(target))
     backed = {row.get("finding") for row in rows
               if row.get("action") == "applied"
@@ -652,7 +655,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--undo", metavar="PROPOSAL_ID")
     ap.add_argument("--history", action="store_true")
     ap.add_argument("--audit", action="store_true",
-                    help="suppressions the audit does not account for")
+                    help="suppressions the audit does not account for; also lists "
+                         "policy.yml's org-set entries (T716), and exits 3 when "
+                         "policy.yml cannot be read")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -670,7 +675,17 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"  !! {line}")
         if not owed:
             print(f"every {SUPPRESS_KEY} entry is accounted for in {LOG}")
-        org_set = org_entries(target)
+        # T716: the audit now reads policy.yml too, for the org-set entries. A
+        # malformed one is refused by `policy.load` as everywhere else; here the
+        # repository's own entries are still judged above, and then the audit
+        # says it could not list the organisation's and exits 3 - could-not-look,
+        # never the 0 or 1 that would read as a complete answer (review Low 7).
+        try:
+            org_set = org_entries(target)
+        except PolicyError as exc:
+            print(f"  !! policy.yml cannot be read, so its org-set entries could "
+                  f"not be listed apart from this repository's: {exc}")
+            return 3
         if org_set:
             # Informational, and the exit code is unchanged: these were set by
             # the organisation in the protected constitution, not learned here.

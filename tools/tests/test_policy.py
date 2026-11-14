@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -126,7 +127,8 @@ class PolicyModel(BaseModel):
     def _exact_named_ids(cls, v: list[str]) -> list[str]:
         for entry in v:
             if (not entry.strip() or any(c in entry for c in "*?[")
-                    or entry.strip() == "(unnamed)"):
+                    or entry.strip().casefold() == "(unnamed)"
+                    or any(unicodedata.category(c).startswith("C") for c in entry)):
                 raise ValueError("org_review_suppress names exact finding ids")
         return v
 
@@ -227,6 +229,17 @@ REJECTED = {
     "a globbed org suppression": {"org_review_suppress": ["py/*"]},
     "a ?-globbed org suppression": {"org_review_suppress": ["a?b"]},
     "a [-globbed org suppression": {"org_review_suppress": ["rule[1]"]},
+    # Review Low 4: any case of `(unnamed)`, and characters Unicode calls
+    # "Other" - a zero-width space, a bidi override, a control, the BOM, a tag
+    # character, private use. (Unassigned code points are refused by both
+    # validators and not by the schema: a documented residual.)
+    "an upper-case (unnamed)": {"org_review_suppress": ["(UNNAMED)"]},
+    "a zero-width space in an org id": {"org_review_suppress": ["py/lint​"]},
+    "a bidi override in an org id": {"org_review_suppress": ["a‮b"]},
+    "a control in an org id": {"org_review_suppress": ["a\x07b"]},
+    "a BOM in an org id": {"org_review_suppress": ["﻿py/lint"]},
+    "a tag character in an org id": {"org_review_suppress": ["a\U000e0041"]},
+    "private use in an org id": {"org_review_suppress": ["ab"]},
 }
 
 

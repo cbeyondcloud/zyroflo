@@ -143,14 +143,19 @@ gates — when an approval is recorded; a profile that falls below either is ref
 `extra_gates`, which that project can remove.
 
 **An org's review suppressions (T716).** `.sdlc/policy.yml` may also name
-`org_review_suppress`: exact finding ids (never patterns, never `(unnamed)`) the
-organisation has judged noise, read beside a project's own `review_suppress` and reported
-apart, as org-set (`org_suppressed`, `org_suppress_held` in the verdict, the loop record and
-the rendered iteration, only when the list is non-empty). It lives only in `policy.yml` —
-no profile key reads or un-suppresses it — and it never moves a gate: an entry silences an
-occurrence only when that occurrence's severity is legal and outside the run's *resolved*
-`block_on`, so an ungraded or blocking occurrence still fires and the verdict says why. Its
-strictness order is `budget_exempt`'s: a subset is at least as strict. The shipped
+`org_review_suppress`: exact finding ids (never patterns, never `(unnamed)` in any case,
+never a control, zero-width, bidi or other invisible character) the organisation has judged
+noise, read beside a project's own `review_suppress` and reported apart, as org-set
+(`org_suppressed`, counted per occurrence, and `org_suppress_held`, each with its severity
+and disposition, in the verdict, the loop record and the rendered iteration, only when the
+list is non-empty). It lives only in `policy.yml` — no profile key reads or un-suppresses
+it, and `policy.py --validate` notes a profile that carries it — and it never moves a gate:
+an entry silences an occurrence only when that occurrence's severity is legal and outside
+the run's *resolved* `block_on`, so an ungraded or blocking occurrence still fires and the
+verdict says why. A rejected finding is never filtered; it keeps its whole record under
+`rejected`. Its strictness order is `budget_exempt`'s: a subset is at least as strict.
+The learning audit now reads `policy.yml` to list these entries; when it cannot, it still
+judges the repository's own entries, names the problem and exits 3. The shipped
 `policy.yml` template does not carry it (a changed template would stage
 `.sdlc/policy.yml.new` on every existing install), and a harness older than T716 refuses a
 policy that does — upgrade the harness first.

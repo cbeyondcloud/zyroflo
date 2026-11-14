@@ -155,7 +155,7 @@ def test_an_absent_or_empty_key_changes_no_byte_of_any_output(repo, monkeypatch,
 def test_an_org_listed_finding_below_the_line_is_silenced_and_reported_as_org_set():
     verdict = LP.assess([finding("ORG1", "low"), finding("OTHER", "low")],
                         ["critical", "high"], org("ORG1"))
-    assert verdict["org_suppressed"] == ["ORG1"]
+    assert verdict["org_suppressed"] == [{"id": "ORG1", "occurrences": 1}]
     assert verdict["suppressed"] == [], "org-set is never reported as the repository's"
     assert verdict["counts"] == {"low": 1}, "the silenced one left the counts"
     assert verdict["org_suppress_held"] == []
@@ -168,10 +168,12 @@ def test_the_same_id_at_a_block_on_severity_in_the_same_review_still_fires():
     verdict = LP.assess([finding("ORG1", "low"), finding("ORG1", "high", line=9)],
                         ["critical", "high"], org("ORG1"))
     assert [(f["id"], f["severity"]) for f in verdict["open"]] == [("ORG1", "high")]
-    assert verdict["org_suppressed"] == ["ORG1"]
+    # Reported by OCCURRENCE: the id is named twice, once per fate, and neither
+    # line reads as if the whole id were silenced (review Low 2).
+    assert verdict["org_suppressed"] == [{"id": "ORG1", "occurrences": 1}]
     held = verdict["org_suppress_held"]
-    assert [(h["id"], h["source"], h["severity"]) for h in held] == [
-        ("ORG1", "agent", "high")]
+    assert [(h["id"], h["source"], h["severity"], h["disposition"]) for h in held] == [
+        ("ORG1", "agent", "high", "accepted")]
     assert "block_on" in held[0]["why"], held
     assert not LP.may_exit(verdict)
 
@@ -185,6 +187,7 @@ def test_an_ungraded_org_listed_finding_still_holds_the_loop():
     held = verdict["org_suppress_held"]
     assert [(h["id"], h["severity"]) for h in held] == [("ORG1", "")]
     assert "grade" in held[0]["why"] or "ungraded" in held[0]["why"], held
+    assert held[0]["disposition"] == "accepted"
     assert verdict["org_suppressed"] == []
     assert not LP.may_exit(verdict)
 
@@ -204,6 +207,39 @@ def test_a_run_that_tightened_block_on_keeps_its_tightening(repo, profile_body):
     assert [f["id"] for f in verdict["open"]] == ["ORG1"]
     assert [h["severity"] for h in verdict["org_suppress_held"]] == ["medium"]
     assert not LP.may_exit(verdict)
+
+
+def test_a_mixed_review_reads_per_occurrence_in_the_rendered_iteration(repo,
+                                                                      monkeypatch):
+    """Review Low 2 and 3, where a person reads it: the silenced occurrence is
+    counted, the held one names its severity and disposition, and nothing says
+    a finding is "still" firing on the org list's account."""
+    policy(repo, f"{KEY}: [ORG1, ORG2]\n")
+    monkeypatch.setattr(LP, "_now", lambda: "2026-11-14T00:00:00Z")
+    run = L.create(repo, "requirement", "mixed")["run_id"]
+    rows = [finding("ORG1", "low"), finding("ORG1", "high", line=9),
+            finding("ORG2", "critical", "deferred", "human", line=3)]
+    text = LP.render(LP.iterate(repo, run, rows))
+    assert ("silenced by the organisation's policy (org_review_suppress): "
+            "ORG1 (1 occurrence)") in text, text
+    assert ("org-set, not silenced: ORG1 [high, accepted], "
+            "ORG2 [critical, deferred]") in text, text
+    held_line = text.split("org-set, not silenced")[1].splitlines()[0]
+    assert "still" not in held_line, text
+
+
+def test_an_org_listed_rejected_finding_keeps_its_whole_record_in_rejected():
+    """Review Low 1: the org filter runs AFTER the rejected split, so a
+    rejection is recorded exactly as without the list - path and line too."""
+    rows = [finding("ORG1", "low", "rejected", path="r.py", line=7),
+            finding("ORG1", "", "rejected", path="s.py", line=8)]
+    with_list = LP.assess(rows, ["critical", "high"], org("ORG1"))
+    without = LP.assess(rows, ["critical", "high"], None)
+    assert with_list["rejected"] == without["rejected"]
+    assert [(f["path"], f["line"], f["why"]) for f in with_list["rejected"]] == [
+        ("r.py", 7, LP.REJECTED), ("s.py", 8, LP.REJECTED_UNGRADED)]
+    assert with_list["org_suppressed"] == [] and with_list["org_suppress_held"] == []
+    assert with_list["counts"] == without["counts"]
 
 
 def test_an_id_in_both_lists_is_the_repositorys_and_silenced_at_any_severity():
@@ -226,10 +262,20 @@ def _outcome(findings, block_on, suppress):
         v = LP.assess(findings, block_on, suppress)
     except LP.LoopError as exc:
         return ("raised", str(exc))
+    # `rejected` too (review Low 1), and `counts` with the org-silenced
+    # occurrences put back: the only thing an org entry may move is a count,
+    # and only by exactly what it says it silenced.
+    counts = dict(v["counts"])
+    if v.get("org_suppressed"):
+        silenced = sum(row["occurrences"] for row in v["org_suppressed"])
+        org_rows = [f for f in findings if f["id"] == "ORG1"]
+        assert silenced == len(org_rows) == 1, (silenced, org_rows)
+        sev = org_rows[0]["severity"]
+        counts[sev] = counts.get(sev, 0) + silenced
     return ("verdict", _bytes({k: v[k] for k in ("open", "ungraded",
                                                   "deferred_blockers",
-                                                  "pre_existing")}),
-            LP.may_exit(v))
+                                                  "pre_existing", "rejected")}),
+            _bytes(dict(sorted(counts.items()))), LP.may_exit(v))
 
 
 @pytest.mark.parametrize("block_on", [["critical", "high"],
@@ -291,6 +337,13 @@ def test_suppress_of_reads_the_org_list_from_either_policy_location(repo, where)
         iter(got)
     with pytest.raises(TypeError):
         list(got)
+    # Review Low 6: truthiness fails as loudly as iteration, so `if
+    # suppress_of(t):` - the old list idiom - cannot quietly read "yes".
+    with pytest.raises(TypeError):
+        bool(got)
+    with pytest.raises(TypeError):
+        if got:
+            pass
 
 
 def test_a_plain_list_still_means_the_repositorys_entries():
@@ -313,11 +366,67 @@ def test_a_plain_list_still_means_the_repositorys_entries():
     (["*"], "glob"),
     (["a?b"], "glob"),
     (["rule[1]"], "glob"),
+    # Review Low 4: `(unnamed)` in any case, and any character Unicode files
+    # under "Other" (C*): controls, format characters (zero-width, bidi, the
+    # BOM, tags), surrogates, private use, unassigned. An id that renders like
+    # another is a decision nobody can read.
+    (["(UNNAMED)"], "(unnamed)"),
+    ([" (Unnamed) "], "(unnamed)"),
+    (["py/lint​"], "U+200B"),
+    (["a‮b"], "U+202E"),
+    (["a\x00b"], "U+0000"),
+    (["﻿py/lint"], "U+FEFF"),
+    (["py/lint\U000e0041"], "U+E0041"),
+    (["ab"], "U+E000"),
+    (["a͸b"], "U+0378"),
+    (["a\tb"], "U+0009"),
 ])
 def test_the_validator_refuses_each_malformed_list_by_name(value, said):
     problems = P.validate({KEY: value})
     assert problems and all(KEY in p for p in problems), problems
     assert any(said in p for p in problems), problems
+
+
+def test_the_schema_refuses_the_characters_the_reader_refuses():
+    """The schema's class is a written-down copy of the reader's rule, held to
+    `unicodedata` over every code point here - as `WHITESPACE` is held to
+    `str.isspace` - except unassigned code points (Cn), a documented residual:
+    which code points are unassigned moves with every Unicode release, and a
+    committed schema cannot. A drift in a Python upgrade fails this by name."""
+    import unicodedata
+
+    from tools.sdlc import schema as SC
+
+    wanted = {c for c in range(sys.maxunicode + 1)
+              if unicodedata.category(chr(c)) in ("Cc", "Cf", "Cs", "Co")}
+    held = {c for lo, hi in SC.OTHER_RANGES for c in range(lo, hi + 1)}
+    assert held == wanted, sorted(held ^ wanted)[:20]
+    import re
+    pattern = re.compile(
+        SC.policy_schema()["properties"][KEY]["items"]["pattern"])
+    for ch in ("​", "‮", "\x00", "﻿", "\U000e0041", ""):
+        assert not pattern.search(f"a{ch}b"), repr(ch)
+    for entry in ("(UNNAMED)", " (Unnamed) "):
+        assert not pattern.search(entry), entry
+    assert pattern.search("py/lint") and pattern.search("SEC-1 (unnamed rule)")
+
+
+def test_the_spawned_validator_notes_a_profile_that_carries_the_key(repo):
+    """Review Low 5: the profile's value silences nothing (condition 1), so a
+    person who wrote it there is told - once, and without changing the exit."""
+    cli = [str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate", "--target",
+           str(repo)]
+    quiet = spawn(cli, repo)
+    assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+    assert KEY not in quiet.stdout, quiet.stdout
+    for body in (PROFILE + f"{KEY}: [ORG1]\n",
+                 PROFILE.replace("review:\n", f"review:\n  {KEY}: [ORG1]\n")):
+        (repo / ".sdlc" / "profile.yml").write_text(body, encoding="utf-8")
+        said = spawn(cli, repo)
+        assert said.returncode == quiet.returncode, said.stdout + said.stderr
+        notes = [line for line in said.stdout.splitlines() if KEY in line]
+        assert len(notes) == 1, said.stdout
+        assert "read only from policy.yml" in notes[0], notes
 
 
 def test_the_validator_accepts_exact_ids_and_duplicates():
@@ -370,6 +479,22 @@ def test_learning_audit_names_org_set_entries_apart_from_hand_written_ones(repo)
     assert "2 org-set entr(ies) in policy.yml" in owed.stdout, owed.stdout
 
 
+def test_learning_audit_on_a_malformed_policy_degrades_with_a_clear_refusal(repo):
+    """Review Low 7: the audit now reads policy.yml. A malformed one still lets
+    it judge the repository's own entries (they live in the profile), and then
+    it says it could not list the org-set ones and exits 3 - could-not-look,
+    never the 0 that would read as "everything is accounted for"."""
+    (repo / ".sdlc" / "profile.yml").write_text(PROFILE + "review_suppress: [MINE]\n",
+                                                encoding="utf-8")
+    policy(repo, f'{KEY}: ["py/*"]\n')
+    out = spawn([str(LEARNING_CLI), "--target", str(repo), "--audit"], repo)
+    assert out.returncode == 3, out.stdout + out.stderr
+    assert "Traceback" not in out.stdout + out.stderr
+    assert "'MINE'" in out.stdout and "written by hand" in out.stdout, out.stdout
+    assert "policy.yml" in out.stdout and "glob" in out.stdout, out.stdout
+    assert "org-set entries could not be listed" in out.stdout, out.stdout
+
+
 def test_learning_audit_without_the_key_prints_what_it_printed(repo):
     out = spawn([str(LEARNING_CLI), "--target", str(repo), "--audit"], repo)
     assert out.returncode == 0, out.stdout + out.stderr
@@ -393,10 +518,10 @@ def test_the_iterate_door_shows_org_lines_only_when_the_list_is_non_empty(repo,
     if listed:
         assert ("silenced by the organisation's policy (org_review_suppress): ORG1"
                 in out.stdout), out.stdout
-        assert "org-set, still reported: ORG2 [high]" in out.stdout, out.stdout
-        assert entry["org_suppressed"] == ["ORG1"]
-        assert [(h["id"], h["severity"]) for h in entry["org_suppress_held"]] == [
-            ("ORG2", "high")]
+        assert "org-set, not silenced: ORG2 [high, accepted]" in out.stdout, out.stdout
+        assert entry["org_suppressed"] == [{"id": "ORG1", "occurrences": 1}]
+        assert [(h["id"], h["severity"], h["disposition"])
+                for h in entry["org_suppress_held"]] == [("ORG2", "high", "accepted")]
     else:
         assert "org" not in out.stdout.replace("organis", ""), out.stdout
         assert "org_suppress" not in record

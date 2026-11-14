@@ -116,6 +116,25 @@ WHITESPACE = "".join(map(chr, (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0
                                0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
                                0x2028, 0x2029, 0x202F, 0x205F, 0x3000)))
 
+#: Every code point Unicode files under "Other" that a committed file can name
+#: stably - Cc (controls), Cf (format: zero-width, bidi, the BOM, tags), Cs
+#: (surrogates) and Co (private use) - as inclusive ranges, so an
+#: `org_review_suppress` pattern can refuse them with no backslash (T716, review
+#: Low 4). The reader refuses every "C" category; Cn (UNASSIGNED) is a
+#: documented residual here, because which code points are unassigned moves with
+#: each Unicode release and a committed schema cannot. A test holds this to
+#: `unicodedata` over all of Unicode, so a Python upgrade that moves Cf says so.
+OTHER_RANGES = (
+    (0x0000, 0x001F), (0x007F, 0x009F), (0x00AD, 0x00AD), (0x0600, 0x0605),
+    (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F), (0x0890, 0x0891),
+    (0x08E2, 0x08E2), (0x180E, 0x180E), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x2064), (0x2066, 0x206F), (0xD800, 0xF8FF), (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD), (0x13430, 0x13438),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001), (0xE0020, 0xE007F),
+    (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
+OTHER = "".join(chr(lo) if lo == hi else f"{chr(lo)}-{chr(hi)}"
+                for lo, hi in OTHER_RANGES)
+
 #: Constraints `policy.validate` enforces that a DEFAULT cannot express. A
 #: default says what the type is; it cannot say that a blank one is refused.
 #:
@@ -131,13 +150,15 @@ POLICY_CONSTRAINTS = {
     # wall, and `min_length` alone accepts "  ".
     "deny_commands": {"items": {"type": "string", "pattern": r"\S"}},
     # T716: exact finding ids - not blank (every character the reader strips is
-    # padding, so `WHITESPACE`, as worktrees_root), not `(unnamed)`, and no glob
-    # character. No backslash, metrics_out's rule: `(` and `[` go in classes.
+    # padding, so `WHITESPACE`, as worktrees_root), not `(unnamed)` in any case,
+    # no glob character and no `OTHER` character. No backslash, metrics_out's
+    # rule: `(` and `[` go in classes.
     "org_review_suppress": {"items": {
         "type": "string",
         "pattern": (f"^(?![{WHITESPACE}]*$)"
-                    f"(?![{WHITESPACE}]*[(]unnamed[)][{WHITESPACE}]*$)"
-                    "[^*?[]*$")}},
+                    f"(?![{WHITESPACE}]*[(][uU][nN][nN][aA][mM][eE][dD][)]"
+                    f"[{WHITESPACE}]*$)"
+                    f"[^*?[{OTHER}]*$")}},
     # "every branch would then be a legal push target, which is the opposite of
     # the rule".
     "push_branch_prefix": {"minLength": 1},

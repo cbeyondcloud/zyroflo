@@ -116,6 +116,8 @@ flowchart LR
 
 **G4 is the merge gate — hard in every regime**, and the installed CI check reads it. A profile may make a gate *harder* (a `gates:` block entry such as `G1: hard`), never softer.
 
+**An organisation's review suppressions (T716).** `policy.yml` may list `org_review_suppress`: exact finding ids an organisation has judged noise. Such an entry silences a review finding only when it is graded below the run's `block_on`, so it changes what a review reports and never whether it may exit; what it silenced, and what it named and did not silence, is printed apart as org-set. It is read only from `policy.yml` and is not in the shipped template. Upgrading: a harness older than T716 refuses a policy carrying the key, so upgrade the harness first; an absent key changes no output. For code built on the harness, `tools.review.loop.suppress_of` now returns a `Suppressions(repository, org)` value instead of a list, and it refuses iteration and truth-testing with `TypeError` so the two lists cannot be merged by accident; `learning.py --audit` now reads `policy.yml` and exits 3 when it cannot. `tools.sdlc.feedback.review_dispositions(target, run_id)` (T717) is new: every finding a run's closed review sessions recorded, as `{finding, source, disposition}` with no path, severity or line.
+
 A gate whose step does not run is never silently lost. On a fresh single-repo install with no graph (`--no-graph`, or the standalone installer) and no deploy command, `sdlc stage --target . --list` prints exactly this:
 
 ```

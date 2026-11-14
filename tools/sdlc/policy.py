@@ -680,10 +680,22 @@ def org_suppress_problems(value) -> list[str]:
                             f"character ({' '.join(GLOB_CHARACTERS)}) - matching is "
                             f"exact, so a pattern would only look like a wildcard; "
                             f"name each finding id")
-        elif entry.strip() == UNNAMED_FINDING:
-            problems.append(f"org_review_suppress: {UNNAMED_FINDING!r} is the name "
-                            f"the review loop gives every finding with no id - as "
-                            f"an org-wide entry it would silence all of them")
+        elif entry.strip().casefold() == UNNAMED_FINDING:
+            problems.append(f"org_review_suppress: {entry.strip()!r} is the name "
+                            f"the review loop gives every finding with no id "
+                            f"{UNNAMED_FINDING!r} (in any case) - as an org-wide "
+                            f"entry it would read as silencing all of them")
+        elif other := [c for c in entry
+                       if unicodedata.category(c).startswith("C")]:
+            # Review Low 4: Unicode's "Other" - controls, format characters
+            # (zero-width, bidi overrides, the BOM, tags), surrogates, private
+            # use, unassigned. Each makes an id render as something it is not,
+            # so the entry a person reads is not the entry the loop matches.
+            named = ", ".join(dict.fromkeys(
+                f"U+{ord(c):04X} ({unicodedata.category(c)})" for c in other))
+            problems.append(f"org_review_suppress: {entry!r} carries {named} - an "
+                            f"invisible or control character makes an id read as "
+                            f"another; write the id in printable characters")
     return problems
 
 
@@ -5571,6 +5583,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  !! [{group}] {row}")
     for limit in profile_limits(target):
         print(f"  .. [not checked] {limit}")
+    if args.validate and profile_list(target, "org_review_suppress") is not None:
+        # T716, review Low 5: condition 1 makes the profile's copy inert, and an
+        # inert line that reads like a control is worth one sentence. A note, not
+        # a refusal: the exit code is the policy's verdict, and this changes none.
+        print("  .. [note] the profile carries org_review_suppress, which is read "
+              "only from policy.yml - the profile's value silences nothing")
     if problems:
         print(f"REFUSED - {len(problems)} policy problem(s).")
         return 1
