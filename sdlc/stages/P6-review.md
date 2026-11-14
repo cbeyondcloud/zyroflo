@@ -127,6 +127,20 @@ stranger's repository quietly gaining a `.venv`.
    but `learning.py --audit` names it, because a suppression that passed no
    gate should not be indistinguishable from one that did.
 
+   An organisation may also list finding ids in `policy.yml`'s
+   `org_review_suppress`. Those are weaker on purpose: one silences an
+   occurrence only when it is graded with a severity outside the run's resolved
+   `block_on`, so it can change what the review reports and never whether the
+   loop may exit — an ungraded or blocking occurrence is not silenced, listed
+   as "org-set, not silenced" with its severity, disposition and reason, and a
+   rejected finding is never filtered at all. What they silenced is printed
+   apart and counted per occurrence ("silenced by the organisation's policy"),
+   and the learning loop's audit names them as org-set, not as written by hand.
+   That audit now reads `policy.yml`: if the file cannot be read it still
+   judges this repository's own entries, then says why it could not list the
+   organisation's, and exits 3 - 3 wins over 1, and the owed lines are still
+   printed.
+
 8. **A `block_on` severity cannot be deferred.** Deferral is honest below the
    line and is a hole at or above it: fix it, or reject it as not real and say
    why.

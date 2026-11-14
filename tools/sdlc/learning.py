@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 
 from tools import cli  # noqa: E402
 from tools.sdlc import feedback as record  # noqa: E402
+from tools.sdlc.policy import PolicyError  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -618,7 +619,12 @@ def unbacked(target: Path) -> list[str]:
     """
     from tools.review import loop as review
 
-    declared = review.suppress_of(Path(target))
+    # The repository's entries only (T716): an org-set entry lives in
+    # `policy.yml`, which a run cannot write, and was never learned here, so
+    # calling it "written by hand" would be false. `--audit` names it apart.
+    # Read without `policy.yml`, so a malformed constitution cannot take this
+    # judgement down with it (review Low 7).
+    declared = review.repository_suppressions(Path(target))
     rows = history(Path(target))
     backed = {row.get("finding") for row in rows
               if row.get("action") == "applied"
@@ -628,6 +634,14 @@ def unbacked(target: Path) -> list[str]:
             f"it passed neither the corpus check nor a gate. That may be "
             f"deliberate; it should not be invisible"
             for name in declared if name not in backed]
+
+
+def org_entries(target: Path) -> tuple[str, ...]:
+    """`policy.yml`'s `org_review_suppress` entries, through the loop's one
+    reader (T716). Not judged by `unbacked`: they are not this repository's."""
+    from tools.review import loop as review
+
+    return review.suppress_of(Path(target)).org
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -641,7 +655,11 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--undo", metavar="PROPOSAL_ID")
     ap.add_argument("--history", action="store_true")
     ap.add_argument("--audit", action="store_true",
-                    help="suppressions the audit does not account for")
+                    help="suppressions the audit does not account for; also lists "
+                         "policy.yml's org-set entries (T716), and exits 3 when "
+                         "policy.yml cannot be read: 3 wins over 1, because an "
+                         "audit that could not read the constitution is "
+                         "incomplete, and the owed lines are still printed")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -659,6 +677,22 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"  !! {line}")
         if not owed:
             print(f"every {SUPPRESS_KEY} entry is accounted for in {LOG}")
+        # T716: the audit now reads policy.yml too, for the org-set entries. A
+        # malformed one is refused by `policy.load` as everywhere else; here the
+        # repository's own entries are still judged above, and then the audit
+        # says it could not list the organisation's and exits 3 - could-not-look,
+        # never the 0 or 1 that would read as a complete answer (review Low 7).
+        try:
+            org_set = org_entries(target)
+        except PolicyError as exc:
+            print(f"  !! policy.yml cannot be read, so its org-set entries could "
+                  f"not be listed apart from this repository's: {exc}")
+            return 3
+        if org_set:
+            # Informational, and the exit code is unchanged: these were set by
+            # the organisation in the protected constitution, not learned here.
+            print(f"  {len(org_set)} org-set entr(ies) in policy.yml - set by the "
+                  f"organisation, not learned here: {', '.join(org_set)}")
         return 1 if owed else 0
 
     if args.history:

@@ -62,6 +62,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -283,9 +284,88 @@ def review_corrections(target: Path, run_id: str) -> tuple[list[dict], dict]:
     between them. `hitl --run` supplies it; a row without one is another run's,
     or predates the field, and is counted as neither.
     """
-    reviews, _ = hitl.paths(Path(target))
     totals = {"sessions": 0, "findings": 0, "corrections": 0, "unreadable": 0}
     out: list[dict] = []
+    for row, f in _review_sessions(Path(target), run_id, totals):
+        totals["findings"] += 1
+        if f.get("disposition") not in CORRECTIONS:
+            continue
+        totals["corrections"] += 1
+        started = row.get("started_at", "?")
+        out.append({"id": f"review:{started}:{f.get('id', '?')}",
+                    "kind": "finding-rejected", "source": f.get("source", ""),
+                    "finding": f.get("id", "?"),
+                    "disposition": f.get("disposition", ""),
+                    "severity": f.get("severity", ""),
+                    "path": f.get("path", ""),
+                    "component": row.get("component", ""),
+                    # Blank, and deliberately. The reviewer who rejected
+                    # this finding is not necessarily the person recording
+                    # the verdict, and `reviews.jsonl` carries no identity
+                    # by construction — stamping the approver's name here
+                    # would invent an attribution AND put back the field
+                    # item 27 removed on purpose.
+                    "by": ""})
+    return out, totals
+
+
+def review_dispositions(target: Path, run_id: str) -> tuple[list[dict], dict]:
+    """(rows, totals) - every finding recorded in this run's closed review
+    sessions, accepted ones included (T717).
+
+    `rows` are in file order and then finding order, one per recorded
+    OCCURRENCE (never de-duplicated: a consumer counts distinct runs), each
+    exactly `{"finding", "source", "disposition"}` - never a path, severity,
+    line or component. Values are returned as recorded; any form check on an id
+    is the consumer's.
+
+    `totals` is `{"sessions", "findings", "unreadable"}`, `findings ==
+    len(rows)`. Only `kind == "review"` rows whose `run` is this run count: an
+    abandoned session, another run's, a run-less row and the open session file
+    are neither read nor counted.
+
+    Damage is COUNTED, never skipped silently: a line that is not a JSON object,
+    this run's row whose `findings` is not a list, a finding that is not an
+    object, and - stricter than `review_corrections`, which yields `"?"` - a
+    finding whose `id` or `source` is not non-empty text or whose `disposition`
+    is not one of `hitl.DISPOSITIONS`. A reader that exists to be counted must
+    not hand over an id nobody recorded.
+
+    **Do not sum `unreadable` across runs.** A damaged LINE cannot be attributed
+    to any run, so, exactly as in `review_corrections`, it is counted on every
+    run's read.
+
+    It carries no severity, by scope. A measurement of what an org-set
+    suppression (T716) would silence, built on this, cannot apply that row's
+    floor rule and so counts an accepted occurrence at a `block_on` severity as
+    silenced although the loop would let it fire: an UPPER bound - it can
+    over-report a regression, never under-report one.
+    """
+    totals = {"sessions": 0, "findings": 0, "unreadable": 0}
+    rows: list[dict] = []
+    for _, f in _review_sessions(Path(target), run_id, totals):
+        fid, source, disposition = (f.get("id"), f.get("source"),
+                                    f.get("disposition"))
+        if (not isinstance(fid, str) or not fid.strip()
+                or not isinstance(source, str) or not source.strip()
+                or disposition not in hitl.DISPOSITIONS):
+            totals["unreadable"] += 1
+            continue
+        totals["findings"] += 1
+        rows.append({"finding": fid, "source": source, "disposition": disposition})
+    return rows, totals
+
+
+def _review_sessions(target: Path, run_id: str,
+                     totals: dict) -> Iterator[tuple[dict, dict]]:
+    """Each `(row, finding)` of this run's closed review sessions, counting
+    `sessions` and the damage a walk can see into `totals["unreadable"]`.
+
+    The one walk both public readers share (T717), so the run filter and the
+    damage rules cannot drift between them. Each caller judges the finding
+    objects it is handed by its own rules.
+    """
+    reviews, _ = hitl.paths(Path(target))
     for line in cli.jsonl_rows(reviews):
         # A row that is not an object is DAMAGE. It used to leave through the
         # same `continue` as a row belonging to another run, so the `unreadable`
@@ -299,7 +379,6 @@ def review_corrections(target: Path, run_id: str) -> tuple[list[dict], dict]:
         if row.get("run") != run_id or row.get("kind") != "review":
             continue
         totals["sessions"] += 1
-        started = row.get("started_at", "?")
         # `.get("findings", [])` is defeated by a PRESENT null, and a finding
         # that is not an object has no `.get`. `hitl.show` reads this same file
         # and was hardened for both; this reader of it was not.
@@ -317,25 +396,7 @@ def review_corrections(target: Path, run_id: str) -> tuple[list[dict], dict]:
             if not isinstance(f, dict):
                 totals["unreadable"] += 1
                 continue
-            totals["findings"] += 1
-            if f.get("disposition") not in CORRECTIONS:
-                continue
-            totals["corrections"] += 1
-            out.append({"id": f"review:{started}:{f.get('id', '?')}",
-                        "kind": "finding-rejected", "source": f.get("source", ""),
-                        "finding": f.get("id", "?"),
-                        "disposition": f.get("disposition", ""),
-                        "severity": f.get("severity", ""),
-                        "path": f.get("path", ""),
-                        "component": row.get("component", ""),
-                        # Blank, and deliberately. The reviewer who rejected
-                        # this finding is not necessarily the person recording
-                        # the verdict, and `reviews.jsonl` carries no identity
-                        # by construction — stamping the approver's name here
-                        # would invent an attribution AND put back the field
-                        # item 27 removed on purpose.
-                        "by": ""})
-    return out, totals
+            yield row, f
 
 
 #: How many DISTINCT RUNS must reject the same finding before it is a pattern

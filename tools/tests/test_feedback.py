@@ -1217,3 +1217,223 @@ def test_an_oversized_gate_id_is_refused_in_this_modules_own_words(repo, tmp_pat
     assert "Exceeds the limit" not in printed, printed
     # the approval was correctly NOT recorded
     assert A.read_chain(repo, run) == [], A.read_chain(repo, run)
+
+
+# ── T717 (S4): every disposition a run's reviews recorded, and nothing else ──
+#
+# Design: `docs/design/2026-11-14-s3-s4-org-suppressions.md` section 5.
+# `review_dispositions` yields `{finding, source, disposition}` per recorded
+# occurrence - accepted ones included, never a path, severity or line - and
+# counts damage as `unreadable` rather than skipping it.
+
+DISPOSITION_KEYS = {"finding", "source", "disposition"}
+
+
+def write_reviews(repo: Path, *lines: str) -> None:
+    reviews, _ = H.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+
+
+def review_row(run_id: str = "r-1", *findings, **over) -> str:
+    row = {"schema_version": 1, "kind": "review", "run": run_id,
+           "started_at": "2026-11-14T00:00:00Z", "component": "pay",
+           "findings": list(findings)}
+    row.update(over)
+    return json.dumps(row)
+
+
+def a_finding(fid, disposition: str, source: str = "agent", **over) -> dict:
+    return {"id": fid, "source": source, "disposition": disposition, **over}
+
+
+def test_every_disposition_of_a_session_is_yielded_in_order(repo):
+    write_reviews(repo, review_row("r-1", a_finding("A", "accepted"),
+                                   a_finding("B", "rejected", "human"),
+                                   a_finding("C", "deferred", "prepass")))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert rows == [{"finding": "A", "source": "agent", "disposition": "accepted"},
+                    {"finding": "B", "source": "human", "disposition": "rejected"},
+                    {"finding": "C", "source": "prepass", "disposition": "deferred"}]
+    assert totals == {"sessions": 1, "findings": 3, "unreadable": 0}
+
+
+def test_a_disposition_row_carries_no_location_and_no_severity(repo):
+    write_reviews(repo, review_row(
+        "r-1", a_finding("A", "accepted", severity="CANARY-SEV",
+                         path="CANARY-PATH.py", line=987654321,
+                         component="CANARY-COMP"),
+        started_at="CANARY-START", component="CANARY-ROW-COMP"))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert [set(r) for r in rows] == [DISPOSITION_KEYS]
+    said = repr((rows, totals))
+    for canary in ("CANARY", "987654321"):
+        assert canary not in said, said
+
+
+def test_other_runs_run_less_sessions_and_abandoned_rows_are_not_this_runs(repo):
+    write_reviews(
+        repo,
+        review_row("other", a_finding("X", "accepted")),
+        review_row("r-1", a_finding("Y", "accepted"), run=None),
+        json.dumps({"schema_version": 1, "kind": "review", "started_at": "t",
+                    "findings": [a_finding("Z", "accepted")]}),
+        json.dumps({"schema_version": 1, "kind": "review-abandoned", "run": "r-1",
+                    "started_at": "t", "findings_so_far": 1,
+                    "findings": [a_finding("W", "accepted")]}),
+        review_row("r-1", a_finding("V", "accepted"), kind="reviewer"))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert rows == []
+    assert totals == {"sessions": 0, "findings": 0, "unreadable": 0}
+
+
+def test_no_record_and_no_session_are_both_empty_and_undamaged(repo):
+    assert F.review_dispositions(repo, "r-1") == (
+        [], {"sessions": 0, "findings": 0, "unreadable": 0})
+    write_reviews(repo, review_row("other", a_finding("X", "accepted")))
+    assert F.review_dispositions(repo, "r-1") == (
+        [], {"sessions": 0, "findings": 0, "unreadable": 0})
+
+
+@pytest.mark.parametrize("damage", [
+    "not json at all",
+    '"a row that parses but is not an object"',
+    review_row("r-1", findings=None),
+    review_row("r-1", "oops"),
+    review_row("r-1", a_finding("", "accepted")),
+    review_row("r-1", {"id": "F", "disposition": "accepted"}),
+    review_row("r-1", a_finding("F", "acepted")),
+    review_row("r-1", a_finding(7, "accepted")),
+    review_row("r-1", {"source": "agent", "disposition": "accepted"}),
+], ids=["non-JSON line", "non-object line", "null findings", "non-object finding",
+        "blank id", "missing source", "unknown disposition", "id not text",
+        "missing id"])
+def test_each_damage_shape_is_counted_and_the_good_finding_after_it_still_arrives(
+        repo, damage):
+    write_reviews(repo, damage, review_row("r-1", a_finding("GOOD", "accepted")))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert totals["unreadable"] == 1, totals
+    assert rows == [{"finding": "GOOD", "source": "agent", "disposition": "accepted"}]
+    assert totals["findings"] == len(rows)
+
+
+def test_damage_inside_a_session_does_not_hide_the_findings_after_it(repo):
+    write_reviews(repo, review_row("r-1", "oops", a_finding("", "accepted"),
+                                   a_finding("GOOD", "deferred")))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert totals == {"sessions": 1, "findings": 1, "unreadable": 2}
+    assert [r["finding"] for r in rows] == ["GOOD"]
+
+
+def test_two_occurrences_of_one_id_are_two_rows(repo):
+    write_reviews(repo, review_row("r-1", a_finding("A", "accepted"),
+                                   a_finding("A", "accepted")))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert len(rows) == 2 and totals["findings"] == 2
+
+
+def test_an_intact_record_reports_no_disposition_damage(repo):
+    """The negative control, as `test_an_intact_record_reports_no_damage`."""
+    write_reviews(repo, review_row("r-1", a_finding("A", "accepted")),
+                  review_row("other", a_finding("B", "rejected")))
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert totals["unreadable"] == 0 and totals["sessions"] == 1
+    assert len(rows) == 1
+
+
+def test_a_record_written_by_the_real_recorder_round_trips(repo):
+    """Not hand-shaped only: `hitl.begin(run=...)`, `finding` and `end` write
+    the row this reads. `begin` refuses a run nobody has, so the runs are real."""
+    mine = L.create(repo, "requirement", "a change")["run_id"]
+    other = L.create(repo, "requirement", "another change")["run_id"]
+    assert H.begin(repo, component="pay", run=mine).startswith("recording")
+    H.finding(repo, "A", "agent", "accepted", severity="high", path="a.py", line=3)
+    H.finding(repo, "B", "human", "rejected", severity="low")
+    H.finding(repo, "C", "prepass", "deferred")
+    assert H.end(repo, "approved").startswith("review closed")
+    assert H.begin(repo, component="pay", run=other).startswith("recording")
+    H.finding(repo, "D", "agent", "accepted")
+    assert H.end(repo, "approved").startswith("review closed")
+    rows, totals = F.review_dispositions(repo, mine)
+    assert rows == [{"finding": "A", "source": "agent", "disposition": "accepted"},
+                    {"finding": "B", "source": "human", "disposition": "rejected"},
+                    {"finding": "C", "source": "prepass", "disposition": "deferred"}]
+    assert totals == {"sessions": 1, "findings": 3, "unreadable": 0}
+
+
+def every_review_shape(run_id: str = "r-1") -> list[str]:
+    """Every shape above in one record: damage, other runs, a run-less row, an
+    abandoned row, a near-miss kind, and findings good and bad."""
+    return [
+        "not json at all",
+        '"a row that parses but is not an object"',
+        json.dumps({"kind": "review", "run": run_id, "findings": None}),
+        json.dumps({"kind": "review", "run": run_id, "started_at": "t1",
+                    "component": "pay", "findings": [
+                        "oops",
+                        {"id": "", "source": "agent", "disposition": "rejected",
+                         "severity": "low", "path": "a.py"},
+                        {"id": "F2", "disposition": "deferred"},
+                        {"id": "F3", "source": "human", "disposition": "acepted"},
+                        {"id": "F4", "source": "agent", "disposition": "accepted",
+                         "severity": "high", "path": "b.py", "line": 3},
+                        {"id": "F5", "source": "prepass", "disposition": "rejected",
+                         "severity": "medium", "path": "c.py"},
+                        {"id": "F5", "source": "prepass", "disposition": "deferred"},
+                        {"source": "graph", "disposition": "rejected"},
+                    ]}),
+        json.dumps({"kind": "review", "run": "other", "started_at": "t2",
+                    "findings": [{"id": "X", "source": "agent",
+                                  "disposition": "rejected"}]}),
+        json.dumps({"kind": "review", "started_at": "t3",
+                    "findings": [{"id": "Y", "source": "agent",
+                                  "disposition": "rejected"}]}),
+        json.dumps({"kind": "review-abandoned", "run": run_id, "started_at": "t4",
+                    "findings_so_far": 2}),
+        json.dumps({"kind": "reviewer", "run": run_id, "started_at": "t5",
+                    "findings": [{"id": "Z", "source": "agent",
+                                  "disposition": "rejected"}]}),
+    ]
+
+
+#: `review_corrections` over `every_review_shape()`, captured on `main` at
+#: "docs(backlog): file T714 (fixed on its branch, not merged) and T715 as
+#: Deferred", before the walker was shared. It must not move by a byte.
+CORRECTIONS_GOLDEN = (
+    [{"id": "review:t1:", "kind": "finding-rejected", "source": "agent",
+      "finding": "", "disposition": "rejected", "severity": "low", "path": "a.py",
+      "component": "pay", "by": ""},
+     {"id": "review:t1:F2", "kind": "finding-rejected", "source": "", "finding": "F2",
+      "disposition": "deferred", "severity": "", "path": "", "component": "pay",
+      "by": ""},
+     {"id": "review:t1:F5", "kind": "finding-rejected", "source": "prepass",
+      "finding": "F5", "disposition": "rejected", "severity": "medium",
+      "path": "c.py", "component": "pay", "by": ""},
+     {"id": "review:t1:F5", "kind": "finding-rejected", "source": "prepass",
+      "finding": "F5", "disposition": "deferred", "severity": "", "path": "",
+      "component": "pay", "by": ""},
+     {"id": "review:t1:?", "kind": "finding-rejected", "source": "graph",
+      "finding": "?", "disposition": "rejected", "severity": "", "path": "",
+      "component": "pay", "by": ""}],
+    {"sessions": 2, "findings": 7, "corrections": 5, "unreadable": 4})
+
+
+def test_review_corrections_does_not_move_while_it_shares_the_walker(repo):
+    """Characterisation: passes on main by construction, so it is proved by
+    mutation M6 - applying the stricter id rule to it turns it red. Compared as
+    the JSON bytes, key order included, so a reordered row is a change too."""
+    write_reviews(repo, *every_review_shape())
+    got = F.review_corrections(repo, "r-1")
+    assert json.dumps(got) == json.dumps(CORRECTIONS_GOLDEN)
+
+
+def test_review_dispositions_over_every_shape(repo):
+    write_reviews(repo, *every_review_shape())
+    rows, totals = F.review_dispositions(repo, "r-1")
+    assert rows == [
+        {"finding": "F4", "source": "agent", "disposition": "accepted"},
+        {"finding": "F5", "source": "prepass", "disposition": "rejected"},
+        {"finding": "F5", "source": "prepass", "disposition": "deferred"}]
+    # 2 damaged lines, a null `findings`, "oops", a blank id, a missing source,
+    # "acepted", a missing id.
+    assert totals == {"sessions": 2, "findings": 3, "unreadable": 8}
