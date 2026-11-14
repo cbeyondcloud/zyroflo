@@ -142,6 +142,19 @@ gates — when an approval is recorded; a profile that falls below either is ref
 `policy.yml`. An org-mandated stop belongs in `required_gates`, not in a project's own
 `extra_gates`, which that project can remove.
 
+**An org's review suppressions (T716).** `.sdlc/policy.yml` may also name
+`org_review_suppress`: exact finding ids (never patterns, never `(unnamed)`) the
+organisation has judged noise, read beside a project's own `review_suppress` and reported
+apart, as org-set (`org_suppressed`, `org_suppress_held` in the verdict, the loop record and
+the rendered iteration, only when the list is non-empty). It lives only in `policy.yml` —
+no profile key reads or un-suppresses it — and it never moves a gate: an entry silences an
+occurrence only when that occurrence's severity is legal and outside the run's *resolved*
+`block_on`, so an ungraded or blocking occurrence still fires and the verdict says why. Its
+strictness order is `budget_exempt`'s: a subset is at least as strict. The shipped
+`policy.yml` template does not carry it (a changed template would stage
+`.sdlc/policy.yml.new` on every existing install), and a harness older than T716 refuses a
+policy that does — upgrade the harness first.
+
 **The merge check follows the resolved gates.** Every approval stamps the run's resolved
 gates into its ledger entry, and CI's merge check requires **every hard gate the run
 reached** — not G4 alone — approved over bytes that have not moved. An `extra_gates` stop

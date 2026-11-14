@@ -130,6 +130,14 @@ POLICY_CONSTRAINTS = {
     # about". A whitespace-only rule sits in the constitution looking like a
     # wall, and `min_length` alone accepts "  ".
     "deny_commands": {"items": {"type": "string", "pattern": r"\S"}},
+    # T716: exact finding ids - not blank (every character the reader strips is
+    # padding, so `WHITESPACE`, as worktrees_root), not `(unnamed)`, and no glob
+    # character. No backslash, metrics_out's rule: `(` and `[` go in classes.
+    "org_review_suppress": {"items": {
+        "type": "string",
+        "pattern": (f"^(?![{WHITESPACE}]*$)"
+                    f"(?![{WHITESPACE}]*[(]unnamed[)][{WHITESPACE}]*$)"
+                    "[^*?[]*$")}},
     # "every branch would then be a legal push target, which is the opposite of
     # the rule".
     "push_branch_prefix": {"minLength": 1},
@@ -158,6 +166,22 @@ POLICY_CONSTRAINTS = {
     "worktrees_root": {"pattern": f"^(?![{WHITESPACE}])(?!(?:[^{WHITESPACE}]|"
                                   f"[{WHITESPACE}])*[{WHITESPACE}]$)(?!/)(?![A-Za-z]:)"
                                   r"(?!(.*/)?[.]{0,2}(/|$))"},
+}
+
+
+#: Policy keys the shipped template deliberately does NOT carry, and where each
+#: is taught instead. T716 left the template unchanged, as T712 did, because a
+#: changed template stages `.sdlc/policy.yml.new` on every existing install; a
+#: citation saying the key "is documented there" would point at nothing.
+POLICY_UNTAUGHT = {
+    "org_review_suppress": (
+        "Finding ids the organisation silences in review, beside a profile's "
+        "review_suppress - only where the occurrence's severity is legal and "
+        "outside the run's resolved block_on, so it never moves a gate. "
+        "Policy-only. Not carried by " + TEACHES["policy"] + ", deliberately (a "
+        "changed template would stage policy.yml.new on every existing install); "
+        "taught in sdlc/LIFECYCLE.md under Org floors, sdlc/stages/P6-review.md "
+        "and the comment beside tools/sdlc/policy.py DEFAULTS."),
 }
 
 
@@ -195,7 +219,7 @@ def policy_schema() -> dict:
                 prop["minimum"] = 0
         prop.update(POLICY_CONSTRAINTS.get(key, {}))
         prop["default"] = default
-        prop["description"] = _cites("policy", key)
+        prop["description"] = POLICY_UNTAUGHT.get(key) or _cites("policy", key)
         props[key] = prop
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

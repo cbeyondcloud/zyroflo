@@ -213,6 +213,25 @@ DEFAULTS: dict = {
     # store. The local ledger is untouched either way - this is about what leaves
     # the repository, not what the chain records.
     "identity": "email",
+    # T716: finding ids an ORGANISATION has judged noise, silenced in review
+    # beside the repository's own `review_suppress` (read together through
+    # `review.loop.suppress_of`, and reported apart as org-set). Exact ids, never
+    # patterns, and never `(unnamed)`. Two rules make it a constitution key at
+    # all, and both are the owner's sign-off on the design:
+    #   - POLICY-ONLY. No profile key reads it or un-suppresses an entry, so a
+    #     run cannot loosen review by editing the file that configures it; and
+    #     this file is in `protected_paths`, so a run cannot write it either.
+    #   - IT NEVER MOVES A GATE. An entry silences an occurrence only when that
+    #     occurrence carries a legal severity outside the run's RESOLVED
+    #     `block_on` (profile, regime and `block_on_floor` together). Ungraded,
+    #     or at a blocking severity, it still fires, and the verdict says why.
+    # So its strictness order is `budget_exempt`'s: a SUBSET is at least as
+    # strict (fewer names, less silenced), never `required_gates`' superset.
+    # Not in the shipped `sdlc_templates/policy.yml`, deliberately and as T712
+    # did: a changed template stages `.sdlc/policy.yml.new` on every existing
+    # install. A policy carrying it is refused by a harness older than T716, so
+    # upgrade the harness first.
+    "org_review_suppress": [],
 }
 
 #: Where the constitution may live, in the order the resolver looks. `sdlc/` is
@@ -590,6 +609,8 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                     isinstance(v, str) and v.strip() for v in value):
                 problems.append(f"{key} must be a list of names - empty means "
                                 f"no floor")
+    if "org_review_suppress" in doc:
+        problems += org_suppress_problems(doc["org_review_suppress"])
     if "require_conformance" in doc and doc["require_conformance"] not in (
             True, False, "true", "false"):
         problems.append(f"require_conformance: {doc['require_conformance']!r} - "
@@ -628,6 +649,42 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
         problems.append("push_branch_prefix is empty - every branch would then be a "
                         "legal push target, which is the opposite of the rule")
     return [f"{name}: {p}" for p in problems]
+
+
+#: What the review loop names a finding that carries no id. As an org-wide
+#: suppression it would silence every unnamed finding in every repository.
+UNNAMED_FINDING = "(unnamed)"
+
+#: Characters that make an entry LOOK like a pattern. Matching is exact, so a
+#: wildcard here would silence nothing while reading as if it silenced a family.
+GLOB_CHARACTERS = "*?["
+
+
+def org_suppress_problems(value) -> list[str]:
+    """Why `org_review_suppress` cannot be read, each entry by name (T716).
+
+    A list of exact finding ids. Blank, globbed or `(unnamed)` entries are
+    refused rather than skipped: each would sit in the constitution looking like
+    a decision. A duplicate is read once and not refused, as `review_suppress`.
+    """
+    if not isinstance(value, list):
+        return ["org_review_suppress must be a list of finding ids - empty means "
+                "the organisation silences nothing"]
+    problems = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            problems.append(f"org_review_suppress: {entry!r} is blank or not text - "
+                            f"an entry that names no finding silences nothing")
+        elif any(c in entry for c in GLOB_CHARACTERS):
+            problems.append(f"org_review_suppress: {entry!r} carries a glob "
+                            f"character ({' '.join(GLOB_CHARACTERS)}) - matching is "
+                            f"exact, so a pattern would only look like a wildcard; "
+                            f"name each finding id")
+        elif entry.strip() == UNNAMED_FINDING:
+            problems.append(f"org_review_suppress: {UNNAMED_FINDING!r} is the name "
+                            f"the review loop gives every finding with no id - as "
+                            f"an org-wide entry it would silence all of them")
+    return problems
 
 
 def worktrees_root_problem(value: str) -> str:

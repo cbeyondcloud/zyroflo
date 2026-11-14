@@ -117,6 +117,18 @@ class PolicyModel(BaseModel):
     metrics_out: StrictStr = ""
     # T452: how an export names people.
     identity: Literal["email", "hash"] = "email"
+    # T716: finding ids an organisation silences in review below block_on.
+    # Exact ids: non-blank, no glob character, never the loop's `(unnamed)`.
+    org_review_suppress: list[StrictStr] = []
+
+    @field_validator("org_review_suppress")
+    @classmethod
+    def _exact_named_ids(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if (not entry.strip() or any(c in entry for c in "*?[")
+                    or entry.strip() == "(unnamed)"):
+                raise ValueError("org_review_suppress names exact finding ids")
+        return v
 
     @field_validator("worktrees_root")
     @classmethod
@@ -164,6 +176,9 @@ ACCEPTED = [
     # whose NAME starts with two dots, which is not a climb.
     {"worktrees_root": "trees/nested"},
     {"worktrees_root": "..tricky"},
+    # T716: exact finding ids, a duplicate read once and not refused.
+    {"org_review_suppress": []},
+    {"org_review_suppress": ["py/lint", "SEC-1", "py/lint"]},
 ]
 
 #: Documents both validators must REJECT, each for the reason in its name.
@@ -203,6 +218,15 @@ REJECTED = {
     # comparisons made with the root - the wall's and `is_own_tree`'s.
     "a worktrees_root spelled with ./": {"worktrees_root": "./trees"},
     "a worktrees_root with a trailing slash": {"worktrees_root": "trees/"},
+    # T716: matching is exact, so a pattern only looks like a wildcard; and
+    # `(unnamed)` is the loop's placeholder for every finding with no id.
+    "org suppressions that are not a list": {"org_review_suppress": "py/lint"},
+    "a blank org suppression": {"org_review_suppress": ["py/lint", "  "]},
+    "an org suppression that is not text": {"org_review_suppress": [7]},
+    "an org suppression of (unnamed)": {"org_review_suppress": ["(unnamed)"]},
+    "a globbed org suppression": {"org_review_suppress": ["py/*"]},
+    "a ?-globbed org suppression": {"org_review_suppress": ["a?b"]},
+    "a [-globbed org suppression": {"org_review_suppress": ["rule[1]"]},
 }
 
 

@@ -459,14 +459,14 @@ def test_no_declaration_suppresses_nothing(repo):
     f = {"id": "noisy-rule", "severity": "critical", "disposition": "",
          "source": "agent"}
     assert len(LP.assess([f], ["critical"])["open"]) == 1
-    assert LP.suppress_of(repo) == []
+    assert list(LP.suppress_of(repo).repository) == []
 
 
 def test_the_loop_reads_the_declaration_from_the_profile(repo):
     p = repo / ".sdlc" / "profile.yml"
     p.write_text(p.read_text(encoding="utf-8")
                  + f'{L.SUPPRESS_KEY}: ["noisy-rule"]\n', encoding="utf-8")
-    assert LP.suppress_of(repo) == ["noisy-rule"]
+    assert list(LP.suppress_of(repo).repository) == ["noisy-rule"]
 
 
 # ── the audit ───────────────────────────────────────────────────────────────
@@ -1173,7 +1173,7 @@ def test_the_real_readers_answer_correctly_about_a_rendered_profile(
 
     assert PL.profile_list(tmp_path, "review_suppress") == ["a", "b", value]
     assert PL.profile_list(tmp_path, "phases") == ["implementation"]
-    assert LP.suppress_of(tmp_path) == ["a", "b", value]
+    assert list(LP.suppress_of(tmp_path).repository) == ["a", "b", value]
     limits = PL.profile_limits(tmp_path)
     assert not any("cross-check" in line or "PyYAML" in line
                    for line in limits), limits
@@ -1219,13 +1219,15 @@ def test_a_quoted_rule_somebody_wrote_by_hand_survives_an_unrelated_rule(
     profile = tmp_path / ".sdlc" / "profile.yml"
     profile.write_text(hand, encoding="utf-8", newline="\n")
     quoted = 'semgrep: use of "eval"'
-    assert LP.suppress_of(tmp_path) == [quoted], "the premise: it reads clean"
+    assert list(LP.suppress_of(tmp_path).repository) == [quoted], \
+        "the premise: it reads clean"
     assert PL.profile_limits(tmp_path) == []
 
     after = L.render(hand, "review_suppress", ["py/lint"])
     profile.write_text(after, encoding="utf-8", newline="\n")
 
-    assert LP.suppress_of(tmp_path) == [quoted, "py/lint"], after
+    assert list(LP.suppress_of(tmp_path).repository) == [quoted, "py/lint"], \
+        after
     assert PL.profile_limits(tmp_path) == [], after
     assert yaml.safe_load(after)["review_suppress"] == [quoted, "py/lint"]
 

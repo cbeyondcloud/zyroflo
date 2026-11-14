@@ -618,7 +618,10 @@ def unbacked(target: Path) -> list[str]:
     """
     from tools.review import loop as review
 
-    declared = review.suppress_of(Path(target))
+    # The repository's entries only (T716): an org-set entry lives in
+    # `policy.yml`, which a run cannot write, and was never learned here, so
+    # calling it "written by hand" would be false. `--audit` names it apart.
+    declared = review.suppress_of(Path(target)).repository
     rows = history(Path(target))
     backed = {row.get("finding") for row in rows
               if row.get("action") == "applied"
@@ -628,6 +631,14 @@ def unbacked(target: Path) -> list[str]:
             f"it passed neither the corpus check nor a gate. That may be "
             f"deliberate; it should not be invisible"
             for name in declared if name not in backed]
+
+
+def org_entries(target: Path) -> tuple[str, ...]:
+    """`policy.yml`'s `org_review_suppress` entries, through the loop's one
+    reader (T716). Not judged by `unbacked`: they are not this repository's."""
+    from tools.review import loop as review
+
+    return review.suppress_of(Path(target)).org
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -659,6 +670,12 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"  !! {line}")
         if not owed:
             print(f"every {SUPPRESS_KEY} entry is accounted for in {LOG}")
+        org_set = org_entries(target)
+        if org_set:
+            # Informational, and the exit code is unchanged: these were set by
+            # the organisation in the protected constitution, not learned here.
+            print(f"  {len(org_set)} org-set entr(ies) in policy.yml - set by the "
+                  f"organisation, not learned here: {', '.join(org_set)}")
         return 1 if owed else 0
 
     if args.history:

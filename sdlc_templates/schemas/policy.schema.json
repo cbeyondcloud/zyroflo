@@ -135,6 +135,15 @@
       "pattern": "^(?!/)(?![A-Za-z]:)(?!(.*/)?[.][.](/|$))",
       "type": "string"
     },
+    "org_review_suppress": {
+      "default": [],
+      "description": "Finding ids the organisation silences in review, beside a profile's review_suppress - only where the occurrence's severity is legal and outside the run's resolved block_on, so it never moves a gate. Policy-only. Not carried by sdlc_templates/policy.yml, deliberately (a changed template would stage policy.yml.new on every existing install); taught in sdlc/LIFECYCLE.md under Org floors, sdlc/stages/P6-review.md and the comment beside tools/sdlc/policy.py DEFAULTS.",
+      "items": {
+        "pattern": "^(?![\t\n\u000b\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000]*$)(?![\t\n\u000b\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000]*[(]unnamed[)][\t\n\u000b\f\r\u001c\u001d\u001e\u001f \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000]*$)[^*?[]*$",
+        "type": "string"
+      },
+      "type": "array"
+    },
     "protected_paths": {
       "default": [
         ".env",

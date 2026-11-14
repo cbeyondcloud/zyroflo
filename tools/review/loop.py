@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,6 +101,36 @@ REJECTED_UNGRADED = "rejected-ungraded"
 #: One home per name; the import graph decides which module gets to be it.
 LOOP_RECORD = _contract.LOOP_RECORD
 DEFAULT_CAP = 5
+
+
+#: Why an occurrence an org-set entry named was NOT silenced (T716). Named once
+#: so `assess` (the writer) and `render` (the reader) cannot drift on them.
+ORG_HELD_BLOCKING = ("its severity is in block_on - an org-set suppression never "
+                     "silences a finding the gate weighs")
+ORG_HELD_UNGRADED = ("it carries no severity, so it has not been shown to be "
+                     "outside block_on - grade it")
+ORG_HELD_ILLEGAL = ("its severity is not one the loop can read, so it has not been "
+                    "shown to be outside block_on")
+
+
+@dataclass(frozen=True)
+class Suppressions:
+    """The two suppression lists a review is judged under, kept APART (T716).
+
+    `repository` is the profile's own `review_suppress`, learned or written
+    here, and it silences at any severity. `org` is `policy.yml`'s
+    `org_review_suppress`, and it silences an occurrence only below the run's
+    resolved `block_on` (`assess` decides, per occurrence).
+
+    Deliberately NOT iterable: a caller that treats this as the old list would
+    merge the two and silence an org-set entry at a blocking severity - the
+    one thing the org list must never do - so it fails loudly with TypeError
+    instead. The union is made in one place, inside `assess`.
+    """
+    repository: tuple[str, ...] = ()
+    org: tuple[str, ...] = ()
+
+    __iter__ = None  # iter(), list(), `in` and unpacking all raise TypeError
 
 
 class LoopError(RuntimeError):
@@ -359,13 +390,23 @@ def from_session(session: dict | None) -> list[dict]:
 
 
 def assess(findings: list[dict], block_on: list[str],
-           suppress: list[str] | None = None) -> dict:
+           suppress: Suppressions | list[str] | None = None) -> dict:
     """Which findings hold the loop open, and why — categorically.
 
     Deliberately takes no score. `review_threshold` is reported for continuity
     and can never move this verdict, and the cheapest way to guarantee that is
     for the function that decides to be unable to see it.
+
+    `suppress` is a `Suppressions`, or a plain list meaning the repository's
+    own entries only. An org-set entry (T716) can change what the verdict
+    REPORTS and never whether the loop may exit: the keys `org_suppressed` and
+    `org_suppress_held` appear only when the org list is non-empty, so an
+    absent or empty one leaves every byte of the verdict as it was.
     """
+    if isinstance(suppress, Suppressions):
+        repository, org_list = suppress.repository, suppress.org
+    else:
+        repository, org_list = suppress or [], ()
     if not block_on:
         raise LoopError(
             "block_on is empty, so nothing can hold the loop open - that is not a "
@@ -384,10 +425,14 @@ def assess(findings: list[dict], block_on: list[str],
     # everything else, because a suppressed finding is one somebody has already
     # decided about; and COUNTED rather than dropped, because a loop that
     # quietly stops reporting is the failure this project treats as worst.
-    silenced = {str(s).strip() for s in (suppress or []) if str(s).strip()}
+    silenced = {str(s).strip() for s in repository if str(s).strip()}
     suppressed = sorted({str(f.get("id", "")) for f in findings
                          if str(f.get("id", "")) in silenced})
     findings = [f for f in findings if str(f.get("id", "")) not in silenced]
+    # The organisation's list, minus what the repository's own list already
+    # silenced: an id in both is the repository's, and reported once, there.
+    org_named = {str(s).strip() for s in org_list if str(s).strip()}
+    org_ids = org_named - silenced
     # Pre-existing findings are CONTEXT, not the change's. prepass.py already
     # excludes them from its own summary.total and summary.by_severity — the gate
     # this loop decides must weigh them the same way or it contradicts the report
@@ -413,6 +458,42 @@ def assess(findings: list[dict], block_on: list[str],
                 f"never checked against a known set cannot be told from one "
                 f"misspelled or invented, so the loop refuses rather than letting "
                 f"it decide the gate")
+    # T716: the ORGANISATION's suppressions, judged per OCCURRENCE and only
+    # here - after the disposition check above (so a damaged disposition is
+    # refused exactly as it is without the list) and before the rejected split
+    # below. An id carries no severity and one id can be graded differently
+    # twice in one review, so the id alone cannot decide. An occurrence is
+    # silenced only when its severity is LEGAL and OUTSIDE the run's resolved
+    # `block_on` - the very rows the open-rows loop below would skip anyway, so
+    # silencing them moves `counts` and what is shown, never the gate.
+    #
+    # An illegal severity is kept, not refused here: the existing arms decide it
+    # exactly as they do without the list (`rank` raises for a live one; a
+    # rejected one is split out unread). Refusing it here would add a refusal
+    # the loop never gave. Pre-existing findings were split out above and are
+    # never filtered, for the same reason.
+    org_suppressed: set[str] = set()
+    org_held: list[dict] = []
+    if org_ids:
+        kept = []
+        for f in findings:
+            fid = str(f.get("id", ""))
+            if fid not in org_ids:
+                kept.append(f)
+                continue
+            if not f["severity"]:
+                why = ORG_HELD_UNGRADED
+            elif f["severity"] not in SEVERITIES:
+                why = ORG_HELD_ILLEGAL
+            elif f["severity"] in blocking:
+                why = ORG_HELD_BLOCKING
+            else:
+                org_suppressed.add(fid)
+                continue
+            org_held.append({"id": fid, "source": f["source"],
+                             "severity": f["severity"], "why": why})
+            kept.append(f)
+        findings = kept
     # A rejected finding is one somebody judged NOT REAL. It is RECORDED, never
     # dropped - the same principle the DECLARED-suppression comment above in this
     # function states: a loop that quietly stops reporting is the failure this
@@ -465,7 +546,7 @@ def assess(findings: list[dict], block_on: list[str],
     for f in pre_existing:
         key = f["severity"] or "(ungraded)"
         pre_counts[key] = pre_counts.get(key, 0) + 1
-    return {
+    verdict = {
         "suppressed": suppressed,
         "rejected": rejected,
         "block_on": sorted(blocking, key=rank),
@@ -476,6 +557,10 @@ def assess(findings: list[dict], block_on: list[str],
         "pre_existing": pre_existing,
         "pre_existing_counts": dict(sorted(pre_counts.items())),
     }
+    if org_named:
+        verdict["org_suppressed"] = sorted(org_suppressed)
+        verdict["org_suppress_held"] = org_held
+    return verdict
 
 
 def may_exit(verdict: dict) -> bool:
@@ -552,18 +637,29 @@ def block_on_of(target: Path) -> list[str]:
     return [str(s) for s in resolved["block_on"]]
 
 
-def suppress_of(target: Path) -> list[str]:
-    """Finding ids this repository has DECLARED it does not want reported.
+def suppress_of(target: Path) -> Suppressions:
+    """Finding ids this repository, and its organisation, DECLARED they do not
+    want reported - the one door, both lists, kept apart.
 
-    Written by `learning.py` when a human has rejected the same finding across
-    separate runs, and never by a run itself - `policy.yml` protects the audit
-    that records it. Absent means an empty list, never "suppress everything":
-    a profile that says nothing has declared nothing.
+    `repository`: the profile's `review_suppress`. Written by `learning.py`
+    when a human has rejected the same finding across separate runs, and never
+    by a run itself - `policy.yml` protects the audit that records it. Absent
+    means an empty list, never "suppress everything": a profile that says
+    nothing has declared nothing.
+
+    `org` (T716): `policy.yml`'s `org_review_suppress`, through `policy.load`,
+    the constitution's one parser and validator - never a second read of the
+    file, and NEVER from the profile, whatever key the profile carries. A
+    malformed list is a `PolicyError`, which the CLI answers with exit 2. A
+    duplicate is read once.
     """
     from tools.sdlc import learning
 
     got = guardrails.profile_list(target, learning.SUPPRESS_KEY)
-    return [str(v).strip() for v in got or [] if str(v).strip()]
+    repository = tuple(str(v).strip() for v in got or [] if str(v).strip())
+    named = guardrails.load(target)["org_review_suppress"]
+    org = tuple(dict.fromkeys(str(v).strip() for v in named if str(v).strip()))
+    return Suppressions(repository=repository, org=org)
 
 
 def iterate(target: Path, run_id: str, findings: list[dict],
@@ -596,6 +692,12 @@ def iterate(target: Path, run_id: str, findings: list[dict],
         "pre_existing_counts": verdict["pre_existing_counts"],
         "note": note,
     }
+    if "org_suppressed" in verdict:
+        # T716, only when the organisation's list is non-empty, so an absent or
+        # empty key leaves the committed record byte for byte as it was. What
+        # the organisation silenced, and what it named and the floor refused.
+        entry["org_suppressed"] = verdict["org_suppressed"]
+        entry["org_suppress_held"] = verdict["org_suppress_held"]
     if score is not None:
         # Reported for continuity across runs and providers. Nothing above reads
         # it; `assess` is not given it at all.
@@ -648,6 +750,18 @@ def render(result: dict) -> str:
         extra = f", {ungraded_n} of them ungraded" if ungraded_n else ""
         lines.append(f"rejected (judged not real, recorded not dropped): "
                      f"{len(verdict['rejected'])}{extra}")
+    if "org_suppressed" in verdict:
+        # T716: org-set reads as org-set, and a refusal by the floor is shown
+        # beside it. Printed only when the organisation's list is non-empty.
+        lines.append("silenced by the organisation's policy (org_review_suppress): "
+                     + (", ".join(verdict["org_suppressed"]) or "(none)"))
+        if verdict["org_suppress_held"]:
+            lines.append("org-set, still reported: " + ", ".join(
+                f"{h['id']} [{h['severity'] or 'ungraded'}]"
+                + ("" if h["why"] == ORG_HELD_BLOCKING else f" ({h['why']})")
+                for h in verdict["org_suppress_held"])
+                + " - an org-set suppression never silences a finding at a "
+                  "block_on severity, or one nobody has graded")
     if score := record["iterations"][-1].get("score_reported"):
         lines.append(f"rubric score: {score} - reported for continuity, never the gate")
     for reason in reasons(verdict):
