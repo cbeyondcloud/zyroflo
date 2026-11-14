@@ -133,8 +133,8 @@ stranger's repository quietly gaining a `.venv`.
    `block_on`, so it can change what the review reports and never whether the
    loop may exit — an ungraded or blocking occurrence still fires, listed as
    "org-set, still reported" with its reason. What they silenced is printed
-   apart ("silenced by the organisation's policy"), and `learning.py --audit`
-   names them as org-set, not as written by hand.
+   apart ("silenced by the organisation's policy"), and the learning loop's
+   audit names them as org-set, not as written by hand.
 
 8. **A `block_on` severity cannot be deferred.** Deferral is honest below the
    line and is a hole at or above it: fix it, or reject it as not real and say
