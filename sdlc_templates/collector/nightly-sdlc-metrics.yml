@@ -35,11 +35,11 @@ jobs:
         your-org/service-a
         your-org/service-b
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: your-org/sdlc-harness     # the harness clone the org runs
           path: harness
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - name: Export each repository's audit trail
         env:
           GH_TOKEN: ${{ secrets.METRICS_READ_TOKEN }}   # read-only, this job's own secret
@@ -58,7 +58,7 @@ jobs:
         run: |
           uv run --project harness python harness/tools/sdlc/metrics.py \
             --merge stores/*/audit.db --into org/audit.db
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sdlc-org-audit
           path: org/audit.db
