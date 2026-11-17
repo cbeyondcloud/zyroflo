@@ -186,7 +186,15 @@ def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path, 
     this module silently inherits the edit. Dropping its `check=True` leaves
     every other assertion here green while the guard starts reporting an empty
     repository as a clean one. So the refusal is asserted through the REAL
-    membership function, pointed at the same non-repository."""
+    membership function, pointed at the same non-repository.
+
+    T718: the non-repository is MADE one here, not assumed. pytest's temp root
+    can itself sit inside a repository (a home folder under git, on a developer
+    machine), and git walks up into it; the ceiling stops that walk at
+    `tmp_path`, so the fixture is a non-repository wherever the temp root is."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve().parent))
+    for name in ("GIT_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(name, raising=False)
     argv = ["git", "ls-files", "-z", "*.py"]
     proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)
     assert proc.returncode != 0, \
@@ -340,13 +348,18 @@ def test_graph_build_s_first_step_names_the_clean_build_verdict(tmp_path):
     """T639 (this batch's approved scope asked for it, ground rule 3): step 1 sends a runner to
     `graph_status` to learn what the graph is, and listed what that answers - but not whether
     the build was clean, which it carries now, a crashed link pass among its problems. Held
-    against a real status result, as step 3's keys are."""
+    against a real status result, as step 3's keys are.
+
+    T718: the graph goes in the repository's OWN artifact directory, the one place
+    the builder lets a one-repo graph land. A sibling of the repository under
+    `tmp_path` is inside whatever repository holds pytest's temp root, if one
+    does, and the builder rightly refuses to write a graph there."""
     import tools.graph.build as B
     from tools.graph import mcp_server as M
     from tools.tests.test_provider_files import _fresh_single_repo
 
     repo = _fresh_single_repo(tmp_path)
-    out = tmp_path / "graph"
+    out = repo / B.OWN_ARTIFACT_DIR / "graph"
     assert B.main(["--target", str(repo), "--out", str(out), "--run-id", "fixed"]) == 0
     assert "clean_build" in M.GraphService(out).status()
     (step,) = [s for s in _steps(text_of("graph-build.md"))
