@@ -12,7 +12,7 @@
   <strong>100% free &amp; open source (MIT)</strong> — no third-party packages, no network, no API keys.<br>
   Product page → <a href="https://cbeyond.cloud/zyroflo" target="_blank" rel="noopener"><strong>cbeyond.cloud/zyroflo</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://youtu.be/XAS66vR6sXE" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
+  <a href="https://youtu.be/vG7y7SPL0AA" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
 </p>
 
 [![CI: runs locally](https://img.shields.io/badge/CI-runs_locally-blue.svg)](CONTRIBUTING.md#run-ci-before-you-ask-for-a-merge)
