@@ -36,11 +36,49 @@ the failure it was written to prevent, one level up.
 
 A red build reporting `1 skipped` and nothing else is a puzzle, and a puzzle standing between
 someone and a merge gets bypassed rather than investigated.
+
+## The temp root must be outside every repository (T719)
+
+This file also holds a second gate, of the same kind: a run that cannot be right should
+say so once, not fail in many places. The graph builder refuses to write a graph inside a
+repository it is not about, and tests that need a folder outside every repository make one
+under `tmp_path`. Both assume pytest's temp root is in no repository. On a machine whose
+home folder is itself a git repository it is not, and about 530 tests then failed, each
+looking like a defect of its own. So the first test that asks for a temp folder checks
+where the temp root is, using the builder's own test (`outdir.enclosing_repo`), so the two
+cannot disagree, and a temp root inside a repository ends the session with one message
+naming `--basetemp`. A test that never asks for a temp folder is not stopped.
 """
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
+
+import pytest
+
+from tools.graph.outdir import enclosing_repo
+
+
+def temp_root_refusal(basetemp: Path) -> str | None:
+    """Why this temp root cannot hold the suite's temp folders, or None if it can."""
+    repo = enclosing_repo(basetemp)
+    if repo is None:
+        return None
+    return (f"pytest's temp root {Path(basetemp).resolve()} is inside the git repository "
+            f"{repo}, so tests that build a graph or need a folder outside every repository "
+            f"would fail for that reason alone, each looking like a real defect (T719). Rerun "
+            f"with --basetemp naming a folder outside every repository, and create its parent "
+            f"first: pytest makes only the last level.")
+
+
+@pytest.fixture(scope="session")
+def tmp_path_factory(tmp_path_factory):
+    """pytest's own factory, checked first. `tmp_path` and `tmpdir` are built on it, so
+    this is the one place every temp folder passes through."""
+    if refusal := temp_root_refusal(tmp_path_factory.getbasetemp()):
+        pytest.exit(refusal, returncode=pytest.ExitCode.USAGE_ERROR)
+    return tmp_path_factory
 
 #: Set to "1" by a job running on a host expected to satisfy every precondition the suite has.
 FORBID_SKIPS_ENV = "SDLC_FORBID_SKIPS"

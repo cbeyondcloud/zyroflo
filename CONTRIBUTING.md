@@ -22,7 +22,10 @@ uv run pytest -q
 ```
 
 `uv sync` is exact: an extra left off is uninstalled. The suite's root is `tools/` - a narrower
-root silently skips suites. The graph tier's tests need Docker and Neo4j
+root silently skips suites. pytest's temp root must be outside every git repository; if yours is
+not (a home folder kept under git, say), the run stops at the first test that needs a temp folder
+and says so - pass `--basetemp` naming a folder outside every repository, its parent created
+first. The graph tier's tests need Docker and Neo4j
 (`docker compose -f docker-compose.neo4j.yml up -d`, with `NEO4J_PASSWORD` in `.env`).
 
 ## The rules a change is held to
