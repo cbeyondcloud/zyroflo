@@ -15,6 +15,10 @@
   <a href="https://youtu.be/vG7y7SPL0AA" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
 </p>
 
+<p align="center">
+  Running AI delivery across many teams, or under audit? <a href="#free-vs-enterprise"><strong>See what Zyroflo Enterprise adds</strong></a> (private preview).
+</p>
+
 [![CI: runs locally](https://img.shields.io/badge/CI-runs_locally-blue.svg)](CONTRIBUTING.md#run-ci-before-you-ask-for-a-merge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -224,7 +228,19 @@ The full phase list, the capability-degradation table, and the gate regimes are 
 
 **Everything in this repository is free and open source under MIT, and stays that way** - every phase and gate, the approval ledger and its CI check, the audit trail, metrics and dashboards, the graph tier and every connector. Nothing here is a trial of a paid edition, and nothing will be moved behind a paywall.
 
-Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and nothing here depends on it: the suite's [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) checks that no tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, nor `sdlc-init.py`, apart from that guard's own two files, imports the `enterprise` package, writes the path `enterprise/` or uses the quoted word `'enterprise'` as a path segment (Python prose writing `import enterprise` counts too), and that no private path is tracked here. For what it offers, and the design-partner programme, see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo).
+**What Zyroflo Enterprise adds** (private preview). The free harness governs delivery in your repo or workspace. Enterprise is for organisations that need to govern it across teams:
+
+| | Free (this repository) | Zyroflo Enterprise (private preview) |
+|---|---|---|
+| **Who approved it** | Every gate decision in a hash-chained ledger your CI verifies | Plus sign-in through your identity provider (SSO), and a tamper-evident witness of the approval record, kept outside your repository |
+| **Who does the work** | The lifecycle runs under your AI coding tool, or the runners you configure | Plus Zyroflo Agents: governed agent pipelines (analysis, design, development, code review, QA), including your own agents; team and regulated runs require an OS sandbox by default (macOS, Linux, WSL2) |
+| **Spend and control** | Your own tools, keys and providers | For Zyroflo Agents: per-run budgets you set that stop a run, model calls sent through one metering gateway, team monthly caps when that gateway is connected, and a kill switch |
+| **Across teams** | A repository or a multi-component workspace, with an offline roll-up of many repositories' metrics | A control plane with roles, dashboards and a cross-repository record of approvals |
+| **Getting better** | Your team improves its own pipeline | Plus Zyroflo Agents lessons proposed from your team's corrections; nothing is applied until a person approves it |
+
+Regulated or multi-team engineering organisation? We're looking for design partners: see [cbeyond.cloud/zyroflo](https://cbeyond.cloud/zyroflo/#editions).
+
+Cbeyond is building **Zyroflo Enterprise** on top of this engine. It imports the free modules and never forks them, and nothing here depends on it: the suite's [`tools/tests/test_open_core_split.py`](tools/tests/test_open_core_split.py) checks that no tracked file under `tools/`, `sdlc/` or `sdlc_templates/`, nor `sdlc-init.py`, apart from that guard's own two files, imports the `enterprise` package, writes the path `enterprise/` or uses the quoted word `'enterprise'` as a path segment (Python prose writing `import enterprise` counts too), and that no private path is tracked here.
 
 ## Multi-component workspaces
 
